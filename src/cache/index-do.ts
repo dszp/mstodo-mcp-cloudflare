@@ -1,0 +1,701 @@
+import { DurableObject } from "cloudflare:workers";
+import { TodoTaskListSchema, type TodoTask, type TodoTaskList } from "../graph/types";
+import {
+  loadTokens,
+  refreshTokens,
+  storeTokens,
+  tokensFromResponse,
+  REFRESH_SKEW_MS,
+  type StoredTokens,
+} from "../auth/microsoft";
+import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
+import { followToTerminal, type DeltaRow } from "../graph/delta";
+import { encodeCursor, decodeCursor } from "../util/cursor";
+import { log } from "../log";
+import {
+  SCHEMA_DDL,
+  TASK_COLUMNS,
+  taskToRow,
+  listToRow,
+  type TaskRow,
+  type ListRow,
+  type QueryFilter,
+  type SyncStatusReport,
+} from "./sql";
+import { loadListsConfig } from "../config/loader";
+import { shouldSkipSync } from "../config/sync-policy";
+
+// Phase 5 — TodoIndex: singleton Durable Object, the single source of truth for
+// Microsoft To Do state. SQLite `tasks` (+ `tasks_fts` FTS5 mirror) + `lists`
+// roster + `sync_state`. Addressed via idFromName(OWNER_DO_NAME) from the agent
+// and the Worker scheduled() heartbeat.
+//
+// Token refresh (Task 4) + resumable alarm-driven delta sync (Task 5) are in
+// place; the full query()/search() filter surface + keyset pagination land in
+// Task 6.
+
+// Precomputed UPSERT statement (all columns; update every non-key column on
+// task_id conflict). The AFTER INSERT/UPDATE triggers keep tasks_fts in sync.
+const UPSERT_TASK_SQL = (() => {
+  const cols = TASK_COLUMNS.join(", ");
+  const placeholders = TASK_COLUMNS.map(() => "?").join(", ");
+  const updates = TASK_COLUMNS.filter((c) => c !== "task_id")
+    .map((c) => `${c}=excluded.${c}`)
+    .join(", ");
+  return `INSERT INTO tasks (${cols}) VALUES (${placeholders}) ON CONFLICT(task_id) DO UPDATE SET ${updates}`;
+})();
+
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+
+// Delta sync budget (free-tier ceiling is 50 subrequests/request). The roster
+// is tiny so it gets its own small cap; task pages share MAX_PAGES_PER_CYCLE.
+// Worst case per cycle ≈ ROSTER_MAX_PAGES + MAX_PAGES_PER_CYCLE + 1 refresh = 41
+// subrequests, under the ceiling with headroom.
+const ROSTER_MAX_PAGES = 10;
+const MAX_PAGES_PER_CYCLE = 30;
+// While a baseline is still draining, re-arm quickly; otherwise wait the cron
+// cadence (DELTA_SYNC_INTERVAL_MIN).
+const MID_CYCLE_REARM_MS = 2_000;
+
+const LISTS_DELTA_URL = "https://graph.microsoft.com/v1.0/me/todo/lists/delta";
+const tasksDeltaUrl = (listId: string) =>
+  `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(listId)}/tasks/delta`;
+
+interface SyncStateRow {
+  resource: string;
+  delta_link: string | null;
+  next_link: string | null;
+  last_synced_at: number | null;
+  status: string | null;
+  last_error: string | null;
+}
+
+export class TodoIndex extends DurableObject<Env> implements TokenProvider {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // Schema bootstrap is idempotent (IF NOT EXISTS) and runs once per instance
+    // before any request is delivered. blockConcurrencyWhile is the documented
+    // place for schema setup.
+    ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.sql.exec(SCHEMA_DDL);
+    });
+  }
+
+  private get sql() {
+    return this.ctx.storage.sql;
+  }
+
+  // -- Token refresh (sole refresher; global single-flight) -----------------
+  // The singleton DO is the one place that POSTs /token, so two concurrent
+  // callers (an MCP tool + the sync loop) can't both spend the rotating
+  // refresh_token and invalidate each other. Single instance ⇒ one shared
+  // in-flight promise is sufficient; no DO storage lock needed.
+  #refreshInFlight: Promise<string> | null = null;
+
+  // Bumped by resetIdentity() on an owner switch. Captured at the start of each
+  // #refresh so a refresh that resolves AFTER the switch can detect it and refuse
+  // to persist the prior account's tokens over the new identity's (H4).
+  #identityGeneration = 0;
+
+  // Returns a valid access token, refreshing only if the stored one is within
+  // REFRESH_SKEW_MS of expiry. The agent already gates on freshness before
+  // delegating, but the DO re-checks so its own sync loop shares the same path.
+  async getAccessToken(): Promise<string> {
+    const stored = await loadTokens(this.env);
+    if (!stored) throw new Error("not_authenticated");
+    if (stored.expires_at > Date.now() + REFRESH_SKEW_MS) return stored.access_token;
+    return this.#refresh(stored);
+  }
+
+  // Forces a refresh regardless of current freshness (GraphClient 401 path).
+  async refreshToken(): Promise<string> {
+    const stored = await loadTokens(this.env);
+    if (!stored) throw new Error("not_authenticated");
+    return this.#refresh(stored);
+  }
+
+  // TokenProvider for the DO's own GraphClient (sync loop). forceRefresh() is
+  // the 401 hook; it routes through the same single-flight as refreshToken().
+  forceRefresh(): Promise<string> {
+    return this.refreshToken();
+  }
+
+  #refresh(prev: StoredTokens): Promise<string> {
+    if (this.#refreshInFlight) return this.#refreshInFlight;
+    // Snapshot the identity generation now (synchronously, before any await).
+    const gen = this.#identityGeneration;
+    this.#refreshInFlight = (async () => {
+      try {
+        const res = await refreshTokens(this.env, prev.refresh_token);
+        if (gen !== this.#identityGeneration) {
+          // The owner was switched while this refresh was in flight (resetIdentity
+          // bumped the generation). These tokens belong to the PRIOR account;
+          // writing them would clobber the new identity's tokens stored by the
+          // auth handler, leaving the new identity operating against the old
+          // account. Discard them and fail this caller — its Graph request errors
+          // and the sync loop retries next alarm under the new identity (H4).
+          throw new Error("identity_changed_during_refresh");
+        }
+        const next = tokensFromResponse(res, prev.refresh_token);
+        await storeTokens(this.env, next);
+        return next.access_token;
+      } finally {
+        this.#refreshInFlight = null;
+      }
+    })();
+    return this.#refreshInFlight;
+  }
+
+  // -- Task CRUD ------------------------------------------------------------
+  upsertTask(task: TodoTask, listId: string): void {
+    const row = taskToRow(task, listId);
+    this.sql.exec(UPSERT_TASK_SQL, ...TASK_COLUMNS.map((c) => row[c]));
+  }
+
+  deleteTask(taskId: string): void {
+    this.sql.exec("DELETE FROM tasks WHERE task_id = ?", taskId);
+  }
+
+  // Best-effort flag bump from a sub-resource mutation result (e.g. a checklist
+  // item was just added → has_checklist=1). No-op if the task isn't indexed yet
+  // (a later sync fills it in). Note: delta sync carries no expansions, so a
+  // mutation is the ONLY way has_checklist becomes 1 — see agent propagation.
+  setTaskFlags(
+    taskId: string,
+    patch: { has_checklist?: boolean; has_attachments?: boolean },
+  ): void {
+    const sets: string[] = [];
+    const params: number[] = [];
+    if (patch.has_checklist !== undefined) {
+      sets.push("has_checklist = ?");
+      params.push(patch.has_checklist ? 1 : 0);
+    }
+    if (patch.has_attachments !== undefined) {
+      sets.push("has_attachments = ?");
+      params.push(patch.has_attachments ? 1 : 0);
+    }
+    if (sets.length === 0) return;
+    this.sql.exec(`UPDATE tasks SET ${sets.join(", ")} WHERE task_id = ?`, ...params, taskId);
+  }
+
+  findListForTask(
+    taskId: string,
+  ): { list_id: string; display_name: string | null } | null {
+    const rows = this.sql
+      .exec<{ list_id: string; display_name: string | null }>(
+        `SELECT t.list_id, l.display_name
+           FROM tasks t LEFT JOIN lists l ON l.list_id = t.list_id
+          WHERE t.task_id = ?`,
+        taskId,
+      )
+      .toArray();
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  // -- List roster ----------------------------------------------------------
+  upsertList(list: TodoTaskList): void {
+    const r = listToRow(list);
+    this.sql.exec(
+      `INSERT INTO lists (list_id, display_name, wellknown, is_owner, is_shared)
+         VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(list_id) DO UPDATE SET
+         display_name=excluded.display_name, wellknown=excluded.wellknown,
+         is_owner=excluded.is_owner, is_shared=excluded.is_shared`,
+      r.list_id,
+      r.display_name,
+      r.wellknown,
+      r.is_owner,
+      r.is_shared,
+    );
+  }
+
+  deleteList(listId: string): void {
+    // Drop the list and its tasks (FTS rows cascade via the AFTER DELETE
+    // trigger as each task row is removed).
+    this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+    this.sql.exec("DELETE FROM lists WHERE list_id = ?", listId);
+    this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
+  }
+
+  // Roster reads — the `lists` table is the authoritative roster.
+  listLists(): ListRow[] {
+    return this.sql
+      .exec("SELECT * FROM lists ORDER BY display_name")
+      .toArray() as unknown as ListRow[];
+  }
+
+  getList(listId: string): ListRow | null {
+    const rows = this.sql
+      .exec("SELECT * FROM lists WHERE list_id = ?", listId)
+      .toArray() as unknown as ListRow[];
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  // True once at least one full baseline of this list's tasks reached a
+  // deltaLink — i.e. the DO holds the authoritative tail and reads can be served
+  // from it. A mid-cycle (next_link set, delta_link still null) baseline is NOT
+  // yet authoritative, so callers fall back to live Graph.
+  isListSynced(listId: string): boolean {
+    return !!this.#getSyncState(`tasks:${listId}`)?.delta_link;
+  }
+
+  // -- query / search -------------------------------------------------------
+  // Filtered task query with keyset pagination over (modified_at DESC,
+  // task_id DESC). All values are bound parameters (no interpolation). Date
+  // bounds naturally exclude rows where that date is NULL (e.g. a task with no
+  // due date never matches a due range). has_checklist=false means "no checklist
+  // OR unknown" since delta-sourced rows carry NULL (no expansion).
+  query(f: QueryFilter): { rows: TaskRow[]; next_cursor?: string } {
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (f.lists && f.lists.length > 0) {
+      where.push(`list_id IN (${f.lists.map(() => "?").join(", ")})`);
+      params.push(...f.lists);
+    }
+    if (f.status && f.status.length > 0) {
+      where.push(`status IN (${f.status.map(() => "?").join(", ")})`);
+      params.push(...f.status);
+    }
+    if (f.due_after !== undefined) {
+      where.push("due_at >= ?");
+      params.push(f.due_after);
+    }
+    if (f.due_before !== undefined) {
+      where.push("due_at <= ?");
+      params.push(f.due_before);
+    }
+    if (f.completed_after !== undefined) {
+      where.push("completed_at >= ?");
+      params.push(f.completed_after);
+    }
+    if (f.completed_before !== undefined) {
+      where.push("completed_at <= ?");
+      params.push(f.completed_before);
+    }
+    if (f.created_after !== undefined) {
+      where.push("created_at >= ?");
+      params.push(f.created_after);
+    }
+    if (f.importance !== undefined) {
+      where.push("importance = ?");
+      params.push(f.importance);
+    }
+    if (f.has_checklist !== undefined) {
+      where.push(
+        f.has_checklist ? "has_checklist = 1" : "(has_checklist = 0 OR has_checklist IS NULL)",
+      );
+    }
+
+    // Keyset cursor: rows strictly after the last returned row in the ordering.
+    // NULLs sort last (DESC), so the predicate branches on the cursor's
+    // modified_at — when non-NULL we must also pull in the whole NULL tail.
+    if (f.cursor) {
+      const c = decodeCursor(f.cursor);
+      if (c && c.modified_at === null) {
+        where.push("(modified_at IS NULL AND task_id < ?)");
+        params.push(c.task_id);
+      } else if (c) {
+        where.push(
+          "(modified_at < ? OR (modified_at = ? AND task_id < ?) OR modified_at IS NULL)",
+        );
+        params.push(c.modified_at as number, c.modified_at as number, c.task_id);
+      }
+      // Unparseable cursor: ignore (start from the top); the tool layer validates.
+    }
+
+    const limit = Math.min(f.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+    const sql = `SELECT * FROM tasks${
+      where.length ? ` WHERE ${where.join(" AND ")}` : ""
+    } ORDER BY modified_at DESC, task_id DESC LIMIT ?`;
+    // Cast: SqlStorageCursor rows are Record<string, SqlStorageValue>; our
+    // columns are exactly TaskRow's string|number|null fields.
+    const rows = this.sql.exec(sql, ...params, limit).toArray() as unknown as TaskRow[];
+
+    // A full page implies there may be more — hand back a resume cursor.
+    let next_cursor: string | undefined;
+    if (rows.length === limit && rows.length > 0) {
+      const last = rows[rows.length - 1];
+      next_cursor = encodeCursor({ modified_at: last.modified_at, task_id: last.task_id });
+    }
+    return { rows, next_cursor };
+  }
+
+  search(opts: {
+    query: string;
+    lists?: string[];
+    status?: string[];
+    limit?: number;
+  }): { rows: TaskRow[] } {
+    const where: string[] = ["tasks_fts MATCH ?"];
+    const params: (string | number)[] = [opts.query];
+    if (opts.lists && opts.lists.length > 0) {
+      where.push(`t.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
+      params.push(...opts.lists);
+    }
+    if (opts.status && opts.status.length > 0) {
+      where.push(`t.status IN (${opts.status.map(() => "?").join(", ")})`);
+      params.push(...opts.status);
+    }
+    const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+    const sql = `SELECT t.* FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
+                  WHERE ${where.join(" AND ")} ORDER BY rank LIMIT ?`;
+    const rows = this.sql.exec(sql, ...params, limit).toArray() as unknown as TaskRow[];
+    return { rows };
+  }
+
+  // -- Ops ------------------------------------------------------------------
+  // Read-only health probe (sync_status tool). Reports one row per resource —
+  // the roster ("lists") plus one per roster list ("tasks:{listId}") — built
+  // from the UNION of the `lists` table and `sync_state`, so a list that's in
+  // the roster but never task-synced still shows up as "baseline_pending"
+  // (exactly the state an operator watches drain during a fresh baseline).
+  // `mid_cycle` is the operational "has a resume cursor right now" flag, i.e.
+  // next_link != null (what the sync loop persists). `totals.all_idle` is the
+  // smoke discriminator: every resource idle AND no resume cursor outstanding.
+  async syncStatus(): Promise<{
+    resources: SyncStatusReport[];
+    totals: { tasks: number; lists: number; all_idle: boolean };
+  }> {
+    const cfg = await loadListsConfig(this.env);
+
+    const stateRows = this.sql
+      .exec("SELECT * FROM sync_state")
+      .toArray() as unknown as SyncStateRow[];
+    const stateByResource = new Map(stateRows.map((s) => [s.resource, s]));
+
+    const listRows = this.sql
+      .exec<{ list_id: string; wellknown: string | null }>("SELECT list_id, wellknown FROM lists")
+      .toArray();
+    const wellknownById = new Map(listRows.map((l) => [l.list_id, l.wellknown]));
+    const countRows = this.sql
+      .exec<{ list_id: string; n: number }>(
+        "SELECT list_id, COUNT(*) AS n FROM tasks GROUP BY list_id",
+      )
+      .toArray();
+    const countByList = new Map(countRows.map((c) => [c.list_id, Number(c.n)]));
+
+    const report = (resource: string, row_count: number): SyncStatusReport => {
+      // tasks:{listId} resources for skipped lists report sync_disabled so they
+      // don't sit at baseline_pending forever (which would break all_idle).
+      if (resource.startsWith("tasks:")) {
+        const listId = resource.slice("tasks:".length);
+        if (shouldSkipSync({ list_id: listId, wellknown: wellknownById.get(listId) ?? null }, cfg)) {
+          return {
+            resource,
+            status: "sync_disabled",
+            last_synced_at: null,
+            mid_cycle: false,
+            last_error: null,
+            row_count: 0,
+          };
+        }
+      }
+      const st = stateByResource.get(resource);
+      return {
+        resource,
+        status: st?.status ?? "baseline_pending",
+        last_synced_at: st?.last_synced_at ?? null,
+        mid_cycle: !!st?.next_link,
+        last_error: st?.last_error ?? null,
+        row_count,
+      };
+    };
+
+    const resources: SyncStatusReport[] = [report("lists", listRows.length)];
+
+    // Union of roster lists and any tasks:* state rows (defensive — a stale
+    // state row without a roster entry still surfaces).
+    const listIds = new Set<string>(listRows.map((l) => l.list_id));
+    for (const s of stateRows) {
+      if (s.resource.startsWith("tasks:")) listIds.add(s.resource.slice("tasks:".length));
+    }
+    for (const listId of [...listIds].sort()) {
+      resources.push(report(`tasks:${listId}`, countByList.get(listId) ?? 0));
+    }
+
+    const tasks = [...countByList.values()].reduce((a, b) => a + b, 0);
+    // Exclude sync_disabled resources from the drain discriminator: a skipped
+    // list is intentionally never idle-with-a-deltaLink, so counting it would
+    // keep all_idle false forever.
+    const all_idle = resources
+      .filter((r) => r.status !== "sync_disabled")
+      .every((r) => r.status === "idle" && !r.mid_cycle);
+    return { resources, totals: { tasks, lists: listRows.length, all_idle } };
+  }
+
+  // -- Sync (alarm-driven, resumable, budget-bounded) -----------------------
+
+  // Arm the alarm ~now if none is pending. Called by the cron heartbeat and on
+  // cold reads so a fresh index warms without waiting for the next cron tick.
+  async ensureSyncing(): Promise<void> {
+    const pending = await this.ctx.storage.getAlarm();
+    if (pending === null) await this.ctx.storage.setAlarm(Date.now() + 1);
+  }
+
+  // One sync cycle per alarm, then re-arm: soon if anything is still mid-cycle
+  // (baseline draining), else at the configured interval.
+  async alarm(): Promise<void> {
+    // Cold / never-authorized: nothing to sync. Don't re-arm — ensureSyncing()
+    // (cron heartbeat or a post-/authorize read) restarts the loop.
+    if (!(await loadTokens(this.env))) return;
+    const midCycle = await this.runSyncCycle();
+    const intervalMs = this.#intervalMs();
+    await this.ctx.storage.setAlarm(
+      Date.now() + (midCycle ? MID_CYCLE_REARM_MS : intervalMs),
+    );
+  }
+
+  // Force a re-baseline: drop rows + delta tokens (one list or everything) and
+  // arm the alarm now. Manual twin of the 410 path. Note: if the target list is
+  // skipped (no_sync / built-in flaggedEmails), the next cycle won't re-baseline
+  // it, so resync on a skipped list is effectively just a purge.
+  async resync(listId?: string): Promise<void> {
+    if (listId) {
+      this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+      this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
+    } else {
+      this.sql.exec("DELETE FROM tasks");
+      this.sql.exec("DELETE FROM sync_state"); // roster + every list re-baseline
+    }
+    await this.ctx.storage.setAlarm(Date.now() + 1);
+  }
+
+  // Hard identity reset: wipe ALL indexed state because the owning Microsoft
+  // account changed (auth handler detected a different /me.id). Drops every
+  // task (FTS mirror cascades via the AFTER DELETE trigger), the full `lists`
+  // roster, and every `sync_state` cursor, then cancels any pending alarm so a
+  // stale baseline for the previous identity can't run against the new account's
+  // tokens. The KV twin (tokens/identity) is cleared by
+  // auth/microsoft.ts wipeIdentityScopedState(), which also calls this.
+  //
+  // Does NOT re-arm: the new identity's tokens are stored right after the wipe,
+  // and the next cron heartbeat (or first cold read via the agent's warm path)
+  // calls ensureSyncing() to baseline fresh — exactly like a brand-new index.
+  // REVIEW (post-Phase 5): once more pieces land, revisit whether to kick an
+  // immediate ensureSyncing() after token storage for a prompter re-baseline,
+  // and whether multi-account keying changes this single-instance assumption.
+  async resetIdentity(): Promise<void> {
+    this.#identityGeneration++; // H4: invalidate any in-flight token refresh
+    this.#refreshInFlight = null;
+    this.sql.exec("DELETE FROM tasks"); // tasks_fts cascades via AFTER DELETE trigger
+    this.sql.exec("DELETE FROM lists");
+    this.sql.exec("DELETE FROM sync_state");
+    await this.ctx.storage.deleteAlarm();
+  }
+
+  // Run one budget-bounded cycle: roster first (drives which lists to sync),
+  // then per-list task delta. `maxTaskPages` bounds task pages only (the roster
+  // is small and gets ROSTER_MAX_PAGES). Returns true if any resource is still
+  // mid-cycle so the caller re-arms soon. Public so tests can drive it with a
+  // small budget; alarm() calls it with the default.
+  async runSyncCycle(maxTaskPages: number = MAX_PAGES_PER_CYCLE): Promise<boolean> {
+    let anyMidCycle = false;
+
+    // 1. Roster — upserts/deletes `lists`; a removed list purges its tasks too.
+    const roster = await this.#syncResource("lists", LISTS_DELTA_URL, ROSTER_MAX_PAGES);
+    anyMidCycle ||= roster.midCycle;
+
+    // Load the per-list sync policy once per cycle (a cheap KV read alongside the
+    // existing network I/O). Drives both the skip set and self-heal purge below.
+    const cfg = await loadListsConfig(this.env);
+    const rosterRows = this.listLists();
+    const skip = (listId: string): boolean =>
+      shouldSkipSync(
+        { list_id: listId, wellknown: rosterRows.find((l) => l.list_id === listId)?.wellknown ?? null },
+        cfg,
+      );
+
+    // 2. Self-heal: purge any indexed rows / sync_state left behind for a list
+    //    that is now skipped (added to no_sync, or flaggedEmails before this
+    //    deploy). Idempotent — guarded so steady-state cycles write nothing.
+    for (const l of rosterRows) {
+      if (skip(l.list_id)) this.#purgeSkippedList(l.list_id);
+    }
+
+    // 3. Per-list task delta, prioritizing unfinished work, skipping no_sync lists.
+    let remaining = maxTaskPages;
+    for (const listId of this.#listIdsByPriority()) {
+      if (skip(listId)) continue;
+      if (remaining <= 0) {
+        anyMidCycle = true;
+        break;
+      }
+      const r = await this.#syncResource(`tasks:${listId}`, tasksDeltaUrl(listId), remaining);
+      remaining -= r.pagesFetched;
+      anyMidCycle ||= r.midCycle;
+    }
+    return anyMidCycle;
+  }
+
+  // Drop a skipped list's indexed rows + task sync_state (FTS cascades via the
+  // AFTER DELETE trigger). The roster row is intentionally LEFT so the list
+  // still appears in list_lists and stays readable via the live-Graph cold
+  // fallback. Guarded so a steady-state skipped list costs zero row-writes.
+  #purgeSkippedList(listId: string): void {
+    const hasRows =
+      this.sql.exec("SELECT 1 FROM tasks WHERE list_id = ? LIMIT 1", listId).toArray().length > 0;
+    const hasState = !!this.#getSyncState(`tasks:${listId}`);
+    if (!hasRows && !hasState) return;
+    this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+    this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
+  }
+
+  // Sync one resource ('lists' or 'tasks:{listId}'): resume from next_link, else
+  // incremental from delta_link, else baseline. Apply all rows then advance
+  // sync_state in one synchronous (atomic) block so a crash mid-fetch replays
+  // idempotently from the unchanged cursor.
+  async #syncResource(
+    resource: string,
+    baselineUrl: string,
+    maxPages: number,
+  ): Promise<{ pagesFetched: number; midCycle: boolean }> {
+    const st = this.#getSyncState(resource);
+    const startUrl = st?.next_link ?? st?.delta_link ?? baselineUrl;
+    const isBaseline = !st?.next_link && !st?.delta_link;
+    const graph = new GraphClient(this);
+
+    try {
+      const res = await followToTerminal(graph, startUrl, Math.max(1, maxPages));
+      this.#applyRows(resource, res.rows);
+      if (res.deltaLink) {
+        this.#setSyncState(resource, {
+          delta_link: res.deltaLink,
+          next_link: null,
+          last_synced_at: Date.now(),
+          status: "idle",
+          last_error: null,
+        });
+      } else if (res.nextLink) {
+        this.#setSyncState(resource, {
+          next_link: res.nextLink,
+          status: isBaseline ? "baseline" : "syncing",
+        });
+      } else {
+        // Terminal with neither link (defensive): treat as caught up.
+        this.#setSyncState(resource, {
+          next_link: null,
+          status: "idle",
+          last_synced_at: Date.now(),
+        });
+      }
+      return { pagesFetched: res.pagesFetched, midCycle: !!res.nextLink };
+    } catch (e) {
+      if (e instanceof GraphError && e.status === 410) {
+        // Delta token expired (~30d). Purge the resource's rows and reset to
+        // baseline; the next cycle repopulates from the full collection.
+        log.warn("sync_410_rebaseline", { resource });
+        this.#purgeResource(resource);
+        this.#setSyncState(resource, {
+          delta_link: null,
+          next_link: null,
+          status: "baseline",
+          last_error: "410_gone",
+        });
+        return { pagesFetched: 1, midCycle: true };
+      }
+      if (e instanceof GraphError && (e.status === 429 || e.status === 503)) {
+        // Transient throttle / unavailable. GraphClient already honored
+        // Retry-After once; leave the cursor intact (NOT a hard error) and
+        // report mid-cycle so the alarm re-arms on the fast cadence and resumes
+        // promptly — effective backoff stays Retry-After-paced via GraphClient,
+        // instead of stalling a full DELTA_SYNC_INTERVAL_MIN. Common on the
+        // initial baseline of a large account.
+        log.warn("sync_throttled", { resource, status: e.status });
+        this.#setSyncState(resource, {
+          status: isBaseline ? "baseline" : "syncing",
+          last_error: `throttled_${e.status}`,
+        });
+        return { pagesFetched: 1, midCycle: true };
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      log.warn("sync_resource_error", { resource, error: msg });
+      this.#setSyncState(resource, { status: "error", last_error: msg });
+      return { pagesFetched: 1, midCycle: false }; // isolated; retried next cycle
+    }
+  }
+
+  #applyRows(resource: string, rows: DeltaRow[]): void {
+    if (resource === "lists") {
+      for (const row of rows) {
+        if (row.kind === "removed") this.deleteList(row.id);
+        else this.upsertList(TodoTaskListSchema.parse(row.task));
+      }
+      return;
+    }
+    const listId = resource.slice("tasks:".length);
+    for (const row of rows) {
+      if (row.kind === "removed") this.deleteTask(row.id);
+      else this.upsertTask(row.task, listId);
+    }
+  }
+
+  #purgeResource(resource: string): void {
+    if (resource === "lists") {
+      this.sql.exec("DELETE FROM tasks");
+      this.sql.exec("DELETE FROM lists");
+      this.sql.exec("DELETE FROM sync_state WHERE resource LIKE 'tasks:%'");
+      return;
+    }
+    const listId = resource.slice("tasks:".length);
+    this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+  }
+
+  #getSyncState(resource: string): SyncStateRow | null {
+    const rows = this.sql
+      .exec("SELECT * FROM sync_state WHERE resource = ?", resource)
+      .toArray() as unknown as SyncStateRow[];
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  #setSyncState(resource: string, patch: Partial<Omit<SyncStateRow, "resource">>): void {
+    const cur = this.#getSyncState(resource);
+    const next: SyncStateRow = {
+      resource,
+      delta_link: patch.delta_link !== undefined ? patch.delta_link : (cur?.delta_link ?? null),
+      next_link: patch.next_link !== undefined ? patch.next_link : (cur?.next_link ?? null),
+      last_synced_at:
+        patch.last_synced_at !== undefined ? patch.last_synced_at : (cur?.last_synced_at ?? null),
+      status: patch.status !== undefined ? patch.status : (cur?.status ?? null),
+      last_error: patch.last_error !== undefined ? patch.last_error : (cur?.last_error ?? null),
+    };
+    this.sql.exec(
+      `INSERT INTO sync_state (resource, delta_link, next_link, last_synced_at, status, last_error)
+         VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(resource) DO UPDATE SET
+         delta_link=excluded.delta_link, next_link=excluded.next_link,
+         last_synced_at=excluded.last_synced_at, status=excluded.status,
+         last_error=excluded.last_error`,
+      next.resource,
+      next.delta_link,
+      next.next_link,
+      next.last_synced_at,
+      next.status,
+      next.last_error,
+    );
+  }
+
+  // List ids ordered so the cycle spends budget on unfinished work first:
+  // mid-cycle resumes, then never-synced/baseline, then idle, then errored.
+  #listIdsByPriority(): string[] {
+    const lists = this.sql
+      .exec<{ list_id: string }>("SELECT list_id FROM lists")
+      .toArray();
+    const rank = (listId: string): number => {
+      const st = this.#getSyncState(`tasks:${listId}`);
+      if (!st || (!st.delta_link && !st.next_link)) return 1; // baseline needed
+      if (st.next_link) return 0; // resume
+      if (st.status === "error") return 3;
+      return 2; // idle
+    };
+    return lists
+      .map((l) => l.list_id)
+      .sort((a, b) => rank(a) - rank(b));
+  }
+
+  #intervalMs(): number {
+    const min = Number(this.env.DELTA_SYNC_INTERVAL_MIN);
+    return (Number.isFinite(min) && min > 0 ? min : 15) * 60_000;
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mstodo-mcp",
+
+  // Copy this file to `wrangler.jsonc` and fill in the account-specific values
+  // below. The real `wrangler.jsonc` is gitignored (it holds your account_id and
+  // KV namespace IDs). The test pool (vitest.config.ts) reads THIS example so
+  // `npm test` works on a fresh clone without secrets.
+  "account_id": "<your-cloudflare-account-id>",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Create your own namespaces and paste their IDs here (v4 syntax — no colon):
+  //   wrangler kv namespace create OAUTH_KV
+  //   wrangler kv namespace create TODO_CACHE
+  // The BINDING names must stay OAUTH_KV (workers-oauth-provider expects it) and
+  // TODO_CACHE (this project's code references it).
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV",   "id": "<your-oauth-kv-namespace-id>" },
+    { "binding": "TODO_CACHE", "id": "<your-todo-cache-namespace-id>" }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      // Per-session MCP agent (legacy binding name TODO_INDEX).
+      { "name": "TODO_INDEX", "class_name": "MSToDoMCP" },
+      // Singleton cross-list index DO (idFromName("owner")) — the single source
+      // of truth for tasks/roster/delta state.
+      { "name": "TODO_INDEX_DO", "class_name": "TodoIndex" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MSToDoMCP"] },
+    { "tag": "v2", "new_sqlite_classes": ["TodoIndex"] }
+  ],
+
+  // Heartbeat cron — Worker scheduled() re-arms the TodoIndex DO alarm if idle.
+  // The DO alarm itself re-arms on DELTA_SYNC_INTERVAL_MIN.
+  "triggers": { "crons": ["*/15 * * * *"] },
+
+  "vars": {
+    "TIMEZONE": "America/New_York",
+    "DELTA_SYNC_INTERVAL_MIN": "15",
+    "LIST_METADATA_SOFT_TTL_SEC": "900"
+  },
+
+  "observability": { "enabled": true }
+}

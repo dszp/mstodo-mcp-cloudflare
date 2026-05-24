@@ -1,0 +1,5 @@
+{
+  "_comment": "config:attachments example — upload via: wrangler kv:key put --binding=TODO_CACHE 'config:attachments' \"$(cat config-examples/attachments.json)\"",
+  "_comment2": "max_inline_bytes caps the raw (pre-base64) file size accepted by create_attachment. Hard ceiling is 3145728 (3072 KiB) — the confirmed Graph API limit. Lower this if you want to reject large uploads earlier.",
+  "max_inline_bytes": 3145728
+}

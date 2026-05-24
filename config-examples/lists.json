@@ -1,0 +1,49 @@
+{
+  "_comment": "config:lists example — upload via: wrangler kv key put --binding=TODO_CACHE --remote 'config:lists' \"$(cat config-examples/lists.json)\"",
+  "_comment2": "Replace <placeholders> with your own list-name fragments. Patterns are JS RegExp source strings matched case-insensitively (flag 'i') against display names after emoji are stripped. First match wins; unmatched lists are 'unclassified'.",
+  "patterns": [
+    {
+      "_comment": "--- todo: lists you actively work from ---",
+      "pattern": "^<your-inbox-list-name>$",
+      "flags": "i",
+      "type": "todo"
+    },
+    {
+      "pattern": "<your-project-prefix>-",
+      "flags": "i",
+      "type": "todo"
+    },
+    {
+      "pattern": "<your-team-list-suffix>$",
+      "flags": "i",
+      "type": "todo"
+    },
+    {
+      "_comment": "--- reference: idea buckets / collections you don't actively work from ---",
+      "pattern": "<your-reference-list-name>",
+      "flags": "i",
+      "type": "reference"
+    },
+    {
+      "_comment": "--- excluded: shared or archived lists you want kept out of queries ---",
+      "pattern": "^<shared-list-exact-name>$",
+      "flags": "i",
+      "type": "excluded"
+    },
+    {
+      "_comment": "The 'Flagged Emails' well-known list is a common excluded example (Outlook auto-populates it).",
+      "pattern": "^Flagged Emails$",
+      "flags": "i",
+      "type": "excluded"
+    }
+  ],
+  "_comment_aliases": "aliases maps short handles -> Graph list IDs (get IDs from the list_lists tool). Do NOT put comment keys inside the aliases object — every key becomes a real alias.",
+  "aliases": {
+    "inbox": "<graph-list-id-for-your-inbox>",
+    "team": "<graph-list-id-for-your-team-list>"
+  },
+  "_comment3": "no_sync excludes lists from delta sync (by wellknownListName OR Graph list ID). They stay listed + on-demand readable but are not indexed. flaggedEmails is skipped by DEFAULT regardless of this list.",
+  "no_sync": [],
+  "_comment4": "sync_flagged_emails: set true to index the (usually huge) flaggedEmails well-known list. Off by default to conserve the daily rows-written budget and keep full-text search clean.",
+  "sync_flagged_emails": false
+}

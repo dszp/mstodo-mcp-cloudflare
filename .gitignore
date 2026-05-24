@@ -1,0 +1,35 @@
+.vscode/
+.claude/local.settings.json
+n8n-workflows/
+
+# Local working copy of the canonical plan — owner reference only, never publish.
+PLAN.md
+
+# Per-session resume prompts — short notes to ourselves for cold-start continuation.
+RESUME.md
+
+# Secrets and per-instance env (the *.example variants ARE committed)
+.dev.vars
+.env
+.env.*
+
+# Real wrangler config holds account_id + KV namespace IDs (account-specific).
+# Copy wrangler.example.jsonc -> wrangler.jsonc and fill it in. Tests read the
+# example; deploys read the real (gitignored) file.
+wrangler.jsonc
+
+# Local snapshots of live KV config (real Autotask URL, real list IDs). The
+# sanitized templates in config-examples/ ARE committed; these real dumps aren't.
+config-live/
+
+# Wrangler-generated artifacts and dependencies
+node_modules/
+.wrangler/
+dist/
+worker-configuration.d.ts
+
+# Logs, scratch, OS noise
+*.log
+*.backup
+.DS_Store
+.claude/settings.local.json

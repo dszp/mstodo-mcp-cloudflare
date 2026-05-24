@@ -1,0 +1,42 @@
+{
+  "_comment": "config:link_rules example — upload via: wrangler kv:key put --binding=TODO_CACHE 'config:link_rules' \"$(cat config-examples/link-rules.json)\"",
+  "_comment2": "Each rule's 'pattern' is a JS RegExp source string. $1, $2, ... in templates refer to capture groups. Rules are applied in order; duplicates are deduped by URL after all rules run.",
+  "rules": [
+    {
+      "_comment": "Jira tickets: matches PROJ-1234 in title or body",
+      "id": "jira-ticket",
+      "pattern": "([A-Z]{2,10}-\\d+)",
+      "flags": "g",
+      "url_template": "https://your-org.atlassian.net/browse/$1",
+      "display_template": "Jira $1",
+      "application_name": "Jira",
+      "fields": "both",
+      "max_links_per_task": 5,
+      "enabled": true
+    },
+    {
+      "_comment": "GitHub issues: matches #123 or org/repo#123",
+      "id": "github-issue",
+      "pattern": "(?:([\\w-]+/[\\w-]+))?#(\\d+)",
+      "flags": "g",
+      "url_template": "https://github.com/your-org/your-repo/issues/$2",
+      "display_template": "GitHub #$2",
+      "application_name": "GitHub",
+      "fields": "title",
+      "max_links_per_task": 3,
+      "enabled": false
+    },
+    {
+      "_comment": "PSA/ticketing system with numeric IDs like T20240101.1234 — adjust pattern for your system",
+      "id": "psa-ticket",
+      "pattern": "(T\\d{8}\\.\\d{4}(?:\\.\\d{3})?)",
+      "flags": "g",
+      "url_template": "https://your-psa.example.com/tickets/$1",
+      "display_template": "Ticket $1",
+      "application_name": "PSA",
+      "fields": "both",
+      "max_links_per_task": 1,
+      "enabled": false
+    }
+  ]
+}

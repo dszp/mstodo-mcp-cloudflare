@@ -1,0 +1,15 @@
+# Copy this file to `.dev.vars` and fill in the values below.
+# `.dev.vars` is gitignored; this `.example` is committed as a shape reference.
+# These bindings are used by `wrangler dev` locally. For deploys, use
+# `wrangler secret put <NAME>` instead — secrets are encrypted by Cloudflare
+# and never appear in source.
+
+# Microsoft Entra app registration — Azure portal → App registrations → your app
+MS_TENANT_ID=
+MS_CLIENT_ID=
+MS_CLIENT_SECRET=
+
+# The mail or userPrincipalName of the Microsoft account whose To Do data this
+# server reads/writes. The /authorize default handler rejects any signed-in user
+# whose /me response doesn't match this value (case-insensitive).
+OWNER_EMAIL=

@@ -1,0 +1,234 @@
+# Deployment guide
+
+A step-by-step walkthrough for running your own `mstodo-mcp` instance, plus a
+troubleshooting section. For the feature/config reference and the MCP tool list,
+see [README.md](./README.md).
+
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [Microsoft Entra app registration](#microsoft-entra-app-registration)
+- [Steps](#steps)
+- [Optional: custom domain](#optional-custom-domain)
+- [Keeping sync cost down](#keeping-sync-cost-down)
+- [Troubleshooting](#troubleshooting)
+- [Local development](#local-development)
+- [Reset and teardown](#reset-and-teardown)
+
+## Prerequisites
+
+- **Node 18+** and **npm** (Wrangler 4 is pinned in `devDependencies`).
+- A **Cloudflare account**, logged in locally (`npx wrangler login`).
+- A **Microsoft Entra app registration** — walkthrough in [Microsoft Entra app
+  registration](#microsoft-entra-app-registration) below. You'll need four values:
+  `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `OWNER_EMAIL`.
+
+### A note on the Cloudflare plan (free vs Paid)
+
+The cross-list index is a **Durable Object backed by SQLite**, and the delta sync
+writes one row per task (plus an FTS row) as it indexes. Cloudflare's **free tier
+allows 100,000 Durable Object rows-written per day, account-wide**.
+
+- **Small accounts** (a few hundred tasks) generally stay well under that and can
+  run on the **free** plan.
+- **Large accounts** (tasks in the **thousands**) can exceed the daily limit during
+  a **full baseline** — the first sync after deploy, or a re-baseline triggered by
+  an expired delta token (~30 days) or a manual `resync`. A baseline writes roughly
+  `2 × (number of indexed tasks)` rows. Steady-state delta sync afterward is cheap.
+- The budget is **account-wide**, so other Workers/Durable Objects on the same
+  account (e.g. a second MCP server) share it.
+
+When the budget is exhausted, **every** MCP request fails — the OAuth layer itself
+writes a DO row per request, so it 500s before your tools even run.
+
+**Recommendation:** if your To Do account has more than ~1–2k tasks, or you run
+other DO-backed Workers on the same account, use the **Workers Paid** plan. You can
+also reduce write pressure on any plan — see [Keeping sync cost
+down](#keeping-sync-cost-down).
+
+## Microsoft Entra app registration
+
+The Worker talks to Microsoft Graph as a **confidential web app** using the
+authorization-code flow with PKCE (S256) plus a client secret. Register one app in
+the Microsoft Entra admin center (Azure portal → **App registrations** → **New
+registration**) and collect four values for the Worker's secrets.
+
+### 1. Create the registration
+
+- **Name:** anything (e.g. `mstodo-mcp`).
+- **Supported account types:** match the account you'll sign in with:
+  - A single work/school tenant → *Accounts in this organizational directory only* (single tenant). `MS_TENANT_ID` = the **Directory (tenant) ID** GUID.
+  - Personal Microsoft accounts / broad → use `common`, `organizations`, or `consumers` as `MS_TENANT_ID` and pick the matching account-types option.
+  - The `OWNER_EMAIL` gate restricts the server to one identity regardless of how broad this setting is.
+- **Redirect URI:** platform **Web** (not SPA — this is a confidential client). You
+  set the exact value after deploying, once you know your Worker domain (see
+  [step 6](#6-point-the-entra-redirect-uri-at-your-deployment)):
+  `https://<your-worker-domain>/auth/microsoft/callback`.
+
+### 2. API permissions
+
+Add these **Microsoft Graph → Delegated** permissions (they must equal the `SCOPES`
+constant in `src/auth/microsoft.ts`: `Tasks.ReadWrite offline_access User.Read`):
+
+| Permission | Why |
+|---|---|
+| `Tasks.ReadWrite` | Read and write the owner's To Do lists/tasks. |
+| `User.Read` | Read `/me` for the owner-identity gate. |
+| `offline_access` | Issue refresh tokens (long-lived background sync). |
+
+Grant admin consent if your tenant requires it for delegated permissions.
+
+### 3. Client secret
+
+**Certificates & secrets → New client secret →** copy the secret **Value** (shown
+only once) — this is `MS_CLIENT_SECRET`.
+
+### 4. The four secrets
+
+You'll put these in `.dev.vars` and push them in [step 4](#4-set-the-secrets):
+
+| Secret | Where it comes from |
+|---|---|
+| `MS_TENANT_ID` | Directory (tenant) ID GUID, or `common`/`organizations`/`consumers`. |
+| `MS_CLIENT_ID` | Application (client) ID on the registration's Overview. |
+| `MS_CLIENT_SECRET` | The client-secret **Value** from step 3. |
+| `OWNER_EMAIL` | The `mail` or `userPrincipalName` of the account allowed to use this server (case-insensitive; everyone else is rejected at `/authorize`). |
+
+Switching to a different Microsoft account later is just `OWNER_EMAIL` (re-push, then
+re-authorize — see [README → Reset](./README.md#reset)). Changing tenants means a new
+registration and all four values.
+
+## Steps
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/dszp/mstodo-mcp-cloudflare.git
+cd mstodo-mcp-cloudflare
+npm install
+```
+
+### 2. Create the two KV namespaces
+
+```bash
+npx wrangler kv namespace create OAUTH_KV
+npx wrangler kv namespace create TODO_CACHE
+```
+
+Each command prints an `id`. Keep both. The **binding names must stay exactly**
+`OAUTH_KV` (required by `workers-oauth-provider`) and `TODO_CACHE` (referenced by
+this project's code) — only the namespace *titles* are yours to choose.
+
+### 3. Configure Wrangler
+
+```bash
+cp wrangler.example.jsonc wrangler.jsonc
+```
+
+Edit `wrangler.jsonc` and fill in:
+- `account_id` — your Cloudflare account ID (Dashboard → Workers, or `npx wrangler whoami`).
+- the two `kv_namespaces[].id` values from step 2.
+
+`wrangler.jsonc` is **gitignored** (it holds account-specific IDs). The committed
+`wrangler.example.jsonc` is what the test pool and CI read, so `npm test` works
+without it.
+
+### 4. Set the secrets
+
+```bash
+cp .dev.vars.example .dev.vars
+# edit .dev.vars: MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, OWNER_EMAIL
+```
+
+`.dev.vars` is for local `wrangler dev`. Push the same values to the deployed
+Worker as encrypted secrets:
+
+```bash
+bash scripts/push-secrets.sh        # pushes every name from .dev.vars over stdin
+# or individually: npx wrangler secret put MS_CLIENT_SECRET
+```
+
+### 5. Deploy
+
+```bash
+npx wrangler deploy
+```
+
+Note the deployed URL (`https://mstodo-mcp.<your-subdomain>.workers.dev`) and the
+**Current Version ID** (your rollback reference).
+
+### 6. Point the Entra redirect URI at your deployment
+
+In the Entra app registration → **Authentication**, set the **Web** redirect URI to:
+
+```
+https://<your-worker-domain>/auth/microsoft/callback
+```
+
+It must match the deployed origin exactly. The OAuth entry point the Claude.ai
+connector uses is `https://<your-worker-domain>/authorize`.
+
+### 7. Connect from Claude.ai or your own AI MCP consumer
+
+Add a custom / remote MCP connector pointing at:
+
+```
+https://<your-worker-domain>/mcp
+```
+
+Complete the Microsoft sign-in. The signed-in account's `mail`/`userPrincipalName`
+**must match `OWNER_EMAIL`** (case-insensitive) or `/authorize` rejects it with 403.
+
+### 8. Verify
+
+In the connected client:
+- `whoami` → returns your Microsoft identity.
+- `sync_status` → watch it drain to `all_idle: true`. On a large account the first
+  baseline takes several cron cycles (the `*/15` cron re-arms the sync alarm; a
+  mid-cycle baseline re-arms every ~2s until caught up). `totals.tasks` climbs as
+  lists index.
+- `list_lists` / `query_tasks` → return data once the index warms.
+
+## Optional: custom domain
+
+Map a custom hostname to the Worker (Cloudflare dashboard → your Worker → Settings →
+Domains & Routes, or `routes`/`custom_domain` in `wrangler.jsonc`). Then **update the
+Entra redirect URI** (step 6) and the Claude.ai connector URL (step 7) to the custom
+hostname. You can keep the `workers.dev` URL enabled as a fallback.
+
+## Keeping sync cost down
+
+If you're near the free-tier DO write budget, two `config:lists` knobs reduce
+rows-written (full reference: [README → Configuration](./README.md#configuration)):
+
+- **`sync_flagged_emails: false`** (the default) leaves the usually-huge
+  `flaggedEmails` list unindexed.
+- **`no_sync`** excludes any other large list you don't query (still readable
+  on-demand via `list_tasks`): `set_list_config({ no_sync: ["<list id>"] })` — the
+  next sync purges its already-indexed rows once, then steady state is lighter.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| **403 at `/authorize`** ("not the owner") | The signed-in Microsoft account doesn't match `OWNER_EMAIL`. Re-check the secret (`npx wrangler secret list`), re-push, and re-authorize. Switching accounts = update `OWNER_EMAIL` first. |
+| **`SqlError: Exceeded allowed rows written in Durable Objects free tier`** (every call 500s) | The account's daily DO rows-written budget is exhausted (see [the plan note](#a-note-on-the-cloudflare-plan-free-vs-paid)). Upgrade to Workers Paid, or wait for the daily UTC reset, then reduce future cost via `sync_flagged_emails`/`no_sync`. |
+| **`sync_status` never reaches `all_idle`** | A large baseline is still draining (normal — let the cron run), or a resource shows `status: "error"` with a `last_error`. A `sync_disabled` resource is intentionally skipped (`no_sync` / default-skipped `flaggedEmails`) and excluded from `all_idle`. |
+| **Tools return empty right after deploy** | The index is still warming. `query_tasks`/`search_tasks` are empty until the first baseline lands; retry shortly or check `sync_status`. |
+| **Claude.ai can't reconnect after changes** | Clear the Claude.ai-side OAuth grants (DCR sessions) — see [README → Reset](./README.md#reset) — then re-add the connector. |
+| **Switched Microsoft accounts and data looks wiped** | Expected: the identity-change auto-wipe clears the prior account's index + tokens + aliases (see [README → Identity-change auto-wipe](./README.md#identity-change-auto-wipe-built-in)). The new account re-baselines on the next sync. |
+| **Local `tsc` errors about `Env` / bindings** | The binding types live in the gitignored, generated `worker-configuration.d.ts`. Run `npx wrangler types` (or `npx wrangler types -c wrangler.example.jsonc`) after any `wrangler.jsonc` change. |
+
+## Local development
+
+```bash
+npx wrangler types        # (re)generate worker-configuration.d.ts after config changes
+npx tsc --noEmit          # typecheck
+npm test                  # vitest (uses wrangler.example.jsonc; no secrets needed)
+npx wrangler dev          # local Worker using .dev.vars
+```
+
+## Reset and teardown
+
+See [README → Reset](./README.md#reset) for soft reset (re-auth), credential
+rotation, and full clean-slate teardown.
