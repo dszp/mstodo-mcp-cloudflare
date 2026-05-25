@@ -38,14 +38,15 @@ const TOTAL_BATCH_MAX_BYTES = 60 * 1024 * 1024;
 // name matching (Graph rejects duplicate names on the upload session anyway).
 const DEDUP_CONTENT_MAX_BYTES = 6 * 1024 * 1024;
 
-// When content-hashing a small upload, skip existing candidates whose Graph
-// `size` exceeds this — they're too large to be a match and not worth fetching.
-// NOTE: Graph's attachment `size` is the Exchange *storage* size (base64/MIME
-// overhead included), which is LARGER than the raw byte length and therefore
-// can't be compared directly to an uploaded file's byte length. A raw upload of
-// up to DEDUP_CONTENT_MAX_BYTES stores at roughly ≤ 1.4× that, so this cap keeps
-// real matches in range while bounding downloads.
-const DEDUP_FETCH_STORAGE_CAP = 9 * 1024 * 1024;
+// Graph's attachment `size` is the Exchange *storage* size — always ≥ the raw
+// byte length and, in practice, only modestly larger (≈1.1–1.33×). It can't be
+// compared for equality to an uploaded file's byte length, but it does bound the
+// search: a content-duplicate of our upload must have a storage size in a band
+// around the raw length. So when content-hashing a small upload we only fetch
+// candidates whose `size` lands in that band, skipping ones too small or large
+// to match. Bounds are generous (real ratios sit well inside) to avoid misses.
+const DEDUP_SIZE_BAND_LOW = 0.9;
+const DEDUP_SIZE_BAND_HIGH = 1.6;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -215,7 +216,7 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
   } catch (e) {
     log.warn("upload_dedup_list_failed", { task_id: scope.task_id, error: String(e) });
   }
-  log.info("upload_dedup_existing", { task_id: scope.task_id, count: existing.length });
+  log.debug("upload_dedup_existing", { task_id: scope.task_id, count: existing.length });
   const existingHashes = new Map<string, string>(); // attachment id -> sha256 (memoized)
   const batchHashes = new Map<string, string>(); // sha256 -> attachment id (already attached this batch)
 
@@ -238,7 +239,7 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
     // Exact duplicate? First an identical file earlier in this same batch, then
     // any same-size attachment already on the task (only same-size candidates can
     // match byte-for-byte, so we fetch+hash just those).
-    log.info("upload_dedup_file", {
+    log.debug("upload_dedup_file", {
       task_id: scope.task_id,
       name,
       size: bytes.byteLength,
@@ -263,8 +264,15 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
           }
           continue;
         }
-        // Bound downloads: a candidate this much larger can't match a small upload.
-        if (att.size > DEDUP_FETCH_STORAGE_CAP) continue;
+        // Bound downloads: only fetch candidates whose storage size sits in a
+        // plausible band around the uploaded raw length (Graph size is always a
+        // bit larger than raw); others can't be a content match.
+        if (
+          att.size < bytes.byteLength * DEDUP_SIZE_BAND_LOW ||
+          att.size > bytes.byteLength * DEDUP_SIZE_BAND_HIGH
+        ) {
+          continue;
+        }
         let h = existingHashes.get(att.id);
         if (h === undefined) {
           try {

@@ -38,9 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`create_attachment` tool** (inline base64 passed in the tool call). Real files can't
   practically travel through an MCP tool call (the model's per-call argument budget is a few KB),
   so all but trivial uploads failed before Graph was reached. Superseded by the web-upload flow
-  above. `list_attachments`, `get_attachment`, and `delete_attachment` are unchanged.
+  above. `list_attachments` and `get_attachment` are unchanged; the delete tool is renamed
+  (below).
 
 ### Changed
+- **Renamed the `delete_attachment` tool to `remove_attachment`** (same arguments and behavior).
 - **`config:attachments` `max_inline_bytes`** is now the web-upload inline-vs-session cutover
   (files at or below it attach inline, larger ones via a chunked upload-session) rather than a
   hard reject threshold.
