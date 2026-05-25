@@ -1592,6 +1592,34 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/attachments/${encodeURIComponent(attachment_id)}`;
           try {
             const attachment = await graph.getJson(url, AttachmentSchema);
+            // For an image, return a native MCP `image` content block so the
+            // client renders it inline — no base64-decode round-trip. The bytes
+            // are carried in the image block, so strip contentBytes from the JSON
+            // metadata block to avoid shipping the base64 through context twice.
+            const isImage =
+              attachment["@odata.type"] === "#microsoft.graph.taskFileAttachment" &&
+              typeof attachment.contentType === "string" &&
+              attachment.contentType.toLowerCase().startsWith("image/") &&
+              typeof attachment.contentBytes === "string" &&
+              attachment.contentBytes.length > 0;
+            if (isImage) {
+              const { contentBytes, ...metadata } = attachment as typeof attachment & {
+                contentBytes?: string;
+              };
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({ ok: true, list_id, task_id, attachment: metadata }),
+                  },
+                  {
+                    type: "image",
+                    data: contentBytes as string,
+                    mimeType: attachment.contentType as string,
+                  },
+                ],
+              };
+            }
             return {
               content: [
                 {

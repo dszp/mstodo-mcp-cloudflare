@@ -33,6 +33,12 @@ import {
 // the Worker doesn't buffer an unreasonable amount in memory.
 const TOTAL_BATCH_MAX_BYTES = 60 * 1024 * 1024;
 
+// Above this size, exact-content dedup would mean downloading the whole existing
+// attachment to hash it — impractical. Same-size candidates larger than this are
+// matched by name+size instead (Graph rejects duplicate names on the upload
+// session anyway). Smaller candidates are compared by SHA-256 of their bytes.
+const DEDUP_CONTENT_MAX_BYTES = 6 * 1024 * 1024;
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -201,6 +207,7 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
   } catch (e) {
     log.warn("upload_dedup_list_failed", { task_id: scope.task_id, error: String(e) });
   }
+  log.info("upload_dedup_existing", { task_id: scope.task_id, count: existing.length });
   const existingHashes = new Map<string, string>(); // attachment id -> sha256 (memoized)
   const batchHashes = new Map<string, string>(); // sha256 -> attachment id (already attached this batch)
 
@@ -227,11 +234,25 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
     if (dupId === null) {
       for (const att of existing) {
         if (att.size !== bytes.byteLength) continue;
+        // Exact-content match needs the existing bytes. For large attachments
+        // that download is impractical (e.g. a 20 MB .exe), so above a threshold
+        // fall back to name+size equality — which also matches Graph's own
+        // duplicate-name rejection on the upload-session path.
+        if (bytes.byteLength > DEDUP_CONTENT_MAX_BYTES) {
+          if (att.name && att.name === name) {
+            dupId = att.id;
+            break;
+          }
+          continue;
+        }
         let h = existingHashes.get(att.id);
         if (h === undefined) {
           try {
             const exBytes = await getAttachmentBytes(graph, scope.list_id, scope.task_id, att.id);
-            if (!exBytes) continue;
+            if (!exBytes) {
+              log.warn("upload_dedup_no_bytes", { task_id: scope.task_id, attachment_id: att.id });
+              continue;
+            }
             h = await sha256Hex(exBytes);
             existingHashes.set(att.id, h);
           } catch (e) {
