@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] – 2026-05-25
+
+### Added
+- **Microsoft To Do "My Day" support (opt-in)** via the undocumented Substrate endpoint
+  (`https://substrate.office.com/todob2/api/v1/`), which Microsoft Graph does not expose. Three
+  new MCP tools — `add_to_my_day`, `remove_from_my_day`, `list_my_day_tasks` — gated behind a new
+  `ENABLE_MY_DAY` var (default `"false"`; existing deployments are unaffected when off). Requires
+  the **Office 365 Exchange Online `Tasks.ReadWrite`** delegated permission added via the Entra
+  app **Manifest** (resource `00000002-0000-0ff1-ce00-000000000000`, scope GUID
+  `6b49b74d-642f-4417-a6b4-820576845707`) and a fresh `/authorize`. Empirically verified that a
+  third-party app with this delegated scope is sufficient — no `Todo-Internal.ReadWrite` or
+  first-party-client impersonation. See `DEPLOYMENT.md` → "My Day support".
+- **`SubstrateClient`** (`src/graph/substrate-client.ts`) — a thin client for the Exchange Online
+  resource (audience `https://outlook.office.com`). Holds no token logic: it asks the singleton
+  `TodoIndex` DO for a substrate access token, injects `Authorization` + `x-anchormailbox`
+  (`OID:{oid}@{tid}`, captured at OAuth callback from the access-token `tid` claim), and retries
+  once on `401`. Host-pinned to `substrate.office.com`. Tolerant response parsing (the collection
+  envelope varies across folders: `value`, `Value`, bare array, or absent).
+
 ### Changed
+- **Token refresh is now resource-aware while preserving the sole-refresher invariant.** The
+  `TodoIndex` DO mints both Graph (audience `graph.microsoft.com`) and Substrate (audience
+  `outlook.office.com`) access tokens from the one shared, rotating refresh token. Refreshes are
+  serialized on a single chain (only one `/token` call spends the rotating refresh token at a
+  time) and coalesced per-resource. The Substrate access token is cached in DO memory only; the
+  rotated refresh token is persisted back to `tokens:owner` without clobbering the Graph token.
+  When `ENABLE_MY_DAY=true`, `/authorize` widens to a single combined-consent screen covering both
+  resources.
 - **`config-examples/link-rules.json` updated to match the 0.2.1/0.2.2 engine.** Dropped the
   removed `max_links_per_task` field from every rule, added `external_id_template` (required for
   Microsoft To Do to render a link as a clickable row), and rewrote the header comments to
@@ -15,6 +42,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   post-run URL dedup). The generic `psa-ticket` example is now a concrete `autotask-ticket`
   example matching the live config's formatting, with the server zone genericized to
   `<your-zone>`.
+
+### Notes
+- Two findings from live testing corrected the original spec (`PLAN-MY-DAY.md`): **`PostponedDay`
+  is not cosmetic** — a task with `PostponedDay == today` is suppressed from My Day even with
+  `CommittedDay` set, so `add_to_my_day` clears it; and **`list_my_day_tasks` fans out
+  sequentially** because EXO's per-mailbox `MailboxConcurrency` cap rejects parallel per-folder
+  reads with `429 ApplicationThrottled` (the tool also honors `Retry-After` and skips/logs a
+  failing folder rather than aborting). `CommittedDay` is sent as a bare date computed in the
+  Worker's `TIMEZONE`; there is no timezone bug (the server stores it at UTC midnight and clients
+  render it on the correct local day). Runtime auto-disable: if the EXO scope isn't
+  consented/granted, the tools return `my_day_unavailable` (on `AADSTS65001`/`403`) instead of a
+  raw error, independent of the flag.
 
 ## [0.2.2] – 2026-05-25
 
