@@ -171,3 +171,61 @@ public handler, the `create_upload_link` tool shape):
 **Effort:** ~1–1.5 days, most of it portable from `obsidian-mcp-cloudflare`.
 Supersedes inline `create_attachment` for anything but trivial payloads; the
 inline path stays as a fast path for tiny files.
+
+## 9. Cross-server attachment transfer (`mint_download_link` + server-side pull)
+
+The inverse of §8's upload link: a **server-to-server signed-URL pull** so the AI
+can move an attachment from one MCP server to another (e.g. an MS To Do task →
+an Obsidian vault note) **without the bytes ever traversing the model's context**.
+This is the no-context, large-file path that complements `get_attachment`'s inline
+`image` block (good for small images, bad for multi-MB binaries).
+
+**Flow — the AI stays the orchestrator; no MCP-to-MCP auth.** Two tool calls, no
+shared credentials between servers beyond the capability URL itself:
+
+1. `MS To Do: mint_download_link(list?, task_id, attachment_id)` → returns
+   `{ download_url, filename, content_type, size, expires_at }`.
+2. `Obsidian: upload_attachment_url(url, target_note, filename)` (already exists) —
+   Obsidian fetches the URL **server-side** and stores it.
+3. Bytes flow `mstdo.scriptek.com → obsv.scriptek.com` directly; the model only
+   passes the opaque URL between the two calls.
+
+For the reverse direction: a symmetric `Obsidian: mint_download_link` plus an
+`MS To Do: ingest_from_url` server-pull that attaches via the Graph upload-session
+path. The existing `create_upload_link` tools remain the human/browser-driven
+version of the same pattern.
+
+**Mechanics — reuse the §8 capability token, reversed.** A public `/download`
+endpoint streams one attachment's bytes for a valid signed id; the scope in KV is
+`{ list_id, task_id, attachment_id }` instead of an upload destination. The bytes
+are fetched from Graph (`.../attachments/{id}/$value` or `contentBytes`) and
+streamed to the caller. `mint_download_link` returns the URL plus the file
+metadata it read at mint time.
+
+**Hard requirements (must ship with it):**
+- **TTL ≤ 5 minutes, single-use.** Burn the capability on first read so a URL that
+  lands in conversation history self-destructs. (Same KV single-use mechanism as §8.)
+- **URL allowlist on the *pull* side** — the single most important guardrail. The
+  ingesting server (Obsidian's `upload_attachment_url`, or a future
+  `ingest_from_url` here) must refuse to fetch from arbitrary hosts; maintain a
+  small host allowlist (`mstdo.scriptek.com` ↔ `obsv.scriptek.com`). Without it, a
+  prompt injection in any processed content could redirect bytes to an
+  attacker-controlled URL.
+- **Scope is one attachment**, read-only — not bearer access to anything else.
+- **Size cap enforced at the pull side**, not trusted from the source's headers.
+- **`filename` / `content_type` passed out-of-band** (from the mint tool's return),
+  not derived from the download response headers.
+- **Content-hash (SHA-256) dedup at the destination**, not filename — filename
+  collisions are noisy (see §8 / Graph's dup-name behavior).
+- **Idempotent writes** — fetch to temp, write atomically, return the final id; a
+  mid-stream failure leaves nothing partial.
+- **Audit log on both sides** — who minted, who fetched, when. AI-initiated
+  cross-server transfers warrant a paper trail.
+
+**Explicitly out of scope:** MCP-to-MCP authentication. The capability URL (scoped,
+single-use, ≤5 min) is the only thing shared between servers; the two servers never
+authenticate to each other. Keeps the auth surface minimal and the AI in control.
+
+**Effort:** ~0.5–1 day on the To Do side (mint tool + `/download` endpoint, both
+portable from the §8 capability/handler code); the destination `upload_attachment_url`
+already exists on the Obsidian side and mainly needs the host allowlist hardened.
