@@ -1822,7 +1822,8 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "set_link_rules",
       {
         description:
-          "Replace the link-rules configuration. Each rule's `pattern` is compiled as a JS RegExp and rejected if invalid. Overwrites the entire rules array — include all rules you want active.",
+          "Replace the link-rules configuration. Each rule's `pattern` is compiled as a JS RegExp and rejected if invalid. Overwrites the entire rules array — include all rules you want active. " +
+          "Microsoft To Do allows exactly one linked resource per task, so at most one is created per task: rules are evaluated in array order and the first match wins (rule order = priority). Existing links (including Outlook's built-in one) are never replaced.",
         inputSchema: {
           rules: z
             .array(LinkRuleSchema)
@@ -1868,7 +1869,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "extract_links",
       {
         description:
-          "Apply link rules to an existing task and create linked resources for any matches not already present. dry_run: true surfaces matches without writing — use for backfill preview. Existing linked resources whose webUrl matches a rule result are skipped to prevent duplicates.",
+          "Apply link rules to an existing task and create a linked resource for the first matching rule. dry_run: true surfaces matches without writing — use for backfill preview. Microsoft To Do allows exactly one linked resource per task, so if the task already has any linked resource the match is reported in `skipped` (reason `todo_one_linked_resource_per_task`) and nothing is changed — existing links are never replaced.",
         inputSchema: {
           list: z
             .string()
@@ -1927,21 +1928,20 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             };
           }
 
-          // Dedup against URLs already on the task to prevent duplicates.
-          const existingUrls = new Set<string>(
-            (task.linkedResources ?? [])
-              .map((r) => r.webUrl)
-              .filter((u): u is string => typeof u === "string"),
-          );
+          // Microsoft To Do allows exactly one linked resource per task. If the
+          // task already carries any linked resource (a prior rule link, a
+          // manual one, or Outlook's built-in "Open in Outlook"), skip rather
+          // than attempt — we never clobber an existing link.
+          let hasLink = (task.linkedResources ?? []).length > 0;
 
           const lrBaseUrl = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/linkedResources`;
           const created: LinkRuleMatch[] = [];
-          const skipped: LinkRuleMatch[] = [];
+          const skipped: Array<{ match: LinkRuleMatch; reason: string }> = [];
           const failed: Array<{ match: LinkRuleMatch; error: string }> = [];
 
           for (const match of matches) {
-            if (existingUrls.has(match.url)) {
-              skipped.push(match);
+            if (hasLink) {
+              skipped.push({ match, reason: "todo_one_linked_resource_per_task" });
               continue;
             }
             try {
@@ -1956,9 +1956,26 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                 LinkedResourceSchema,
               );
               created.push(match);
-              existingUrls.add(match.url);
+              hasLink = true;
             } catch (e) {
-              const error = e instanceof Error ? e.message : String(e);
+              // Defense-in-depth: a concurrent writer may have added a link
+              // since we counted. Graph signals the per-task limit with
+              // innerError `LinkedResourceSizeExceeded` — treat as skip, not fail.
+              if (
+                e instanceof GraphError &&
+                getGraphInnerErrorCode(e.detail) === "LinkedResourceSizeExceeded"
+              ) {
+                skipped.push({ match, reason: "todo_one_linked_resource_per_task" });
+                continue;
+              }
+              const error =
+                e instanceof GraphError
+                  ? e.detail
+                    ? `${e.message}: ${e.detail}`
+                    : e.message
+                  : e instanceof Error
+                    ? e.message
+                    : String(e);
               failed.push({ match, error });
               log.warn("extract_links_create_failed", {
                 rule_id: match.rule_id,
@@ -2875,10 +2892,12 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     return this.#index().refreshToken();
   }
 
-  // Run link rules against a task and POST any matches as linked resources.
-  // Deduplicates against URLs already on the task (pass a task fetched with
-  // $expand=linkedResources to activate dedup; for new tasks linkedResources
-  // is undefined and the Set is empty, which is correct).
+  // Run link rules against a task and POST the single match (if any) as a
+  // linked resource. Microsoft To Do allows exactly one linked resource per
+  // task, so this creates at most one and skips (never clobbers) if the task
+  // already carries one. Pass a task fetched with $expand=linkedResources so
+  // the existing-link check is accurate; for a freshly created task
+  // linkedResources is undefined, which correctly counts as zero.
   // Non-fatal: creation failures are logged and returned in `failed`.
   private async applyLinkRules(
     graph: GraphClient,
@@ -2886,27 +2905,28 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     task: TodoTask,
   ): Promise<{
     created: LinkRuleMatch[];
+    skipped: Array<{ match: LinkRuleMatch; reason: string }>;
     failed: Array<{ match: LinkRuleMatch; error: string }>;
   }> {
     const config = await loadLinkRules(this.env);
-    if (config.rules.filter((r) => r.enabled).length === 0) return { created: [], failed: [] };
+    if (config.rules.filter((r) => r.enabled).length === 0)
+      return { created: [], skipped: [], failed: [] };
 
     const matches = runLinkRules(config, task);
-    if (matches.length === 0) return { created: [], failed: [] };
+    if (matches.length === 0) return { created: [], skipped: [], failed: [] };
 
-    // Seed with existing linked resource URLs to prevent duplicates.
-    const existingUrls = new Set<string>(
-      (task.linkedResources ?? [])
-        .map((r) => r.webUrl)
-        .filter((u): u is string => typeof u === "string"),
-    );
+    let hasLink = (task.linkedResources ?? []).length > 0;
 
     const created: LinkRuleMatch[] = [];
+    const skipped: Array<{ match: LinkRuleMatch; reason: string }> = [];
     const failed: Array<{ match: LinkRuleMatch; error: string }> = [];
     const baseUrl = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task.id)}/linkedResources`;
 
     for (const match of matches) {
-      if (existingUrls.has(match.url)) continue; // already present — skip
+      if (hasLink) {
+        skipped.push({ match, reason: "todo_one_linked_resource_per_task" });
+        continue;
+      }
       try {
         await graph.postJson(
           baseUrl,
@@ -2919,14 +2939,30 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           LinkedResourceSchema,
         );
         created.push(match);
-        existingUrls.add(match.url);
+        hasLink = true;
       } catch (e) {
-        const error = e instanceof Error ? e.message : String(e);
+        // Defense-in-depth: Graph signals the per-task limit with innerError
+        // `LinkedResourceSizeExceeded` — treat as skip, not fail.
+        if (
+          e instanceof GraphError &&
+          getGraphInnerErrorCode(e.detail) === "LinkedResourceSizeExceeded"
+        ) {
+          skipped.push({ match, reason: "todo_one_linked_resource_per_task" });
+          continue;
+        }
+        const error =
+          e instanceof GraphError
+            ? e.detail
+              ? `${e.message}: ${e.detail}`
+              : e.message
+            : e instanceof Error
+              ? e.message
+              : String(e);
         failed.push({ match, error });
         log.warn("link_rules_create_failed", { rule_id: match.rule_id, url: match.url, error });
       }
     }
 
-    return { created, failed };
+    return { created, skipped, failed };
   }
 }

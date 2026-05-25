@@ -17,18 +17,23 @@ function applyTemplate(template: string, match: RegExpMatchArray): string {
   return template.replace(/\$(\d+)/g, (_, n: string) => match[Number(n)] ?? "");
 }
 
-// Run all enabled link rules against a task's fields. Returns the set of
-// linked resources to create, deduped by URL across all rules.
+// Run enabled link rules against a task's fields and return the single linked
+// resource to create, or [] if nothing matches.
+//
+// Microsoft To Do allows exactly ONE linked resource per task, so this returns
+// at most one match: rules are evaluated in array order and the FIRST rule that
+// matches wins (rule order is the priority). Within a rule, title is matched
+// before body. The return type stays an array (length 0 or 1) so callers can
+// iterate uniformly.
 //
 // Pure function — no I/O. Caller is responsible for loading LinkRulesConfig
-// via loadLinkRules() and for writing the returned matches as linked resources.
+// via loadLinkRules(), for skipping tasks that already carry a linked resource,
+// and for writing the returned match as a linked resource.
 export function runLinkRules(
   config: LinkRulesConfig,
   task: { title?: string; body?: { content?: string | null } },
 ): LinkRuleMatch[] {
   const deadline = Date.now() + BUDGET_MS;
-  const seenUrls = new Set<string>(); // cross-rule URL dedup
-  const results: LinkRuleMatch[] = [];
 
   const title = task.title ?? "";
   // Truncate body at BODY_CAP_BYTES before matching to bound worst-case regex work.
@@ -39,12 +44,10 @@ export function runLinkRules(
     if (!rule.enabled) continue;
     if (Date.now() >= deadline) break; // budget exhausted — skip remaining rules
 
-    // Ensure the global flag is set so matchAll() iterates through all matches.
-    // Preserve user flags; don't double-add 'g'.
-    const flags = rule.flags.includes("g") ? rule.flags : `${rule.flags}g`;
     let regex: RegExp;
     try {
-      regex = new RegExp(rule.pattern, flags);
+      // No 'g' flag: we only need the first match (with capture groups) per field.
+      regex = new RegExp(rule.pattern, rule.flags.replace(/g/g, ""));
     } catch {
       // Invalid pattern shouldn't survive set_link_rules validation, but skip
       // gracefully rather than crashing the whole engine if one slips through.
@@ -56,39 +59,36 @@ export function runLinkRules(
       : rule.fields === "body" ? [body]
       : [title, body]; // "both" — title first, then body
 
-    let ruleCount = 0; // tracks matches produced by this rule across all fields
+    for (const text of texts) {
+      const m = text.match(regex);
+      if (!m) continue;
 
-    outer: for (const text of texts) {
-      for (const m of text.matchAll(regex)) {
-        if (Date.now() >= deadline) break outer;
-        if (ruleCount >= rule.max_links_per_task) break;
+      const url = applyTemplate(rule.url_template, m);
+      if (!url) continue;
 
-        const url = applyTemplate(rule.url_template, m);
-        if (!url || seenUrls.has(url)) continue;
+      const displayName = rule.display_template
+        ? applyTemplate(rule.display_template, m)
+        : m[0]; // default: the matched text itself
 
-        const displayName = rule.display_template
-          ? applyTemplate(rule.display_template, m)
-          : m[0]; // default: the matched text itself
+      // externalId is what makes the To Do client render the linked resource
+      // as a clickable row. Default to the matched text (same fallback as
+      // displayName) so every rule-created link renders unless overridden.
+      const externalId = rule.external_id_template
+        ? applyTemplate(rule.external_id_template, m)
+        : m[0];
 
-        // externalId is what makes the To Do client render the linked resource
-        // as a clickable row. Default to the matched text (same fallback as
-        // displayName) so every rule-created link renders unless overridden.
-        const externalId = rule.external_id_template
-          ? applyTemplate(rule.external_id_template, m)
-          : m[0];
-
-        seenUrls.add(url);
-        results.push({
+      // First match wins — return immediately (one linked resource per task).
+      return [
+        {
           url,
           displayName,
           externalId,
           applicationName: rule.application_name,
           rule_id: rule.id,
-        });
-        ruleCount++;
-      }
+        },
+      ];
     }
   }
 
-  return results;
+  return [];
 }

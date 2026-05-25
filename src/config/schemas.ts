@@ -4,20 +4,27 @@ import { z } from "zod";
 //
 // Each rule matches a regex against a task's title (and optionally body), then
 // creates a linked resource on the task using the substituted URL and display
-// name. Rules are applied in order; duplicates are deduped by URL after all
-// rules run.
+// name.
+//
+// IMPORTANT — Microsoft To Do allows exactly ONE linked resource per task
+// (Graph rejects a second with HTTP 400 "Linked Resource already exists" /
+// innerError `LinkedResourceSizeExceeded`). Consequently the engine creates at
+// most one linked resource per task: rules are evaluated in array order and the
+// FIRST rule that matches wins — rule order is the priority. If the task
+// already carries any linked resource (a prior rule link, a manually-added one,
+// or Outlook's built-in "Open in Outlook" on flagged-email tasks), the engine
+// skips rather than replacing it.
 //
 // Field constraints (enforced at set_link_rules write time):
 //   - `pattern` must compile as a valid JS RegExp.
 //   - `url_template`, `display_template`, and `external_id_template` use
 //     $1, $2, ... for capture groups.
-//   - `max_links_per_task` caps how many linked resources one rule may produce
-//     on a single task (dedup runs after this cap).
 //   - `fields` controls which task text is matched: "title" | "body" | "both".
-//     Defaults to "title" when omitted.
+//     Defaults to "title" when omitted. Within a rule, title is matched before
+//     body.
 
 export const LinkRuleSchema = z.object({
-  id: z.string().min(1).describe("Stable identifier for the rule (used for dedup and logging)."),
+  id: z.string().min(1).describe("Stable identifier for the rule (used for logging)."),
   pattern: z.string().min(1).describe("JavaScript RegExp source string (no delimiters)."),
   flags: z.string().default("").describe("RegExp flags (e.g. 'i' for case-insensitive)."),
   url_template: z
@@ -42,14 +49,7 @@ export const LinkRuleSchema = z.object({
   fields: z
     .enum(["title", "body", "both"])
     .default("title")
-    .describe("Which task field(s) to match the pattern against."),
-  max_links_per_task: z
-    .number()
-    .int()
-    .min(1)
-    .max(25)
-    .default(5)
-    .describe("Maximum linked resources this rule may produce per task (before dedup)."),
+    .describe("Which task field(s) to match the pattern against. Title is matched before body."),
   enabled: z.boolean().default(true).describe("Set false to disable without deleting the rule."),
 });
 export type LinkRule = z.infer<typeof LinkRuleSchema>;
