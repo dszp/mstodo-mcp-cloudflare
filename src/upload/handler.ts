@@ -230,6 +230,17 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
     // Exact duplicate? First an identical file earlier in this same batch, then
     // any same-size attachment already on the task (only same-size candidates can
     // match byte-for-byte, so we fetch+hash just those).
+    const sameSize = existing.filter((e) => e.size === bytes.byteLength);
+    log.info("upload_dedup_file", {
+      task_id: scope.task_id,
+      name,
+      size: bytes.byteLength,
+      hash: hash.slice(0, 16),
+      existing_count: existing.length,
+      same_size_count: sameSize.length,
+      same_size_ids: sameSize.map((e) => e.id.slice(-12)),
+    });
+
     let dupId: string | null = batchHashes.get(hash) ?? null;
     if (dupId === null) {
       for (const att of existing) {
@@ -255,6 +266,13 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
             }
             h = await sha256Hex(exBytes);
             existingHashes.set(att.id, h);
+            log.info("upload_dedup_candidate", {
+              task_id: scope.task_id,
+              attachment_id: att.id.slice(-12),
+              ex_size: exBytes.byteLength,
+              ex_hash: h.slice(0, 16),
+              matches: h === hash,
+            });
           } catch (e) {
             log.warn("upload_dedup_fetch_failed", {
               task_id: scope.task_id,
