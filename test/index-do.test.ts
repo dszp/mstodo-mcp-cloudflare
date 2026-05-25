@@ -326,9 +326,15 @@ describe("TodoIndex substrate (My Day) token mint", () => {
     vi.stubGlobal("fetch", spy);
     const stub = indexStub("sub-noconsent");
 
-    await expect(stub.getSubstrateAccessToken()).rejects.toThrow("my_day_unavailable");
-    // Latched in memory — the next call short-circuits without another /token.
-    await expect(stub.getSubstrateAccessToken()).rejects.toThrow("my_day_unavailable");
+    // Assert the rejections IN-CONTEXT (not over the RPC stub): a rejecting DO
+    // method awaited across the stub boundary leaves the promise unobserved on
+    // the DO side, which workerd reports as an unhandled rejection (fails the
+    // run). Same reason the H4 generation-guard test uses runInDurableObject.
+    await runInDurableObject(stub, async (inst: TodoIndex) => {
+      await expect(inst.getSubstrateAccessToken()).rejects.toThrow("my_day_unavailable");
+      // Latched in memory — the next call short-circuits without another /token.
+      await expect(inst.getSubstrateAccessToken()).rejects.toThrow("my_day_unavailable");
+    });
     expect(spy).toHaveBeenCalledTimes(1);
   });
 });
