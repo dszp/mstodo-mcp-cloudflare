@@ -1947,7 +1947,12 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             try {
               await graph.postJson(
                 lrBaseUrl,
-                { applicationName: match.applicationName, displayName: match.displayName, webUrl: match.url },
+                {
+                  applicationName: match.applicationName,
+                  displayName: match.displayName,
+                  externalId: match.externalId,
+                  webUrl: match.url,
+                },
                 LinkedResourceSchema,
               );
               created.push(match);
@@ -2905,7 +2910,12 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       try {
         await graph.postJson(
           baseUrl,
-          { applicationName: match.applicationName, displayName: match.displayName, webUrl: match.url },
+          {
+            applicationName: match.applicationName,
+            displayName: match.displayName,
+            externalId: match.externalId,
+            webUrl: match.url,
+          },
           LinkedResourceSchema,
         );
         created.push(match);
