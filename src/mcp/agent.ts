@@ -237,7 +237,7 @@ function getGraphInnerErrorCode(detail: string | undefined): string | undefined 
 }
 
 export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvider {
-  server = new McpServer({ name: "mstodo-mcp", version: "0.2.0" });
+  server = new McpServer({ name: "mstodo-mcp", version: "0.3.0" });
 
   async init() {
     this.server.registerTool(
