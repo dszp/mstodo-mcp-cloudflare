@@ -1747,10 +1747,10 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     );
 
     this.server.registerTool(
-      "delete_attachment",
+      "remove_attachment",
       {
         description:
-          "Delete an attachment from a task. Invalidates the list's task cache.",
+          "Remove an attachment from a task. Invalidates the list's task cache.",
         inputSchema: {
           list: z.string().min(1).optional().describe("List alias (from get_list_config), display name, or Graph list ID."),
           task_id: z.string().min(1).describe("Microsoft Graph task id."),
@@ -1761,7 +1761,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         },
       },
       async ({ list, task_id, attachment_id }): Promise<McpResponse> =>
-        this.withGraph("delete_attachment", async (graph) => {
+        this.withGraph("remove_attachment", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
           if (!list_id) {
             return errResponse("list_required", {

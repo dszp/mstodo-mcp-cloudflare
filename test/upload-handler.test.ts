@@ -140,16 +140,18 @@ describe("handleUpload attach flow", () => {
   });
 
   it("skips a content-duplicate even when Graph's size differs from the raw length", async () => {
-    // Regression: Graph reports `size` as the Exchange *storage* size, not the
-    // raw byte length, so the list `size` (here 99) does NOT equal the uploaded
-    // file's byte length (2). Dedup must still match by content hash.
-    const existingBytes = "hi"; // 2 raw bytes
+    // Regression: Graph reports `size` as the Exchange *storage* size (a bit
+    // larger than raw), so it does NOT equal the uploaded file's byte length.
+    // Here raw = 200 bytes, Graph size = 224 (1.12×, within the dedup size band).
+    // Dedup must match by content hash despite size != byteLength.
+    const existingBytes = "x".repeat(200); // 200 raw bytes
+    const storageSize = 224; // Exchange storage size, ~1.12× raw
     installFetch((c) => {
       if (c.url.endsWith("/attachments") && c.method === "GET") {
         return Response.json(
           {
             value: [
-              { "@odata.type": "#microsoft.graph.taskFileAttachment", id: "E1", name: "a.txt", size: 99 },
+              { "@odata.type": "#microsoft.graph.taskFileAttachment", id: "E1", name: "a.txt", size: storageSize },
             ],
           },
           { status: 200 },
@@ -161,7 +163,7 @@ describe("handleUpload attach flow", () => {
             "@odata.type": "#microsoft.graph.taskFileAttachment",
             id: "E1",
             name: "a.txt",
-            size: 99,
+            size: storageSize,
             contentBytes: btoa(existingBytes),
           },
           { status: 200 },

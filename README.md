@@ -51,7 +51,7 @@ The server exposes a Microsoft To Do tool surface over MCP. Highlights:
   `delete_task`, `move_task`.
 - **Sub-resources** — checklist items and linked resources
   (create/list/get/update/delete each); attachments (`list_attachments`,
-  `get_attachment`, `delete_attachment`).
+  `get_attachment`, `remove_attachment`).
 - **Attachment upload** — `create_upload_link` mints a short-lived, single-use
   web link the user opens in a browser to attach file(s) to a specific task. The
   bytes go browser → Worker → Microsoft (≤ 25 MB each, inline or chunked
