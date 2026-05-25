@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] – 2026-05-25
+
+### Fixed
+- **Link-rule linked resources now render as clickable rows in Microsoft To Do.** The client
+  only renders a `linkedResource` when it carries an `externalId`; rule-created links omitted
+  the field, so e.g. Autotask ticket links never appeared in the client despite a valid `webUrl`
+  (they showed for n8n-created tasks, which set `externalId`). Both write paths — the
+  `extract_links` tool and the automatic run after `create_task`/`update_task` — now send
+  `externalId` on every linked resource.
+
+### Added
+- **`external_id_template`** field on link rules (uses `$1`, `$2`, … capture groups like
+  `url_template` and `display_template`). When omitted, `externalId` defaults to the matched
+  text — the same fallback as `display_template` — so every rule-created link renders without
+  requiring per-rule opt-in.
+
 ## [0.2.0] – 2026-05-24
 
 ### Added

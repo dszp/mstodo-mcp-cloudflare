@@ -7,6 +7,7 @@ const BUDGET_MS = 50; // total wall-clock budget across all rules per call
 export interface LinkRuleMatch {
   url: string;
   displayName: string;
+  externalId: string;
   applicationName: string;
   rule_id: string;
 }
@@ -69,8 +70,21 @@ export function runLinkRules(
           ? applyTemplate(rule.display_template, m)
           : m[0]; // default: the matched text itself
 
+        // externalId is what makes the To Do client render the linked resource
+        // as a clickable row. Default to the matched text (same fallback as
+        // displayName) so every rule-created link renders unless overridden.
+        const externalId = rule.external_id_template
+          ? applyTemplate(rule.external_id_template, m)
+          : m[0];
+
         seenUrls.add(url);
-        results.push({ url, displayName, applicationName: rule.application_name, rule_id: rule.id });
+        results.push({
+          url,
+          displayName,
+          externalId,
+          applicationName: rule.application_name,
+          rule_id: rule.id,
+        });
         ruleCount++;
       }
     }

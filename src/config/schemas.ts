@@ -9,7 +9,8 @@ import { z } from "zod";
 //
 // Field constraints (enforced at set_link_rules write time):
 //   - `pattern` must compile as a valid JS RegExp.
-//   - `url_template` and `display_template` use $1, $2, ... for capture groups.
+//   - `url_template`, `display_template`, and `external_id_template` use
+//     $1, $2, ... for capture groups.
 //   - `max_links_per_task` caps how many linked resources one rule may produce
 //     on a single task (dedup runs after this cap).
 //   - `fields` controls which task text is matched: "title" | "body" | "both".
@@ -27,6 +28,13 @@ export const LinkRuleSchema = z.object({
     .string()
     .optional()
     .describe("Display name template. Defaults to the matched text when omitted."),
+  external_id_template: z
+    .string()
+    .optional()
+    .describe(
+      "externalId template. Use $1, $2, … for capture groups. Defaults to the matched text when omitted. " +
+        "Microsoft To Do requires a linked resource to carry an externalId before it renders the link as a clickable row in the client.",
+    ),
   application_name: z
     .string()
     .default("link-rules-engine")
