@@ -47,8 +47,10 @@ ${bodyHtml}
 }
 
 export interface UploadPageOptions {
-  /** The destination task id (shown so the user can confirm). */
-  taskId?: string;
+  /** Human-readable task title, shown so the user can confirm the destination. */
+  taskTitle?: string;
+  /** Human-readable list name the task belongs to. */
+  listName?: string;
   /** When set, the link stores the file under this exact name (single file). */
   filename?: string;
   /** Batch link — accept multiple files up to maxFiles. */
@@ -76,11 +78,13 @@ export function renderUploadPage(opts: UploadPageOptions = {}): string {
     );
   }
 
+  const where = opts.taskTitle
+    ? `<strong>${escapeHtml(opts.taskTitle)}</strong>`
+    : "the selected task";
+  const inList = opts.listName ? ` in <em>${escapeHtml(opts.listName)}</em>` : "";
   const dest = opts.filename
-    ? `Uploading <code>${escapeHtml(opts.filename)}</code> to task <code>${escapeHtml(
-        opts.taskId ?? "",
-      )}</code>.`
-    : `Uploading to task <code>${escapeHtml(opts.taskId ?? "")}</code>${
+    ? `Uploading <code>${escapeHtml(opts.filename)}</code> to ${where}${inList}.`
+    : `Uploading to ${where}${inList}${
         opts.multiple ? ` (up to ${opts.maxFiles ?? ""} files)` : ""
       }.`;
 

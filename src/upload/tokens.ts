@@ -31,6 +31,10 @@ export interface UploadCapabilityScope {
   content_type?: string;
   /** Max files a batch link accepts. Absent ⇒ single-file link (one file). */
   max_files?: number;
+  /** Human-readable task title, baked at mint time for the upload page. */
+  task_title?: string;
+  /** Human-readable list display name, baked at mint time for the upload page. */
+  list_name?: string;
 }
 
 interface StoredCapability extends UploadCapabilityScope {
@@ -93,6 +97,8 @@ export async function lookupUploadCapability(
       filename: raw.filename,
       content_type: raw.content_type,
       max_files: raw.max_files,
+      task_title: raw.task_title,
+      list_name: raw.list_name,
     },
   };
 }

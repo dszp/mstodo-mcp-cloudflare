@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes go straight from the browser to the Worker and on to Microsoft Graph — never through
   the model. Inline POST for ≤ 3072 KiB, chunked Graph upload-session (4 MiB ranges) for
   larger files up to 25 MB. Single-file links (baked `filename`) or batch links (up to
-  `max_files`, 1–10, default 5). New module `src/upload/{tokens,sniff,graph-upload,handler,page}.ts`.
+  `max_files`, 1–10, default 5). The upload page labels the destination by task title and list
+  name (resolved from the index at mint time), not the opaque Graph task id. New module
+  `src/upload/{tokens,sniff,graph-upload,handler,page}.ts`.
 - **Exact-duplicate detection.** Before attaching, the Worker lists the task's existing
   attachments and skips any uploaded file whose content (SHA-256) matches one already present
   (only same-size candidates are fetched to compare), plus within-batch de-duplication. Only the
