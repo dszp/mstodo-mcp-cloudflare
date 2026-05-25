@@ -20,11 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name (resolved from the index at mint time), not the opaque Graph task id. New module
   `src/upload/{tokens,sniff,graph-upload,handler,page}.ts`.
 - **Exact-duplicate detection.** Before attaching, the Worker lists the task's existing
-  attachments and skips any uploaded file whose content (SHA-256) matches one already present
-  (only same-size candidates are fetched to compare), plus within-batch de-duplication. Only the
-  duplicate files are skipped; the rest attach. Files larger than 6 MiB are de-duplicated by
-  name+size instead of content hash (downloading the whole existing attachment to hash it is
-  impractical, and Graph rejects duplicate names on the upload-session path anyway).
+  attachments and skips any uploaded file whose content (SHA-256) matches one already present,
+  plus within-batch de-duplication. Only the duplicate files are skipped; the rest attach.
+  Comparison is by **content hash, not Microsoft's attachment `size` field** — that field is the
+  Exchange *storage* size (~1.1–1.3× the raw byte length), so it never equals an uploaded file's
+  byte length; candidates are fetched and hashed up to a storage-size cap to bound downloads.
+  Uploads larger than 6 MiB fall back to name matching (downloading the whole existing attachment
+  to hash it is impractical, and Graph rejects duplicate names on the upload-session path anyway).
 - **`get_attachment` returns images as a native MCP `image` content block** (rendered inline by
   the client) alongside the JSON metadata block, instead of only base64 inside the JSON text.
   `contentBytes` is omitted from the metadata block for images so the base64 doesn't traverse the

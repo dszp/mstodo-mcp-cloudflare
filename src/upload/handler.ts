@@ -33,11 +33,19 @@ import {
 // the Worker doesn't buffer an unreasonable amount in memory.
 const TOTAL_BATCH_MAX_BYTES = 60 * 1024 * 1024;
 
-// Above this size, exact-content dedup would mean downloading the whole existing
-// attachment to hash it — impractical. Same-size candidates larger than this are
-// matched by name+size instead (Graph rejects duplicate names on the upload
-// session anyway). Smaller candidates are compared by SHA-256 of their bytes.
+// Above this *raw uploaded* size, exact-content dedup would mean downloading the
+// whole existing attachment to hash it — impractical. Larger uploads fall back to
+// name matching (Graph rejects duplicate names on the upload session anyway).
 const DEDUP_CONTENT_MAX_BYTES = 6 * 1024 * 1024;
+
+// When content-hashing a small upload, skip existing candidates whose Graph
+// `size` exceeds this — they're too large to be a match and not worth fetching.
+// NOTE: Graph's attachment `size` is the Exchange *storage* size (base64/MIME
+// overhead included), which is LARGER than the raw byte length and therefore
+// can't be compared directly to an uploaded file's byte length. A raw upload of
+// up to DEDUP_CONTENT_MAX_BYTES stores at roughly ≤ 1.4× that, so this cap keeps
+// real matches in range while bounding downloads.
+const DEDUP_FETCH_STORAGE_CAP = 9 * 1024 * 1024;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -230,32 +238,33 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
     // Exact duplicate? First an identical file earlier in this same batch, then
     // any same-size attachment already on the task (only same-size candidates can
     // match byte-for-byte, so we fetch+hash just those).
-    const sameSize = existing.filter((e) => e.size === bytes.byteLength);
     log.info("upload_dedup_file", {
       task_id: scope.task_id,
       name,
       size: bytes.byteLength,
       hash: hash.slice(0, 16),
       existing_count: existing.length,
-      same_size_count: sameSize.length,
-      same_size_ids: sameSize.map((e) => e.id.slice(-12)),
     });
 
+    // Compare by content hash, NOT by Graph's `size` (which is the Exchange
+    // storage size, not the raw byte length, so it never equals an uploaded
+    // file's byte length). The decoded contentBytes of an existing attachment is
+    // the original raw file, so its SHA-256 matches the upload when identical.
+    const isLarge = bytes.byteLength > DEDUP_CONTENT_MAX_BYTES;
     let dupId: string | null = batchHashes.get(hash) ?? null;
     if (dupId === null) {
       for (const att of existing) {
-        if (att.size !== bytes.byteLength) continue;
-        // Exact-content match needs the existing bytes. For large attachments
-        // that download is impractical (e.g. a 20 MB .exe), so above a threshold
-        // fall back to name+size equality — which also matches Graph's own
-        // duplicate-name rejection on the upload-session path.
-        if (bytes.byteLength > DEDUP_CONTENT_MAX_BYTES) {
+        if (isLarge) {
+          // Too big to content-hash (would download the whole existing file);
+          // fall back to name match.
           if (att.name && att.name === name) {
             dupId = att.id;
             break;
           }
           continue;
         }
+        // Bound downloads: a candidate this much larger can't match a small upload.
+        if (att.size > DEDUP_FETCH_STORAGE_CAP) continue;
         let h = existingHashes.get(att.id);
         if (h === undefined) {
           try {
@@ -266,13 +275,6 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
             }
             h = await sha256Hex(exBytes);
             existingHashes.set(att.id, h);
-            log.info("upload_dedup_candidate", {
-              task_id: scope.task_id,
-              attachment_id: att.id.slice(-12),
-              ex_size: exBytes.byteLength,
-              ex_hash: h.slice(0, 16),
-              matches: h === hash,
-            });
           } catch (e) {
             log.warn("upload_dedup_fetch_failed", {
               task_id: scope.task_id,

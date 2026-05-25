@@ -139,14 +139,17 @@ describe("handleUpload attach flow", () => {
     expect(body.files[0].attachment_id).toBe("NEW1");
   });
 
-  it("skips a file that exactly matches an existing attachment", async () => {
-    const existingBytes = "hi";
+  it("skips a content-duplicate even when Graph's size differs from the raw length", async () => {
+    // Regression: Graph reports `size` as the Exchange *storage* size, not the
+    // raw byte length, so the list `size` (here 99) does NOT equal the uploaded
+    // file's byte length (2). Dedup must still match by content hash.
+    const existingBytes = "hi"; // 2 raw bytes
     installFetch((c) => {
       if (c.url.endsWith("/attachments") && c.method === "GET") {
         return Response.json(
           {
             value: [
-              { "@odata.type": "#microsoft.graph.taskFileAttachment", id: "E1", name: "a.txt", size: 2 },
+              { "@odata.type": "#microsoft.graph.taskFileAttachment", id: "E1", name: "a.txt", size: 99 },
             ],
           },
           { status: 200 },
@@ -158,7 +161,7 @@ describe("handleUpload attach flow", () => {
             "@odata.type": "#microsoft.graph.taskFileAttachment",
             id: "E1",
             name: "a.txt",
-            size: 2,
+            size: 99,
             contentBytes: btoa(existingBytes),
           },
           { status: 200 },
