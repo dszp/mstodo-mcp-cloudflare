@@ -5,7 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.2] – 2026-05-25
+
+### Fixed
+- **One linked resource per task** (Microsoft To Do platform limit). Graph rejects any
+  second linked resource on a task with HTTP 400 `"Linked Resource already exists"` /
+  innerError `LinkedResourceSizeExceeded`, regardless of payload. The engine previously
+  generated multiple matches per task, so only the first succeeded and the rest 400'd — e.g.
+  a task already carrying an Autotask ticket link could never also get an Obsidian note link.
+  Rules now create **at most one linked resource per task**: the **first matching rule wins**
+  (rule array order is the priority), with title matched before body. If a task already
+  carries any linked resource — a prior rule link, a manually-added one, or Outlook's built-in
+  "Open in Outlook" on flagged-email tasks — the match is **skipped and the existing link is
+  never replaced**.
+
+### Changed
+- **Removed the per-rule `max_links_per_task` field.** The platform caps linked resources at
+  one per task, so the field had no real effect. Previously-stored configs that still include
+  it are accepted (the field is ignored on load).
+- **`extract_links`** now reports matches it could not create because a link already exists in
+  `skipped` (reason `todo_one_linked_resource_per_task`) instead of `failed`; `skipped` entries
+  are now `{ match, reason }` objects. `dry_run` surfaces at most one match. The underlying
+  Graph error body is now included in `failed[].error` for diagnosability (previously only the
+  bare `graph_400` status survived).
 
 ## [0.2.1] – 2026-05-25
 
