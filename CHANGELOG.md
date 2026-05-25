@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] – 2026-05-24
+
+### Fixed
+- **List classification dropped Fitzpatrick skin-tone modifiers.** `stripEmoji`
+  removed `Extended_Pictographic` glyphs but not `Emoji_Modifier` code points
+  (U+1F3FB–U+1F3FF), so a list named like `👨🏻 INTERNAL TECH 👨🏻` retained a
+  stray `🏻` after stripping and fell through to `unclassified`. The strip now
+  also covers `\p{Emoji_Modifier}` — deliberately not the broader
+  `Emoji_Component`, which would also drop ASCII digits and break names like
+  `90 ROCKS`. Fixes both `classifyList` and alias display-name matching
+  (`resolveListId`), which share `stripEmoji`.
+
 ## [0.1.0] – 2026-05-24
 
 First public release.
