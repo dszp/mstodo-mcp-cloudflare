@@ -61,15 +61,21 @@ describe("handleUpload routing & auth", () => {
     expect(body).not.toContain("<form");
   });
 
-  it("GET with a valid token renders the upload form for the task", async () => {
-    const { token } = await createUploadCapability(env, SCOPE);
+  it("GET with a valid token renders the form with the task name, not the id", async () => {
+    const { token } = await createUploadCapability(env, {
+      ...SCOPE,
+      task_title: "Buy milk",
+      list_name: "Groceries",
+    });
     const res = await handleUpload(
       new Request(`https://x/upload?t=${encodeURIComponent(token)}`),
       env,
     );
     const body = await res!.text();
     expect(body).toContain("<form");
-    expect(body).toContain("T1");
+    expect(body).toContain("Buy milk");
+    expect(body).toContain("Groceries");
+    expect(body).not.toContain("T1"); // the opaque task id must not be shown
   });
 
   it("POST without a token is unauthorized", async () => {

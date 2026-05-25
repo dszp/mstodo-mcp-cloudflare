@@ -99,7 +99,8 @@ async function renderGetPage(env: Env, url: URL): Promise<string> {
   const scope = verified.value;
   const multiple = scope.max_files !== undefined;
   return renderUploadPage({
-    taskId: scope.task_id,
+    taskTitle: scope.task_title,
+    listName: scope.list_name,
     filename: scope.filename,
     multiple,
     maxFiles: scope.max_files,

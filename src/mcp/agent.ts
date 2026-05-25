@@ -1683,6 +1683,17 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             scope.max_files = Math.min(Math.max(max_files ?? DEFAULT_MAX_FILES, 1), MAX_FILES_CAP);
           }
 
+          // Best-effort human-readable labels for the upload page, from the index
+          // (a cold/unindexed task just degrades to no title — the page copes).
+          const meta = await this.#index()
+            .getTaskMeta(task_id)
+            .catch((e) => {
+              log.warn("upload_link_meta_failed", { task_id, error: String(e) });
+              return null;
+            });
+          if (meta?.title) scope.task_title = meta.title;
+          if (meta?.list_display_name) scope.list_name = meta.list_display_name;
+
           const ttlSeconds = ttl_minutes ? ttl_minutes * 60 : undefined;
           const { token, expiresAt } = await createUploadCapability(this.env, scope, ttlSeconds);
           const upload_url = `${base}/upload?t=${encodeURIComponent(token)}`;
@@ -1696,6 +1707,8 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                   expires_at: expiresAt,
                   list_id,
                   task_id,
+                  task_title: scope.task_title ?? null,
+                  list_name: scope.list_name ?? null,
                   filename: filename ?? null,
                   max_files: scope.max_files ?? null,
                 }),

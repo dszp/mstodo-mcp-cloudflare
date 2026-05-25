@@ -193,6 +193,23 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return rows.length > 0 ? rows[0] : null;
   }
 
+  // Human-readable task title + owning list name for a task id, or null if the
+  // task isn't indexed. Used to label the web upload page (create_upload_link)
+  // so it shows the task name instead of the opaque Graph id.
+  getTaskMeta(
+    taskId: string,
+  ): { title: string | null; list_id: string; list_display_name: string | null } | null {
+    const rows = this.sql
+      .exec<{ title: string | null; list_id: string; list_display_name: string | null }>(
+        `SELECT t.title AS title, t.list_id AS list_id, l.display_name AS list_display_name
+           FROM tasks t LEFT JOIN lists l ON l.list_id = t.list_id
+          WHERE t.task_id = ?`,
+        taskId,
+      )
+      .toArray();
+    return rows.length > 0 ? rows[0] : null;
+  }
+
   // -- List roster ----------------------------------------------------------
   upsertList(list: TodoTaskList): void {
     const r = listToRow(list);
