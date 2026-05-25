@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **`config-examples/link-rules.json` updated to match the 0.2.1/0.2.2 engine.** Dropped the
+  removed `max_links_per_task` field from every rule, added `external_id_template` (required for
+  Microsoft To Do to render a link as a clickable row), and rewrote the header comments to
+  describe the current semantics (one linked resource per task, first matching rule wins, no
+  post-run URL dedup). The generic `psa-ticket` example is now a concrete `autotask-ticket`
+  example matching the live config's formatting, with the server zone genericized to
+  `<your-zone>`.
+
 ## [0.2.2] – 2026-05-25
 
 ### Fixed

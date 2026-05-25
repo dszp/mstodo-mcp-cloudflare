@@ -1,6 +1,8 @@
 {
   "_comment": "config:link_rules example — upload via: wrangler kv:key put --binding=TODO_CACHE 'config:link_rules' \"$(cat config-examples/link-rules.json)\"",
-  "_comment2": "Each rule's 'pattern' is a JS RegExp source string. $1, $2, ... in templates refer to capture groups. Rules are applied in order; duplicates are deduped by URL after all rules run.",
+  "_comment2": "Each rule's 'pattern' is a JS RegExp source string. $1, $2, … in templates (url_template, display_template, external_id_template) refer to capture groups.",
+  "_comment3": "Microsoft To Do allows exactly ONE linked resource per task. The engine therefore creates at most one: rules are evaluated in array order and the FIRST matching rule wins (array order = priority; title is matched before body). If the task already has any linked resource, the engine skips rather than replacing it.",
+  "_comment4": "external_id_template sets the linked resource's externalId. To Do only renders a link as a clickable row when it carries an externalId, so populate it (it defaults to the matched text when omitted).",
   "rules": [
     {
       "_comment": "Jira tickets: matches PROJ-1234 in title or body",
@@ -9,9 +11,9 @@
       "flags": "g",
       "url_template": "https://your-org.atlassian.net/browse/$1",
       "display_template": "Jira $1",
+      "external_id_template": "$1",
       "application_name": "Jira",
       "fields": "both",
-      "max_links_per_task": 5,
       "enabled": true
     },
     {
@@ -21,21 +23,21 @@
       "flags": "g",
       "url_template": "https://github.com/your-org/your-repo/issues/$2",
       "display_template": "GitHub #$2",
+      "external_id_template": "$2",
       "application_name": "GitHub",
       "fields": "title",
-      "max_links_per_task": 3,
       "enabled": false
     },
     {
-      "_comment": "PSA/ticketing system with numeric IDs like T20240101.1234 — adjust pattern for your system",
-      "id": "psa-ticket",
+      "_comment": "Autotask PSA tickets like T20240101.1234 — replace <your-zone> with your Autotask server zone (e.g. ww3, ww4, ww14; check your login URL)",
+      "id": "autotask-ticket",
       "pattern": "(T\\d{8}\\.\\d{4}(?:\\.\\d{3})?)",
-      "flags": "g",
-      "url_template": "https://your-psa.example.com/tickets/$1",
+      "flags": "",
+      "url_template": "https://<your-zone>.autotask.net/Autotask/AutotaskExtend/ExecuteCommand.aspx?Code=OpenTicketDetail&TicketNumber=$1",
       "display_template": "Ticket $1",
-      "application_name": "PSA",
+      "external_id_template": "$1",
+      "application_name": "Autotask",
       "fields": "both",
-      "max_links_per_task": 1,
       "enabled": false
     }
   ]
