@@ -4,8 +4,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Props } from "../types";
 import { errResponse, instrument, type McpResponse } from "../observability/instrument";
 import { log } from "../log";
-import { fetchMe, loadTokens, REFRESH_SKEW_MS } from "../auth/microsoft";
+import { fetchMe, loadIdentity, loadTokens, myDayEnabled, REFRESH_SKEW_MS } from "../auth/microsoft";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
+import { SubstrateClient, SubstrateError } from "../graph/substrate-client";
 import { OWNER_DO_NAME, rowToList, rowToSummary, type ListRow, type TaskRow } from "../cache/sql";
 import type { TodoIndex } from "../cache/index-do";
 import { mapPool } from "../graph/concurrency";
@@ -35,6 +36,26 @@ import { resolveListId } from "../config/aliases";
 import { resolveListScope, resolveStatusFilter } from "../config/query-scope";
 
 const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
+
+// My Day CommittedDay is a local calendar date (YYYY-MM-DD), not UTC. The Worker
+// runs UTC, so when the caller omits `date` we compute "today" in the Worker's
+// configured TIMEZONE (an IANA name). en-CA formats as YYYY-MM-DD.
+const MY_DAY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function todayInTimeZone(timeZone: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+// Date portion (YYYY-MM-DD) of a CommittedDay value the Substrate API returns —
+// it echoes a full ISO datetime (e.g. "2026-05-25T00:00:00Z"), so membership
+// checks compare on the date, not the raw string.
+function committedDatePart(committed: string | null | undefined): string | null {
+  return committed ? committed.slice(0, 10) : null;
+}
 
 // `etag_304` was removed in Phase 2 step 10 — step 9 smoke confirmed
 // /me/todo/lists doesn't emit a collection-level ETag, so the 304 path
@@ -2717,6 +2738,214 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           };
         }),
     );
+
+    // -- My Day (opt-in, Substrate endpoint) ---------------------------------
+    // Registered unconditionally; each gates at invocation via withSubstrate,
+    // which returns my_day_disabled when ENABLE_MY_DAY != "true" and
+    // my_day_unavailable when the EXO scope isn't consented/granted. This keeps
+    // the tool list stable across the flag (matches create_upload_link).
+    this.server.registerTool(
+      "add_to_my_day",
+      {
+        description:
+          "Add a Microsoft To Do task to My Day (undocumented Substrate endpoint). Sets the task's CommittedDay. `date` defaults to today in the Worker's configured timezone; pass an explicit YYYY-MM-DD (interpreted in the user's local timezone) to target another day. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+        inputSchema: {
+          task_id: z.string().min(1).describe("Microsoft Graph task id."),
+          list: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Owning list (alias, display name, or Graph list ID). Optional — resolved from the index when omitted; pass it if the task isn't indexed yet.",
+            ),
+          date: z
+            .string()
+            .optional()
+            .describe("Target day as YYYY-MM-DD. Defaults to today in the Worker timezone."),
+        },
+      },
+      async ({ task_id, list, date }): Promise<McpResponse> =>
+        this.withSubstrate("add_to_my_day", async (sub) => {
+          const list_id = await this.resolveListForTask(list, task_id);
+          if (!list_id) {
+            return errResponse("list_required", {
+              task_id,
+              hint: "Task not found in the index; pass `list` explicitly.",
+            });
+          }
+          const day = date ?? todayInTimeZone(this.env.TIMEZONE);
+          if (!MY_DAY_DATE_RE.test(day)) {
+            return errResponse("invalid_date", { date: day, hint: "Use YYYY-MM-DD." });
+          }
+          // Set CommittedDay AND clear PostponedDay. A task previously removed
+          // from My Day carries PostponedDay=that-day; while PostponedDay==today
+          // the client suppresses the task from My Day even with CommittedDay set,
+          // so adding it back must clear the postpone (what the official client
+          // does). CommittedDay is a bare date in the Worker's timezone — the
+          // server stores it at UTC midnight and the client renders it correctly.
+          const task = await sub.patchTask(list_id, task_id, {
+            CommittedDay: day,
+            PostponedDay: null,
+          });
+          const committed_day = committedDatePart(task.CommittedDay);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  list_id,
+                  task_id,
+                  committed_day,
+                  committed_day_raw: task.CommittedDay ?? null,
+                  postponed_day_raw: task.PostponedDay ?? null,
+                  in_my_day: committed_day === day,
+                }),
+              },
+            ],
+          };
+        }),
+    );
+
+    this.server.registerTool(
+      "remove_from_my_day",
+      {
+        description:
+          "Remove a Microsoft To Do task from My Day (undocumented Substrate endpoint) by clearing its CommittedDay. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+        inputSchema: {
+          task_id: z.string().min(1).describe("Microsoft Graph task id."),
+          list: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Owning list (alias, display name, or Graph list ID). Optional — resolved from the index when omitted.",
+            ),
+        },
+      },
+      async ({ task_id, list }): Promise<McpResponse> =>
+        this.withSubstrate("remove_from_my_day", async (sub) => {
+          const list_id = await this.resolveListForTask(list, task_id);
+          if (!list_id) {
+            return errResponse("list_required", {
+              task_id,
+              hint: "Task not found in the index; pass `list` explicitly.",
+            });
+          }
+          const task = await sub.patchTask(list_id, task_id, { CommittedDay: null });
+          const committed_day = committedDatePart(task.CommittedDay);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  list_id,
+                  task_id,
+                  committed_day,
+                  committed_day_raw: task.CommittedDay ?? null,
+                  in_my_day: committed_day !== null,
+                }),
+              },
+            ],
+          };
+        }),
+    );
+
+    this.server.registerTool(
+      "list_my_day_tasks",
+      {
+        description:
+          "List Microsoft To Do tasks in My Day for a given day (undocumented Substrate endpoint). `date` defaults to today in the Worker's configured timezone. Iterates the indexed list roster and aggregates matches across lists. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+        inputSchema: {
+          date: z
+            .string()
+            .optional()
+            .describe("Day to list as YYYY-MM-DD. Defaults to today in the Worker timezone."),
+        },
+      },
+      async ({ date }): Promise<McpResponse> =>
+        this.withSubstrate("list_my_day_tasks", async (sub) => {
+          const day = date ?? todayInTimeZone(this.env.TIMEZONE);
+          if (!MY_DAY_DATE_RE.test(day)) {
+            return errResponse("invalid_date", { date: day, hint: "Use YYYY-MM-DD." });
+          }
+          let roster: ListRow[] = [];
+          try {
+            roster = await this.#index().listLists();
+          } catch (e) {
+            log.warn("index_roster_read_failed", { error: String(e) });
+          }
+          if (roster.length === 0) {
+            // My Day reads fan out per-folder, so we need the folder roster. The
+            // Substrate API can't supply it the way Graph enumerates lists, so a
+            // cold index can't be served live here. Kick a sync (mirrors
+            // #warmIfEmpty) and tell the caller to retry once it warms.
+            await this.#index()
+              .ensureSyncing()
+              .catch((e) => log.warn("index_ensure_syncing_failed", { error: String(e) }));
+            return errResponse("index_cold", {
+              hint: "List roster is still warming. Retry in a few seconds, or call list_lists once to warm the index.",
+            });
+          }
+          // One substrate GET per folder, fetched SEQUENTIALLY. EXO enforces a
+          // low per-mailbox concurrency cap (MailboxConcurrency); fanning these
+          // out in parallel trips ApplicationThrottled (429). We match
+          // client-side on the DATE PORTION of CommittedDay — substrate stores it
+          // as a full datetime, so a server `$filter=CommittedDay eq '2026-05-25'`
+          // (bare date) wouldn't match.
+          const tasks: Array<{
+            list_id: string;
+            display_name: string | null;
+            task_id: string | null;
+            title: string | null;
+            committed_day: string | null;
+            committed_day_raw: string | null;
+          }> = [];
+          let folders_errored = 0;
+          for (const l of roster) {
+            let folderTasks;
+            try {
+              folderTasks = await sub.listFolderTasks(l.list_id);
+            } catch (e) {
+              // One bad/throttled/missing folder must not fail the whole
+              // aggregation — log, count it, and keep going (partial result).
+              folders_errored += 1;
+              log.warn("my_day_list_folder_failed", {
+                list_id: l.list_id,
+                error: String(e),
+              });
+              continue;
+            }
+            for (const t of folderTasks) {
+              if (committedDatePart(t.CommittedDay) !== day) continue;
+              tasks.push({
+                list_id: l.list_id,
+                display_name: l.display_name,
+                task_id: t.Id ?? null,
+                title: t.Subject ?? null,
+                committed_day: committedDatePart(t.CommittedDay),
+                committed_day_raw: t.CommittedDay ?? null,
+              });
+            }
+          }
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  date: day,
+                  count: tasks.length,
+                  folders_scanned: roster.length,
+                  folders_errored,
+                  tasks,
+                }),
+              },
+            ],
+          };
+        }),
+    );
   }
 
   // Resolve a caller-supplied list identifier (alias, display name, or raw Graph
@@ -2801,6 +3030,67 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }
         throw e;
       }
+    });
+  }
+
+  // Tool boundary helper for the opt-in My Day tools — parallel to withGraph.
+  // Gates on the ENABLE_MY_DAY flag (operator intent) AND degrades cleanly when
+  // the EXO permission isn't actually consented/granted at runtime: a substrate
+  // token-mint that AAD rejects with AADSTS65001 surfaces here as
+  // "my_day_unavailable", and a 403 on the resource latches the DO verdict so
+  // subsequent calls short-circuit. Builds a SubstrateClient whose token logic
+  // lives entirely in the sole-refresher DO (no independent refresh here).
+  protected async withSubstrate(
+    tool: string,
+    fn: (sub: SubstrateClient) => Promise<McpResponse>,
+  ): Promise<McpResponse> {
+    return instrument(tool, async () => {
+      if (!myDayEnabled(this.env)) {
+        return errResponse("my_day_disabled", {
+          hint: "Set ENABLE_MY_DAY=true on the Worker and re-run /authorize to consent the Exchange Online Tasks scope.",
+        });
+      }
+      const stored = await loadTokens(this.env);
+      if (!stored) {
+        return errResponse("not_authenticated", {
+          hint: "Visit /authorize via the Claude.ai MCP connector to sign in to Microsoft.",
+        });
+      }
+      const ident = await loadIdentity(this.env);
+      const sub = new SubstrateClient(
+        {
+          getSubstrateAccessToken: () => this.#index().getSubstrateAccessToken(),
+          forceSubstrateRefresh: () => this.#index().forceSubstrateRefresh(),
+        },
+        ident?.anchorMailbox ?? null,
+      );
+      try {
+        return await fn(sub);
+      } catch (e) {
+        // The DO throws a plain Error("my_day_unavailable") across RPC when the
+        // EXO scope isn't consented (AADSTS65001). RPC flattens it to a message.
+        if (e instanceof Error && e.message.includes("my_day_unavailable")) {
+          return this.#myDayUnavailable();
+        }
+        if (e instanceof SubstrateError) {
+          if (e.status === 403) {
+            // Scope minted but the resource rejected it — latch so we stop trying.
+            await this.#index()
+              .markMyDayUnavailable()
+              .catch((err) => log.warn("mark_my_day_unavailable_failed", { error: String(err) }));
+            return this.#myDayUnavailable(e.detail);
+          }
+          return errResponse(`substrate_${e.status}`, { detail: e.detail ?? "" });
+        }
+        throw e;
+      }
+    });
+  }
+
+  #myDayUnavailable(detail?: string): McpResponse {
+    return errResponse("my_day_unavailable", {
+      detail: detail ?? "",
+      hint: "Office 365 Exchange Online Tasks.ReadWrite is not consented/granted. Re-run /authorize, or add the EXO Tasks.ReadWrite permission to the Entra app registration (see DEPLOYMENT.md).",
     });
   }
 

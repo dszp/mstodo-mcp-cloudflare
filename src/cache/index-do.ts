@@ -2,10 +2,13 @@ import { DurableObject } from "cloudflare:workers";
 import { TodoTaskListSchema, type TodoTask, type TodoTaskList } from "../graph/types";
 import {
   loadTokens,
-  refreshTokens,
+  refreshTokensForScope,
   storeTokens,
   tokensFromResponse,
   REFRESH_SKEW_MS,
+  SCOPES,
+  SUBSTRATE_SCOPES,
+  TokenExchangeError,
   type StoredTokens,
 } from "../auth/microsoft";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
@@ -89,12 +92,29 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   // -- Token refresh (sole refresher; global single-flight) -----------------
   // The singleton DO is the one place that POSTs /token, so two concurrent
   // callers (an MCP tool + the sync loop) can't both spend the rotating
-  // refresh_token and invalidate each other. Single instance ⇒ one shared
-  // in-flight promise is sufficient; no DO storage lock needed.
-  #refreshInFlight: Promise<string> | null = null;
+  // refresh_token and invalidate each other. Single instance ⇒ in-process
+  // coordination is sufficient; no DO storage lock needed.
+  //
+  // Two resources now share ONE refresh token: Microsoft Graph (aud=graph) and,
+  // when My Day is enabled, Office 365 Exchange Online (aud=outlook.office.com,
+  // the Substrate endpoint). Each /token call rotates the refresh token, so a
+  // Graph refresh and a substrate refresh must NOT run concurrently — the second
+  // would spend a refresh token the first just invalidated. We serialize all
+  // refreshes on #refreshChain (one /token in flight at a time) while coalescing
+  // concurrent same-resource callers via #refreshInFlight.
+  #refreshInFlight: { graph?: Promise<string>; substrate?: Promise<string> } = {};
+  #refreshChain: Promise<void> = Promise.resolve();
+
+  // Substrate (My Day) access token — cached in DO memory only, never persisted
+  // (the refresh token in tokens:owner is the source of truth; this is re-minted
+  // on demand). `#substrateUnavailable` latches when AAD reports the EXO scope
+  // isn't consented/granted, so we stop hammering /token; cleared on a successful
+  // mint or an identity switch.
+  #substrateToken: { access_token: string; expires_at: number } | null = null;
+  #substrateUnavailable = false;
 
   // Bumped by resetIdentity() on an owner switch. Captured at the start of each
-  // #refresh so a refresh that resolves AFTER the switch can detect it and refuse
+  // refresh so a refresh that resolves AFTER the switch can detect it and refuse
   // to persist the prior account's tokens over the new identity's (H4).
   #identityGeneration = 0;
 
@@ -105,14 +125,14 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     const stored = await loadTokens(this.env);
     if (!stored) throw new Error("not_authenticated");
     if (stored.expires_at > Date.now() + REFRESH_SKEW_MS) return stored.access_token;
-    return this.#refresh(stored);
+    return this.#refreshResource("graph");
   }
 
   // Forces a refresh regardless of current freshness (GraphClient 401 path).
   async refreshToken(): Promise<string> {
     const stored = await loadTokens(this.env);
     if (!stored) throw new Error("not_authenticated");
-    return this.#refresh(stored);
+    return this.#refreshResource("graph");
   }
 
   // TokenProvider for the DO's own GraphClient (sync loop). forceRefresh() is
@@ -121,30 +141,108 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return this.refreshToken();
   }
 
-  #refresh(prev: StoredTokens): Promise<string> {
-    if (this.#refreshInFlight) return this.#refreshInFlight;
-    // Snapshot the identity generation now (synchronously, before any await).
+  // -- Substrate (My Day) access token ---------------------------------------
+  // Returns a valid EXO-audience access token from the in-memory cache, minting
+  // one (serialized with Graph refreshes) when stale. Throws "my_day_unavailable"
+  // if AAD has reported the EXO scope is not consented for this owner.
+  async getSubstrateAccessToken(): Promise<string> {
+    if (this.#substrateUnavailable) throw new Error("my_day_unavailable");
+    const cached = this.#substrateToken;
+    if (cached && cached.expires_at > Date.now() + REFRESH_SKEW_MS) return cached.access_token;
+    return this.#refreshResource("substrate");
+  }
+
+  // Forces a substrate re-mint (SubstrateClient 401 path).
+  forceSubstrateRefresh(): Promise<string> {
+    this.#substrateToken = null;
+    return this.#refreshResource("substrate");
+  }
+
+  // Latch My Day as unavailable for this identity (e.g. a 403 ErrorAccessDenied
+  // on a substrate PATCH — the scope minted but the resource rejected it).
+  // Cleared by a later successful mint or an identity switch.
+  markMyDayUnavailable(): void {
+    this.#substrateUnavailable = true;
+    this.#substrateToken = null;
+  }
+
+  // Mint/refresh an access token for one resource. Coalesces concurrent callers
+  // for the same resource, and serializes across resources on #refreshChain so
+  // only one /token spends the rotating refresh token at a time. The serialized
+  // body re-loads tokens:owner AFTER awaiting the chain, so it always spends the
+  // refresh token the prior refresh just rotated in.
+  #refreshResource(resource: "graph" | "substrate"): Promise<string> {
+    const existing = this.#refreshInFlight[resource];
+    if (existing) return existing;
+
     const gen = this.#identityGeneration;
-    this.#refreshInFlight = (async () => {
+    const prevChain = this.#refreshChain;
+    const p = (async (): Promise<string> => {
+      // Wait for any in-flight refresh (either resource) to finish rotating the
+      // refresh token before we read + spend it.
+      await prevChain.catch(() => undefined);
+      if (gen !== this.#identityGeneration) throw new Error("identity_changed_during_refresh");
+
+      const stored = await loadTokens(this.env);
+      if (!stored) throw new Error("not_authenticated");
+
+      const scope = resource === "graph" ? SCOPES : SUBSTRATE_SCOPES;
+      let res;
       try {
-        const res = await refreshTokens(this.env, prev.refresh_token);
-        if (gen !== this.#identityGeneration) {
-          // The owner was switched while this refresh was in flight (resetIdentity
-          // bumped the generation). These tokens belong to the PRIOR account;
-          // writing them would clobber the new identity's tokens stored by the
-          // auth handler, leaving the new identity operating against the old
-          // account. Discard them and fail this caller — its Graph request errors
-          // and the sync loop retries next alarm under the new identity (H4).
-          throw new Error("identity_changed_during_refresh");
+        res = await refreshTokensForScope(this.env, stored.refresh_token, scope);
+      } catch (e) {
+        // AADSTS65001 = the owner consented to Graph but not the EXO resource.
+        // Latch unavailable so My Day tools degrade cleanly instead of retrying.
+        if (
+          resource === "substrate" &&
+          e instanceof TokenExchangeError &&
+          e.detail.includes("AADSTS65001")
+        ) {
+          this.#substrateUnavailable = true;
+          throw new Error("my_day_unavailable");
         }
-        const next = tokensFromResponse(res, prev.refresh_token);
+        throw e;
+      }
+      if (gen !== this.#identityGeneration) {
+        // Owner switched mid-refresh; these tokens belong to the prior account.
+        // Discard (H4) — caller errors and retries under the new identity.
+        throw new Error("identity_changed_during_refresh");
+      }
+
+      if (resource === "graph") {
+        const next = tokensFromResponse(res, stored.refresh_token);
         await storeTokens(this.env, next);
         return next.access_token;
-      } finally {
-        this.#refreshInFlight = null;
       }
+
+      // Substrate: persist ONLY the rotated refresh token (if any) back to
+      // tokens:owner — never clobber the Graph access_token/scope/expires_at,
+      // which a Graph caller still reads. Cache the EXO access token in memory.
+      const newRefresh = res.refresh_token ?? stored.refresh_token;
+      if (newRefresh !== stored.refresh_token) {
+        await storeTokens(this.env, { ...stored, refresh_token: newRefresh });
+      }
+      this.#substrateToken = {
+        access_token: res.access_token,
+        expires_at: Date.now() + res.expires_in * 1000,
+      };
+      this.#substrateUnavailable = false;
+      return res.access_token;
     })();
-    return this.#refreshInFlight;
+
+    // Advance the serial chain (swallow errors so a failed refresh doesn't poison
+    // the next one) and record the per-resource coalescing slot.
+    this.#refreshChain = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#refreshInFlight[resource] = p;
+    void p
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.#refreshInFlight[resource] === p) this.#refreshInFlight[resource] = undefined;
+      });
+    return p;
   }
 
   // -- Task CRUD ------------------------------------------------------------
@@ -495,7 +593,10 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   // and whether multi-account keying changes this single-instance assumption.
   async resetIdentity(): Promise<void> {
     this.#identityGeneration++; // H4: invalidate any in-flight token refresh
-    this.#refreshInFlight = null;
+    this.#refreshInFlight = {};
+    this.#refreshChain = Promise.resolve();
+    this.#substrateToken = null;
+    this.#substrateUnavailable = false;
     this.sql.exec("DELETE FROM tasks"); // tasks_fts cascades via AFTER DELETE trigger
     this.sql.exec("DELETE FROM lists");
     this.sql.exec("DELETE FROM sync_state");

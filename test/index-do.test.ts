@@ -235,6 +235,104 @@ describe("TodoIndex token refresh", () => {
   });
 });
 
+describe("TodoIndex substrate (My Day) token mint", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function seedTokens(opts: { graphExpired?: boolean; refreshToken?: string } = {}) {
+    await env.TODO_CACHE.put(
+      TOKENS_KEY,
+      JSON.stringify({
+        access_token: "graph-at",
+        refresh_token: opts.refreshToken ?? "rt-1",
+        expires_at: opts.graphExpired ? Date.now() - 1000 : Date.now() + 3_600_000,
+        scope: SCOPES,
+        obtained_at: Date.now(),
+      }),
+    );
+  }
+
+  // Token endpoint that routes by the requested `scope`: an Exchange Online
+  // (outlook.office.com) scope yields an EXO-audience access token; anything
+  // else yields a Graph token. Each call rotates the refresh token.
+  function stubTokenEndpoint() {
+    let n = 0;
+    return vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = new URLSearchParams(String(init?.body ?? ""));
+      const isExo = (body.get("scope") ?? "").includes("outlook.office.com");
+      n += 1;
+      return new Response(
+        JSON.stringify({
+          token_type: "Bearer",
+          scope: body.get("scope"),
+          expires_in: 3600,
+          access_token: isExo ? "exo-at" : "graph-at-new",
+          refresh_token: `rt-${n + 1}`,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+  }
+
+  it("mints an EXO token, caches it in memory, and preserves the graph token", async () => {
+    await seedTokens();
+    const spy = stubTokenEndpoint();
+    vi.stubGlobal("fetch", spy);
+    const stub = indexStub("sub-mint");
+
+    expect(await stub.getSubstrateAccessToken()).toBe("exo-at");
+    // Second call is served from the in-memory cache — no second /token.
+    expect(await stub.getSubstrateAccessToken()).toBe("exo-at");
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // The substrate mint persists ONLY the rotated refresh token; the Graph
+    // access token in tokens:owner is untouched (a Graph caller still reads it).
+    const stored = JSON.parse((await env.TODO_CACHE.get(TOKENS_KEY))!);
+    expect(stored.access_token).toBe("graph-at");
+    expect(stored.refresh_token).toBe("rt-2");
+  });
+
+  it("serializes a concurrent graph refresh + substrate mint (no refresh-token race)", async () => {
+    await seedTokens({ graphExpired: true });
+    const spy = stubTokenEndpoint();
+    vi.stubGlobal("fetch", spy);
+    const stub = indexStub("sub-concurrent");
+
+    const [graphTok, exoTok] = await Promise.all([
+      stub.getAccessToken(), // expired → graph refresh
+      stub.getSubstrateAccessToken(), // EXO mint
+    ]);
+    expect(graphTok).toBe("graph-at-new");
+    expect(exoTok).toBe("exo-at");
+    // Two distinct /token calls, serialized on the shared chain.
+    expect(spy).toHaveBeenCalledTimes(2);
+
+    // Graph's full record persisted; substrate didn't clobber the access token.
+    const stored = JSON.parse((await env.TODO_CACHE.get(TOKENS_KEY))!);
+    expect(stored.access_token).toBe("graph-at-new");
+  });
+
+  it("latches my_day_unavailable on AADSTS65001 and stops minting", async () => {
+    await seedTokens();
+    const spy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: "invalid_grant",
+            error_description: "AADSTS65001: The user has not consented...",
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", spy);
+    const stub = indexStub("sub-noconsent");
+
+    await expect(stub.getSubstrateAccessToken()).rejects.toThrow("my_day_unavailable");
+    // Latched in memory — the next call short-circuits without another /token.
+    await expect(stub.getSubstrateAccessToken()).rejects.toThrow("my_day_unavailable");
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("TodoIndex delta sync", () => {
   const LISTS_DELTA = "https://graph.microsoft.com/v1.0/me/todo/lists/delta";
   const TASKS_DELTA_A =

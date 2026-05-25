@@ -78,6 +78,25 @@ constant in `src/auth/microsoft.ts`: `Tasks.ReadWrite offline_access User.Read`)
 
 Grant admin consent if your tenant requires it for delegated permissions.
 
+**Optional — My Day support.** If you plan to enable the opt-in "My Day" feature
+(`ENABLE_MY_DAY=true`), also add one **Office 365 Exchange Online → Delegated**
+permission. Exchange Online isn't selectable in most tenants' "Add a permission"
+UI, so add it via the **Manifest** blade: append a second `requiredResourceAccess`
+block, then save and **Grant admin consent**.
+
+```jsonc
+{
+  "resourceAppId": "00000002-0000-0ff1-ce00-000000000000", // Office 365 Exchange Online
+  "resourceAccess": [
+    { "id": "6b49b74d-642f-4417-a6b4-820576845707", "type": "Scope" } // Tasks.ReadWrite
+  ]
+}
+```
+
+After saving, `Tasks.ReadWrite` appears under **API permissions → Office 365
+Exchange Online**. This is only needed if you turn on My Day; leave it off
+otherwise. See [My Day support](#my-day-support-optional) below.
+
 ### 3. Client secret
 
 **Certificates & secrets → New client secret →** copy the secret **Value** (shown
@@ -217,10 +236,49 @@ rows-written (full reference: [README → Configuration](./README.md#configurati
   on-demand via `list_tasks`): `set_list_config({ no_sync: ["<list id>"] })` — the
   next sync purges its already-indexed rows once, then steady state is lighter.
 
+## My Day support (optional)
+
+Microsoft To Do's "My Day" has no public Graph API. This Worker can drive it via an
+**undocumented Microsoft Substrate endpoint** (`https://substrate.office.com/todob2/api/v1/`),
+which uses the Office 365 Exchange Online resource rather than Graph. It's **opt-in
+and off by default**; existing deployments are unaffected unless you enable it.
+
+To turn it on:
+
+1. Add the **Office 365 Exchange Online → `Tasks.ReadWrite`** delegated permission to
+   the Entra app via the Manifest (see [API permissions](#2-api-permissions) above) and
+   grant admin consent.
+2. Set `vars.ENABLE_MY_DAY` to `"true"` in `wrangler.jsonc` and `npx wrangler deploy`.
+3. **Re-run `/authorize`.** Enabling the flag widens the consent request to include the
+   Exchange Online scope; a single consent screen now covers both resources. Without a
+   fresh authorize, the existing refresh token has Graph consent only and My Day calls
+   fail with a re-consent message.
+
+This registers three tools: `add_to_my_day`, `remove_from_my_day`, and
+`list_my_day_tasks`.
+
+**Timezone.** `My Day` membership is a local calendar date. When you call a My Day tool
+without an explicit `date`, "today" is computed in the Worker's configured **`TIMEZONE`**
+(an IANA name like `America/New_York`), **not UTC** — so set `TIMEZONE` to your own zone,
+or pass an explicit `YYYY-MM-DD` to target a specific day.
+
+**Graceful auto-disable.** The `ENABLE_MY_DAY` flag is operator intent; it doesn't prove
+the Exchange Online permission was actually granted/consented. If it wasn't, the tools
+detect this at runtime (Microsoft returns `AADSTS65001` at token mint, or `403` on the
+write) and return `my_day_unavailable` with a re-consent hint instead of a raw error —
+no crash, and the rest of the server is unaffected.
+
+**Honest framing.** The Substrate endpoint is undocumented; this Worker mirrors the
+official To Do client's network calls. Microsoft may change it without notice.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
+| **My Day tools return `my_day_disabled`** | `ENABLE_MY_DAY` isn't `"true"`. Set it in `wrangler.jsonc`, deploy, and re-authorize. |
+| **My Day tools return `my_day_unavailable`** | The Exchange Online `Tasks.ReadWrite` permission isn't consented/granted. Add it via the Manifest + admin consent (see [My Day support](#my-day-support-optional)), then re-run `/authorize`. |
+| **`add_to_my_day` returns `ok:true` but the task doesn't appear in the app** | A task whose `PostponedDay == today` is suppressed from My Day even with `CommittedDay` set. `add_to_my_day` clears `PostponedDay` automatically, so this is handled — if you see it, confirm you're on the current deploy (the response includes `"postponed_day_raw": null` on success). |
+| **`list_my_day_tasks` is slow, or returns `substrate_429` / partial results (`folders_errored > 0`)** | It walks every list one folder at a time to stay under EXO's `MailboxConcurrency` cap (parallel fan-out trips `429 ApplicationThrottled`). On accounts with many/large lists it's inherently slow — `add`/`remove` are single-call and fast. A non-zero `folders_errored` means some folders were skipped (throttle/transient); retry. This is the case for the deferred SQLite-`CommittedDay` indexing optimization. |
 | **403 at `/authorize`** ("not the owner") | The signed-in Microsoft account doesn't match `OWNER_EMAIL`. Re-check the secret (`npx wrangler secret list`), re-push, and re-authorize. Switching accounts = update `OWNER_EMAIL` first. |
 | **`SqlError: Exceeded allowed rows written in Durable Objects free tier`** (every call 500s) | The account's daily DO rows-written budget is exhausted (see [the plan note](#a-note-on-the-cloudflare-plan-free-vs-paid)). Upgrade to Workers Paid, or wait for the daily UTC reset, then reduce future cost via `sync_flagged_emails`/`no_sync`. |
 | **`sync_status` never reaches `all_idle`** | A large baseline is still draining (normal — let the cron run), or a resource shows `status: "error"` with a `last_error`. A `sync_disabled` resource is intentionally skipped (`no_sync` / default-skipped `flaggedEmails`) and excluded from `all_idle`. |

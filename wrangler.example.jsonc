@@ -47,7 +47,14 @@
     // (create_upload_link). Set to your workers.dev URL or custom domain to
     // enable web uploads — links are capability tokens stored in KV, no secret
     // required. Left at the placeholder, uploads stay disabled.
-    "SERVICE_BASE_URL": "https://mstodo-mcp.example.workers.dev"
+    "SERVICE_BASE_URL": "https://mstodo-mcp.example.workers.dev",
+    // Opt-in Microsoft To Do "My Day" support via the undocumented Substrate
+    // endpoint. Requires the Office 365 Exchange Online `Tasks.ReadWrite`
+    // delegated permission on the Entra app (see DEPLOYMENT.md) and a fresh
+    // /authorize after flipping to "true". When omitting an explicit date, the
+    // My Day tools compute "today" in TIMEZONE above (not UTC). Left "false",
+    // the three My Day tools return my_day_disabled.
+    "ENABLE_MY_DAY": "false"
   },
 
   "observability": { "enabled": true }

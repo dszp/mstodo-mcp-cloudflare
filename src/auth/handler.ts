@@ -1,7 +1,9 @@
 import { log } from "../log";
 import {
+  buildAnchorMailbox,
   buildAuthorizeUrl,
   computeCodeChallenge,
+  decodeJwtClaims,
   exchangeCode,
   fetchMe,
   generateCodeVerifier,
@@ -176,6 +178,15 @@ async function handleCallback(req: Request, env: Env, url: URL): Promise<Respons
   const now = Date.now();
   const stored = tokensFromResponse(token, token.refresh_token ?? "", now);
   await storeTokens(env, stored);
+
+  // x-anchormailbox (OID:{oid}@{tid}) for the Substrate My Day endpoint. oid =
+  // Graph /me.id; tid is not in /me, so read it from our own access token's
+  // claims (more reliable than MS_TENANT_ID, which may be common/consumers).
+  // Best-effort: if tid can't be resolved the anchor is omitted — the My Day
+  // write still persists, other clients just refresh it on their next poll.
+  const claims = decodeJwtClaims(token.access_token);
+  const tid = typeof claims?.tid === "string" ? claims.tid : null;
+  const anchorMailbox = tid ? buildAnchorMailbox(me.id, tid) : undefined;
   await storeIdentity(env, {
     id: me.id,
     displayName: me.displayName,
@@ -183,6 +194,7 @@ async function handleCallback(req: Request, env: Env, url: URL): Promise<Respons
     userPrincipalName: me.userPrincipalName,
     first_seen: prevIdentity?.id === me.id ? prevIdentity.first_seen : now,
     last_seen: now,
+    anchorMailbox,
   });
   log.info("owner_authenticated", {
     id: me.id,

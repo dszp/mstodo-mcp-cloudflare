@@ -12,6 +12,30 @@ export const SCOPES = "Tasks.ReadWrite offline_access User.Read";
 export const TOKENS_KEY = "tokens:owner";
 export const IDENTITY_KEY = "identity:owner";
 
+// My Day (opt-in) — the Substrate "My Day" endpoint is gated behind the Office
+// 365 Exchange Online resource (aud = https://outlook.office.com), a DIFFERENT
+// audience from Microsoft Graph. The single refresh token issued at first
+// consent covers any consented resource, so we mint resource-specific access
+// tokens on demand by re-requesting with the resource's scope. `offline_access`
+// keeps the refresh token rotating on these mints too.
+export const EXO_TASKS_SCOPE = "https://outlook.office.com/Tasks.ReadWrite";
+export const SUBSTRATE_SCOPES = `${EXO_TASKS_SCOPE} offline_access`;
+
+// Feature flag — read as a string var ("true"/"false"). String() widens the
+// generated literal type so the comparison is well-typed regardless of the
+// committed default in wrangler.jsonc.
+export function myDayEnabled(env: Env): boolean {
+  return String(env.ENABLE_MY_DAY ?? "").toLowerCase() === "true";
+}
+
+// Scopes requested at /authorize + code exchange. When My Day is enabled we add
+// the EXO Tasks scope so a SINGLE consent screen covers both resources; the
+// code→token exchange still returns a Graph-audience access token (Graph is
+// listed first), while the refresh token covers both.
+export function authScopes(env: Env): string {
+  return myDayEnabled(env) ? `${SCOPES} ${EXO_TASKS_SCOPE}` : SCOPES;
+}
+
 // Refresh the Microsoft access token when it has under this much life left,
 // rather than waiting for a 401 from Graph. Mirrors the plan's "proactively at
 // ~80% of lifetime" rule given the standard ~1 h access-token TTL. Shared by
@@ -86,7 +110,7 @@ export function buildAuthorizeUrl(
   u.searchParams.set("response_type", "code");
   u.searchParams.set("redirect_uri", opts.redirectUri);
   u.searchParams.set("response_mode", "query");
-  u.searchParams.set("scope", SCOPES);
+  u.searchParams.set("scope", authScopes(env));
   u.searchParams.set("state", opts.state);
   u.searchParams.set("code_challenge", opts.codeChallenge);
   u.searchParams.set("code_challenge_method", "S256");
@@ -121,7 +145,7 @@ export async function exchangeCode(
 ): Promise<TokenResponse> {
   const body = new URLSearchParams({
     client_id: env.MS_CLIENT_ID,
-    scope: SCOPES,
+    scope: authScopes(env),
     code: opts.code,
     redirect_uri: opts.redirectUri,
     grant_type: "authorization_code",
@@ -131,15 +155,28 @@ export async function exchangeCode(
   return postToken(env, body);
 }
 
-export async function refreshTokens(env: Env, refreshToken: string): Promise<TokenResponse> {
+// Refresh against an explicit scope (resource). The Microsoft v2 endpoint issues
+// one access token per resource per request; the shared refresh token can mint a
+// token for any consented resource by varying `scope`. Graph refreshes pass the
+// Graph SCOPES; substrate refreshes pass SUBSTRATE_SCOPES. Both rotate the
+// refresh token, so callers MUST serialize these (see TodoIndex sole-refresher).
+export async function refreshTokensForScope(
+  env: Env,
+  refreshToken: string,
+  scope: string,
+): Promise<TokenResponse> {
   const body = new URLSearchParams({
     client_id: env.MS_CLIENT_ID,
-    scope: SCOPES,
+    scope,
     grant_type: "refresh_token",
     refresh_token: refreshToken,
     client_secret: env.MS_CLIENT_SECRET,
   });
   return postToken(env, body);
+}
+
+export async function refreshTokens(env: Env, refreshToken: string): Promise<TokenResponse> {
+  return refreshTokensForScope(env, refreshToken, SCOPES);
 }
 
 // Persistence — always overwrite the whole record. Microsoft MAY return a new
@@ -205,6 +242,29 @@ export async function fetchMe(accessToken: string): Promise<MeIdentity> {
   return (await res.json()) as MeIdentity;
 }
 
+// Decode the (unverified) claims from a JWT's payload segment. We only read it
+// to extract the tenant id (`tid`) from our OWN freshly-issued access token at
+// callback time — never to make a trust decision — so signature verification is
+// unnecessary here. base64url → base64 with padding, then atob + JSON.parse.
+// Returns null on any malformed input rather than throwing.
+export function decodeJwtClaims(jwt: string): Record<string, unknown> | null {
+  const parts = jwt.split(".");
+  if (parts.length < 2) return null;
+  try {
+    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    b64 += "=".repeat((4 - (b64.length % 4)) % 4);
+    return JSON.parse(atob(b64)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+// x-anchormailbox value the Substrate endpoint wants so other connected To Do
+// clients see a My Day change in real time. Format: OID:{oid}@{tid}.
+export function buildAnchorMailbox(oid: string, tid: string): string {
+  return `OID:${oid}@${tid}`;
+}
+
 export function isOwner(env: Env, me: MeIdentity): boolean {
   const expected = env.OWNER_EMAIL.trim().toLowerCase();
   const candidates = [me.mail, me.userPrincipalName]
@@ -224,6 +284,11 @@ export interface OwnerIdentity {
   userPrincipalName: string;
   first_seen: number; // epoch ms — first time we saw this id
   last_seen: number; // epoch ms — most recent successful /authorize
+  // OID:{oid}@{tid} for the Substrate x-anchormailbox header (My Day). Optional:
+  // identities stored before the My Day feature lack it until the next
+  // /authorize. The substrate client tolerates a null anchor (the write still
+  // persists; other clients just see it on their next poll).
+  anchorMailbox?: string;
 }
 
 export async function loadIdentity(env: Env): Promise<OwnerIdentity | null> {
