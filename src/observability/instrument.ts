@@ -1,12 +1,20 @@
 import { log } from "../log";
 
+// MCP tool content blocks. Most tools return a single text block (JSON payload);
+// get_attachment additionally returns an `image` block for image attachments so
+// clients render them inline instead of decoding base64 out of the JSON text.
+export type McpContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 export type McpResponse = {
-  content: { type: "text"; text: string }[];
+  content: McpContentBlock[];
   isError?: boolean;
 };
 
 export function extractFailureFields(res: McpResponse): Record<string, unknown> {
-  const text = res.content[0]?.text;
+  const block = res.content.find((c): c is { type: "text"; text: string } => c.type === "text");
+  const text = block?.text;
   if (!text) return {};
   try {
     const parsed = JSON.parse(text);

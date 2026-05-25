@@ -22,7 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Exact-duplicate detection.** Before attaching, the Worker lists the task's existing
   attachments and skips any uploaded file whose content (SHA-256) matches one already present
   (only same-size candidates are fetched to compare), plus within-batch de-duplication. Only the
-  duplicate files are skipped; the rest attach.
+  duplicate files are skipped; the rest attach. Files larger than 6 MiB are de-duplicated by
+  name+size instead of content hash (downloading the whole existing attachment to hash it is
+  impractical, and Graph rejects duplicate names on the upload-session path anyway).
+- **`get_attachment` returns images as a native MCP `image` content block** (rendered inline by
+  the client) alongside the JSON metadata block, instead of only base64 inside the JSON text.
+  `contentBytes` is omitted from the metadata block for images so the base64 doesn't traverse the
+  model's context twice. Non-image attachments are unchanged (text + base64).
 - **`SERVICE_BASE_URL`** var (in `wrangler.jsonc`) — the Worker's public origin, used to build
   upload links and the only configuration needed to enable web uploads.
 
