@@ -42,7 +42,12 @@
   "vars": {
     "TIMEZONE": "America/New_York",
     "DELTA_SYNC_INTERVAL_MIN": "15",
-    "LIST_METADATA_SOFT_TTL_SEC": "900"
+    "LIST_METADATA_SOFT_TTL_SEC": "900",
+    // Public origin of THIS deployed Worker, used to build web upload links
+    // (create_upload_link). Set to your workers.dev URL or custom domain to
+    // enable web uploads — links are capability tokens stored in KV, no secret
+    // required. Left at the placeholder, uploads stay disabled.
+    "SERVICE_BASE_URL": "https://mstodo-mcp.example.workers.dev"
   },
 
   "observability": { "enabled": true }

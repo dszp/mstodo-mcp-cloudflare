@@ -49,8 +49,14 @@ The server exposes a Microsoft To Do tool surface over MCP. Highlights:
 - **Lists & tasks (CRUD)** — `list_lists`, `get_list`, `create_list`, `update_list`,
   `delete_list`; `list_tasks`, `get_task`, `create_task`, `update_task`,
   `delete_task`, `move_task`.
-- **Sub-resources** — checklist items, linked resources, and attachments
-  (create/list/get/update/delete each).
+- **Sub-resources** — checklist items and linked resources
+  (create/list/get/update/delete each); attachments (`list_attachments`,
+  `get_attachment`, `delete_attachment`).
+- **Attachment upload** — `create_upload_link` mints a short-lived, single-use
+  web link the user opens in a browser to attach file(s) to a specific task. The
+  bytes go browser → Worker → Microsoft (≤ 25 MB each, inline or chunked
+  upload-session) and never pass through the model. See
+  [Web upload](#web-upload--upload) below.
 - **Cross-list query & search** (answered from the local `TodoIndex` mirror):
   - `query_tasks` — filter by lists, status, date ranges, importance, has-checklist;
     `types`/`exclude_types` (include/exclude by list classification); a `completed`
@@ -106,7 +112,28 @@ examples (with the exact `wrangler kv key put` commands) are in `config-examples
 Regex → linked-resource rules applied to task titles/bodies. See `config-examples/link-rules.json`.
 
 ### `config:attachments` — inline upload cap
-`max_inline_bytes` (hard ceiling 3072 KiB, the confirmed Graph limit). See `config-examples/attachments.json`.
+`max_inline_bytes` (hard ceiling 3072 KiB, the confirmed Graph limit). For web uploads this is
+the cutover point: files at or below it are attached inline, larger ones (up to 25 MB) via a
+chunked Graph upload-session. See `config-examples/attachments.json`.
+
+### Web upload (`/upload`)
+File bytes can't practically travel through an MCP tool call (the model's per-call argument
+budget is a few KB). Instead, `create_upload_link` mints a short-lived (default 15 min, max 30),
+**single-use** link scoped to one specific task; the user opens it in a browser and the bytes go
+straight from the browser to the Worker and on to Microsoft Graph — never through the model.
+Provide a `filename` for a single-file link, or omit it for a batch link (up to `max_files`,
+1–10, default 5). Identical files already attached to the task are detected by content hash and
+skipped as duplicates.
+
+The link is a **capability token**: an unguessable random id (32 bytes from the CSPRNG). The
+destination scope (list/task ids, filename, file count) is stored server-side in `OAUTH_KV` under
+that id with a TTL; the id in the link reveals nothing. Holding the id authorizes one upload to
+exactly the scoped task — verified by a KV lookup, expired by the TTL, consumed (deleted) on use.
+There is **no signing key or shared secret** to configure: the id *is* the nonce.
+
+To enable it, set **`SERVICE_BASE_URL`** (var, in `wrangler.jsonc`) — the public origin of this
+Worker (your `workers.dev` URL or custom domain), used to build the link. With it unset (or left
+at the placeholder), `create_upload_link` returns `upload_disabled`.
 
 ## Reset
 
@@ -219,11 +246,22 @@ This is a documented deviation from the Phase 2 plan's "Cache snapshot to `tasks
 
 **Revisit Option B if** `wrangler tail` later shows the LLM repeatedly paginating deep through large lists within short windows — the up-front fetch + cache reads would save Graph quota end-to-end at the cost of first-page latency. As of Phase 2, typical To Do usage is bursty and shallow; live pagination is cheaper overall and lets us defer the cache-shape commitment to Phase 5 where it's load-bearing.
 
-### Attachment upload — the MCP transport, not the size cap, is the real limit
+### Attachment upload — web `/upload`, not an MCP tool call
 
-`create_attachment` enforces a hard 3072 KiB inline cap (empirically confirmed in Phase 0.5b), but that cap is rarely what callers actually hit. **File bytes can't practically travel through an MCP tool call at all:** Claude's per-call output/token budget caps tool arguments at a few KB, so all but trivial uploads fail before Graph is even reached. (Confirmed while building the sibling `obsidian-mcp-cloudflare` project.)
+**File bytes can't practically travel through an MCP tool call:** Claude's per-call output/token
+budget caps tool arguments at a few KB, so all but trivial uploads fail before Graph is even
+reached (confirmed while building the sibling `obsidian-mcp-cloudflare` project). The inline
+3072 KiB Graph cap was never the binding constraint — the MCP transport was.
 
-**Revisit via a web-based `/upload` endpoint** — a custom ~15-minute, single-use link the user taps, so bytes go browser → Worker and never through the model; the Worker then attaches via Graph (inline for ≤ 3072 KiB, upload-session / chunked `PUT` for larger). See `ROADMAP.md` §8 for the full approach (portable from `obsidian-mcp-cloudflare`). The current `create_attachment` error message guides callers to the inline cap until this lands.
+The original `create_attachment` tool (inline base64 in the tool call) was therefore **removed**
+and replaced by the web-upload flow: `create_upload_link` + the public `/upload` endpoint (see
+[Web upload](#web-upload--upload)). Bytes go browser → Worker → Graph, attached inline for
+≤ 3072 KiB and via a chunked upload-session for larger files up to 25 MB. Links are capability
+tokens — an unguessable random id whose task scope lives in `OAUTH_KV` under a TTL — task-scoped,
+single-use, and never generic (every link targets one specific task). No signing key or shared
+secret is involved. The Worker forwards bytes synchronously during the POST, so no R2 bucket or
+temporary blob storage is needed. Ported from `obsidian-mcp-cloudflare` (its `src/upload/*`),
+adapted to the To Do attachment APIs and simplified to a secret-less capability token.
 
 ## Author
 

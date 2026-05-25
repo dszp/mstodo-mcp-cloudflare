@@ -3,6 +3,7 @@ import { MSToDoMCP } from "./mcp/agent";
 import { TodoIndex } from "./cache/index-do";
 import { OWNER_DO_NAME } from "./cache/sql";
 import AuthHandler from "./auth/handler";
+import { handleUpload } from "./upload/handler";
 
 export { MSToDoMCP, TodoIndex };
 
@@ -24,10 +25,17 @@ export default {
 
     if (url.pathname === "/health") {
       return new Response(
-        JSON.stringify({ ok: true, service: "mstodo-mcp", version: "0.1.0-dev" }),
+        JSON.stringify({ ok: true, service: "mstodo-mcp", version: "0.2.0" }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
+
+    // Public (non-OAuth) web upload endpoint. Returns null for any other path so
+    // OAuth/MCP routing below is unaffected. Lives before oauthProvider.fetch so
+    // /upload is reachable without an OAuth access token (it authenticates with a
+    // single-use signed link minted by create_upload_link).
+    const uploadRes = await handleUpload(req, env);
+    if (uploadRes) return uploadRes;
 
     return oauthProvider.fetch(req, env, ctx);
   },

@@ -128,6 +128,10 @@ cp wrangler.example.jsonc wrangler.jsonc
 Edit `wrangler.jsonc` and fill in:
 - `account_id` — your Cloudflare account ID (Dashboard → Workers, or `npx wrangler whoami`).
 - the two `kv_namespaces[].id` values from step 2.
+- `vars.SERVICE_BASE_URL` — the public origin this Worker is reachable at, used to build
+  web upload links. Set it to your `https://mstodo-mcp.<your-subdomain>.workers.dev` (or
+  custom domain). It ships as a placeholder; if you don't know the URL yet, deploy once
+  (step 5), then set it and re-deploy. Only needed if you use the web upload feature.
 
 `wrangler.jsonc` is **gitignored** (it holds account-specific IDs). The committed
 `wrangler.example.jsonc` is what the test pool and CI read, so `npm test` works
@@ -147,6 +151,12 @@ Worker as encrypted secrets:
 bash scripts/push-secrets.sh        # pushes every name from .dev.vars over stdin
 # or individually: npx wrangler secret put MS_CLIENT_SECRET
 ```
+
+**Optional — enable web attachment uploads.** To use `create_upload_link` / the `/upload`
+endpoint, set `vars.SERVICE_BASE_URL` in `wrangler.jsonc` (step 3) to this Worker's real public
+origin. That's the only configuration needed — upload links are unguessable capability tokens
+stored in KV, so there is **no secret to set**. Leaving `SERVICE_BASE_URL` at the placeholder
+keeps `create_upload_link` disabled.
 
 ### 5. Deploy
 
