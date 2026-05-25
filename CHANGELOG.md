@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] – 2026-05-24
+
+### Added
+- **Web-based attachment upload** — a new `create_upload_link` MCP tool plus a public
+  (non-OAuth) `/upload` endpoint. The tool mints a short-lived (default 15 min, max 30),
+  single-use link scoped to one specific task; the user opens it in a browser and the file
+  bytes go straight from the browser to the Worker and on to Microsoft Graph — never through
+  the model. Inline POST for ≤ 3072 KiB, chunked Graph upload-session (4 MiB ranges) for
+  larger files up to 25 MB. Single-file links (baked `filename`) or batch links (up to
+  `max_files`, 1–10, default 5). New module `src/upload/{tokens,sniff,graph-upload,handler,page}.ts`.
+- **Exact-duplicate detection.** Before attaching, the Worker lists the task's existing
+  attachments and skips any uploaded file whose content (SHA-256) matches one already present
+  (only same-size candidates are fetched to compare), plus within-batch de-duplication. Only the
+  duplicate files are skipped; the rest attach.
+- **`SERVICE_BASE_URL`** var (in `wrangler.jsonc`) — the Worker's public origin, used to build
+  upload links and the only configuration needed to enable web uploads.
+
+### Removed
+- **`create_attachment` tool** (inline base64 passed in the tool call). Real files can't
+  practically travel through an MCP tool call (the model's per-call argument budget is a few KB),
+  so all but trivial uploads failed before Graph was reached. Superseded by the web-upload flow
+  above. `list_attachments`, `get_attachment`, and `delete_attachment` are unchanged.
+
+### Changed
+- **`config:attachments` `max_inline_bytes`** is now the web-upload inline-vs-session cutover
+  (files at or below it attach inline, larger ones via a chunked upload-session) rather than a
+  hard reject threshold.
+
+### Security
+- Upload links are **unguessable capability tokens** — a 256-bit CSPRNG id whose task scope is
+  stored in `OAUTH_KV` under a TTL. Verification is a KV lookup, expiry is the TTL, single-use is
+  enforced by deleting the entry on first use (burned before the attach runs, so a leaked or
+  retried link can't replay). The id reveals nothing about its target, and there is **no signing
+  key or shared secret** to manage. The `/upload` POST is multipart-only (rejects urlencoded/
+  cookie-based CSRF), and the Graph upload-session URL is host-pinned to `graph.microsoft.com`
+  before the owner's bearer token is attached to any chunk PUT.
+
 ## [0.1.1] – 2026-05-24
 
 ### Fixed

@@ -11,6 +11,12 @@ import type { TodoIndex } from "../cache/index-do";
 import { mapPool } from "../graph/concurrency";
 import { parseDateInput } from "../util/dates";
 import {
+  createUploadCapability,
+  DEFAULT_MAX_FILES,
+  MAX_FILES_CAP,
+  type UploadCapabilityScope,
+} from "../upload/tokens";
+import {
   AttachmentSchema,
   ChecklistItemSchema,
   LinkedResourceSchema,
@@ -210,7 +216,7 @@ function getGraphInnerErrorCode(detail: string | undefined): string | undefined 
 }
 
 export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvider {
-  server = new McpServer({ name: "mstodo-mcp", version: "0.1.0-dev" });
+  server = new McpServer({ name: "mstodo-mcp", version: "0.2.0" });
 
   async init() {
     this.server.registerTool(
@@ -1610,30 +1616,57 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     );
 
     this.server.registerTool(
-      "create_attachment",
+      "create_upload_link",
       {
         description:
-          "Attach a file to a task via inline upload (≤ 3072 KiB raw). content_bytes must be base64-encoded. Returns the created attachment metadata. Invalidates the list's task cache.",
+          "Mint a short-lived (default 15 min, max 30), single-use web link the user opens in a browser to attach a file to THIS specific task. The file's bytes go straight from the browser to the server and on to Microsoft (≤ 25 MB) — they never pass through the model, so this is the way to attach anything beyond a trivial generated snippet. Returns { upload_url, expires_at }. Present upload_url to the user as a tappable link, then poll list_attachments / get_attachment to confirm. With `filename` the link accepts exactly one file stored under that name; without it the link accepts up to `max_files` files.",
         inputSchema: {
-          list: z.string().min(1).optional().describe("List alias (from get_list_config), display name, or Graph list ID."),
-          task_id: z.string().min(1).describe("Microsoft Graph task id."),
-          name: z.string().min(1).describe("Filename including extension (e.g. 'report.pdf')."),
-          content_bytes: z
+          list: z
             .string()
             .min(1)
-            .describe(
-              "Base64-encoded file content. Decoded size must be ≤ 3072 KiB. Larger files are not yet supported.",
-            ),
+            .optional()
+            .describe("List alias (from get_list_config), display name, or Graph list ID. Omit to resolve from the index."),
+          task_id: z.string().min(1).describe("Microsoft Graph task id the file(s) will attach to."),
+          filename: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("Bake a fixed filename (incl. extension) — makes a single-file link stored under this name."),
           content_type: z
             .string()
+            .min(1)
             .optional()
-            .describe(
-              "MIME type (e.g. 'image/png', 'application/pdf'). Defaults to 'application/octet-stream'.",
-            ),
+            .describe("Optional MIME hint; the server sniffs the bytes and overrides this when it can."),
+          max_files: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_FILES_CAP)
+            .optional()
+            .describe(`Batch links only (no filename): max files the link accepts (1–${MAX_FILES_CAP}, default ${DEFAULT_MAX_FILES}).`),
+          ttl_minutes: z
+            .number()
+            .int()
+            .min(1)
+            .max(30)
+            .optional()
+            .describe("Link lifetime in minutes (1–30, default 15)."),
         },
       },
-      async ({ list, task_id, name, content_bytes, content_type }): Promise<McpResponse> =>
-        this.withGraph("create_attachment", async (graph) => {
+      async ({ list, task_id, filename, content_type, max_files, ttl_minutes }): Promise<McpResponse> =>
+        instrument("create_upload_link", async () => {
+          const base = (this.env.SERVICE_BASE_URL ?? "").replace(/\/+$/, "");
+          if (!/^https?:\/\/[^/]+/i.test(base)) {
+            return errResponse("upload_disabled", {
+              detail: "SERVICE_BASE_URL is not configured as an absolute URL.",
+            });
+          }
+          if (base.includes("example.workers.dev")) {
+            // Ships as a placeholder; minting links to it would produce dead URLs.
+            return errResponse("upload_disabled", {
+              detail: "SERVICE_BASE_URL is still the example placeholder — set it to this Worker's real public origin.",
+            });
+          }
           const list_id = await this.resolveListForTask(list, task_id);
           if (!list_id) {
             return errResponse("list_required", {
@@ -1641,50 +1674,34 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
               hint: "Task not found in the index; pass `list` explicitly.",
             });
           }
-          // Load the configurable cap (falls back to the hard Graph ceiling).
-          const attachmentConfig = await loadAttachmentConfig(this.env);
-          const maxInlineBytes = attachmentConfig.max_inline_bytes;
-          // Estimate decoded size from base64 length before sending to Graph.
-          const estimatedRawBytes = Math.floor(content_bytes.replace(/\s/g, "").length * 3 / 4);
-          if (estimatedRawBytes > maxInlineBytes) {
-            return errResponse("attachment_too_large", {
-              estimated_raw_bytes: estimatedRawBytes,
-              max_inline_bytes: maxInlineBytes,
-              hint: "File exceeds the configured inline limit. Upload-session support for larger files is not yet implemented.",
-            });
+
+          const scope: UploadCapabilityScope = { list_id, task_id };
+          if (content_type) scope.content_type = content_type;
+          if (filename) {
+            scope.filename = filename;
+          } else {
+            scope.max_files = Math.min(Math.max(max_files ?? DEFAULT_MAX_FILES, 1), MAX_FILES_CAP);
           }
 
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/attachments`;
-          const body = {
-            "@odata.type": "#microsoft.graph.taskFileAttachment",
-            name,
-            contentBytes: content_bytes,
-            contentType: content_type ?? "application/octet-stream",
+          const ttlSeconds = ttl_minutes ? ttl_minutes * 60 : undefined;
+          const { token, expiresAt } = await createUploadCapability(this.env, scope, ttlSeconds);
+          const upload_url = `${base}/upload?t=${encodeURIComponent(token)}`;
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  upload_url,
+                  expires_at: expiresAt,
+                  list_id,
+                  task_id,
+                  filename: filename ?? null,
+                  max_files: scope.max_files ?? null,
+                }),
+              },
+            ],
           };
-
-          try {
-            const attachment = await graph.postJson(url, body, TaskFileAttachmentSchema);
-            await this.#indexSetFlags(task_id, { has_attachments: true });
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify({ ok: true, list_id, task_id, attachment }),
-                },
-              ],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("task_not_found", { list_id, task_id });
-              }
-            }
-            throw e;
-          }
         }),
     );
 
@@ -1947,7 +1964,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "set_attachment_config",
       {
         description:
-          "Update the attachment configuration. max_inline_bytes controls the raw size cap for create_attachment (must be ≤ 3072 KiB). Overwrites the full config.",
+          "Update the attachment configuration. max_inline_bytes is the web-upload cutover: files at or below it attach inline, larger ones (up to 25 MB) via a chunked upload-session (must be ≤ 3072 KiB). Overwrites the full config.",
         inputSchema: {
           max_inline_bytes: z
             .number()

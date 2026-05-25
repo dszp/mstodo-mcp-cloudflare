@@ -123,7 +123,23 @@ Optionally mirror file attachments into R2 for offline-resilient reads and to
 sidestep Graph's inline-content size limits on the read path. Additive; the
 attachment tools already centralize attachment I/O.
 
-## 8. Web-based attachment upload (`/upload` endpoint)
+## 8. Web-based attachment upload (`/upload` endpoint) — ✅ DONE
+
+**Implemented.** `create_attachment` (inline base64) was removed and replaced by
+`create_upload_link` + the public `/upload` endpoint. The tool mints a short-lived
+(default 15 min, max 30), single-use link scoped to one specific task; the user opens
+it in a browser and bytes go browser → Worker → Graph (inline for ≤ 3072 KiB, chunked
+upload-session up to 25 MB), never through the model. Links support a single baked
+filename or a batch of up to `max_files` (1–10, default 5); exact-duplicate files (by
+content hash) already on the task are skipped. The link is a **capability token** — an
+unguessable random id whose task scope is stored in `OAUTH_KV` under a TTL, verified by
+lookup, single-use by delete; **no signing key / shared secret** (simplified from the
+originally-planned HMAC design — see below — since single-use already requires KV state).
+Bytes are forwarded synchronously (no R2 / no temp blob). Requires only the
+`SERVICE_BASE_URL` var. Code: `src/upload/{tokens,sniff,graph-upload,handler,page}.ts`;
+tests under `test/upload-*`.
+
+Original design notes below (retained for context).
 
 `create_attachment` takes file bytes as base64 in the tool call, but **a real
 file can't practically be uploaded through an MCP tool call.** Claude's per-call

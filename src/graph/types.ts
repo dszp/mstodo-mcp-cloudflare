@@ -160,6 +160,19 @@ export const AttachmentSchema = z.discriminatedUnion("@odata.type", [
 ]);
 export type Attachment = z.infer<typeof AttachmentSchema>;
 
+// uploadSession — returned by .../attachments/createUploadSession for large
+// (> 3072 KiB) file attachments. `uploadUrl` is a graph.microsoft.com URL the
+// caller PUTs byte ranges to (with /content appended); `nextExpectedRanges`
+// tells the caller where to resume. See src/upload/graph-upload.ts.
+export const UploadSessionSchema = z
+  .object({
+    uploadUrl: z.string().url(),
+    expirationDateTime: z.string().optional(),
+    nextExpectedRanges: z.array(z.string()).optional(),
+  })
+  .passthrough();
+export type UploadSession = z.infer<typeof UploadSessionSchema>;
+
 // todoTask
 export const ImportanceSchema = z.enum(["low", "normal", "high"]).or(z.string());
 export type Importance = z.infer<typeof ImportanceSchema>;

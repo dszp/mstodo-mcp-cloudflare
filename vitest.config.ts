@@ -18,6 +18,7 @@ const poolOptions = {
       MS_TENANT_ID: "test-tenant",
       MS_CLIENT_ID: "test-client",
       MS_CLIENT_SECRET: "test-secret",
+      SERVICE_BASE_URL: "https://mstodo-mcp.example.workers.dev",
     },
   },
 };

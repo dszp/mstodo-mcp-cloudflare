@@ -107,9 +107,10 @@ export type ListsConfig = z.infer<typeof ListsConfigSchema>;
 
 // config:attachments — stored as JSON in KV under the key "config:attachments".
 //
-// `max_inline_bytes` caps the raw (pre-base64) file size accepted by
-// create_attachment. Must not exceed MAX_INLINE_ATTACHMENT_BYTES (3072 KiB),
-// which is the empirically confirmed Graph hard limit (Phase 0.5b).
+// `max_inline_bytes` is the cutover the web upload (/upload) uses: files at or
+// below it attach inline, larger ones (up to 25 MB) via a chunked Graph
+// upload-session. Must not exceed GRAPH_INLINE_HARD_LIMIT (3072 KiB), the
+// empirically confirmed Graph inline ceiling (Phase 0.5b).
 
 const GRAPH_INLINE_HARD_LIMIT = 3072 * 1024; // 3072 KiB — Graph's confirmed ceiling
 
