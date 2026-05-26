@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`move_task` tool description corrected.** Removed the misleading "whether the id was preserved"
+  (the id always changes on both paths — read `task_id` + `previous_task_id`), and noted that a
+  failure to enumerate attachments also aborts the fallback with the source intact. Description-only;
+  no behavior change.
+
 ## [0.4.0] – 2026-05-26
 
 ### Added
