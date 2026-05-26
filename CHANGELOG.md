@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] – 2026-05-26
+
+### Added
+- **`SubstrateClient.reparentTask()` and `getTask()`** (`src/graph/substrate-client.ts`) — `reparentTask`
+  issues the lossless cross-list move (`PATCH taskfolders/{dest}/tasks/{id}` with body
+  `{ ParentFolderId: dest }`, the same shape the To Do web app's drag-and-drop sends); `getTask` reads a
+  single task's `CommittedDay` for the fallback's My-Day carry. `ParentFolderId` is now parsed on the
+  Substrate task shape so the move can be confirmed from the PATCH response.
+- **`src/graph/todo-resources.ts`** — shared, reusable Graph operations on a task's sub-resources
+  (`createChecklistItem`, `createLinkedResource`, `listAttachments`, `getFileAttachment`). Both the
+  standalone MCP tools (`create_checklist_item`, `create_linked_resource`, `list_attachments`) and
+  `move_task`'s copy/delete fallback now go through these, so the URL shapes, request bodies, and
+  response schemas live in one place.
+
+### Changed
+- **`move_task` is now lossless when My Day/EXO is enabled.** It prefers an in-place **Substrate
+  re-parent** that moves the *same underlying Exchange item* in one call, so **checklist items, the
+  linked resource, attachments, and My Day (`CommittedDay`) all ride along** — previously everything
+  except task scalar fields was silently dropped (create-then-delete copied only top-level fields). The
+  task **id changes** on a re-parent (the new id encodes the destination folder). When Substrate is
+  unavailable it **falls back** to the create-then-delete copy, now extended to copy sub-resources
+  individually (checklist in `createdDateTime` order, the single linked resource, and attachments by
+  round-tripping bytes through the Worker — small files inline, ≥ 3 MiB via the upload-session path),
+  with **copy-before-delete + abort-with-cleanup** so a required-copy failure leaves the source fully
+  intact (a reference-type attachment, or one > 25 MiB, aborts). Attachments are enumerated via the
+  attachments **collection** (`GET …/attachments`) — `$expand=attachments` is silently ignored on a
+  todoTask, and if `hasAttachments` is set but enumeration is empty the move aborts rather than
+  delete-without-copying. A duplicate-creation guard re-checks the source before any fallback create so
+  an ambiguous Substrate failure can't produce a second copy. **Both paths verified live**: the primary
+  re-parent (checklist + linked resource + attachment + My Day carried, id changed, source removed), and
+  the fallback (with `ENABLE_MY_DAY` off — checklist + linked resource + a small attachment byte-identical
+  through the round-trip, and a 1-small-+-two-4 MB-attachment task copied with sizes preserved via the
+  session path; source removed).
+- **`move_task` return shape changed (breaking).** The old `new_task_id` field is replaced by a unified
+  shape: `method` (`"substrate_reparent" | "copy_delete"`), `task_id` (always the *current* id), and
+  `previous_task_id` (present whenever the id changed — both paths change it). The fallback path also
+  returns `checklist_copied` / `linked_resources_copied` / `attachments_copied` and `my_day_carried`.
+- **`ENABLE_MY_DAY` now also gates the lossless move.** With it off, `move_task` silently downgrades to
+  the lossy create/delete fallback — documented in the tool description and the flag's notes.
+
 ## [0.3.0] – 2026-05-25
 
 ### Added

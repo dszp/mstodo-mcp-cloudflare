@@ -25,6 +25,7 @@ import {
   TaskFileAttachmentSchema,
   TodoTaskListSchema,
   TodoTaskSchema,
+  type Attachment,
   type TodoTask,
   type TodoTaskList,
 } from "../graph/types";
@@ -34,6 +35,15 @@ import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatt
 import { classifyList, stripEmoji } from "../config/classifier";
 import { resolveListId } from "../config/aliases";
 import { resolveListScope, resolveStatusFilter } from "../config/query-scope";
+import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
+import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
+import type { SubstrateTask } from "../graph/substrate-client";
+import {
+  createChecklistItem,
+  createLinkedResource,
+  getFileAttachment,
+  listAttachments,
+} from "../graph/todo-resources";
 
 const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
 
@@ -55,6 +65,13 @@ function todayInTimeZone(timeZone: string): string {
 // checks compare on the date, not the raw string.
 function committedDatePart(committed: string | null | undefined): string | null {
   return committed ? committed.slice(0, 10) : null;
+}
+
+// Wrap a plain JSON result object in the MCP text-content envelope. The codebase
+// builds this inline in most handlers; move_task has several return points, so
+// it shares one helper.
+function jsonResult(result: Record<string, unknown>): McpResponse {
+  return { content: [{ type: "text", text: JSON.stringify(result) }] };
 }
 
 // `etag_304` was removed in Phase 2 step 10 — step 9 smoke confirmed
@@ -803,7 +820,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "move_task",
       {
         description:
-          "Move a task from one list to another. Non-atomic: creates a copy in the destination list, then deletes from source. Checklist items, linked resources, and attachments are NOT copied — only task fields. If the source delete fails, returns ok: true with a warning and the new task id so the caller can retry. Invalidates both lists' caches.",
+          "Move a task between lists. Prefers a LOSSLESS in-place Substrate re-parent when ENABLE_MY_DAY/EXO is enabled: one PATCH moves the same underlying item, so checklist items, the linked resource, attachments, and My Day all ride along. The task id CHANGES on a re-parent (the new id encodes the destination), so the result returns `task_id` (current) plus `previous_task_id`. When Substrate is unavailable it FALLS BACK to a non-atomic create-then-delete full copy: sub-resources are copied individually (checklist in order, the single linked resource, and attachments by round-tripping bytes through the Worker). A required-copy failure aborts with the SOURCE LEFT INTACT — an attachment >25 MiB, or a reference-type attachment (no bytes to copy), aborts the move. A retried failed copy can create a second destination task (no idempotency key — documented footgun). `method` ('substrate_reparent' | 'copy_delete') tells you which path ran and whether the id was preserved. Invalidates both lists' caches. NOTE: disabling ENABLE_MY_DAY silently downgrades moves to the lossy fallback.",
         inputSchema: {
           task_id: z.string().min(1).describe("Microsoft Graph task id to move."),
           from_list: z.string().min(1).describe("Source list — alias, display name, or Graph list ID."),
@@ -816,7 +833,10 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             this.resolveList(from_list),
             this.resolveList(to_list),
           ]);
-          // Step 1: Fetch the source task (expand sub-resources to surface warning).
+          // Fetch the source with all sub-resources expanded — required for the
+          // copy/delete fallback and for not-found handling. ($expand carries
+          // checklist/linked-resource/attachment metadata but NOT attachment
+          // bytes; those are fetched per-attachment in the fallback.)
           const srcUrl = new URL(
             `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(from_list_id)}/tasks/${encodeURIComponent(task_id)}`,
           );
@@ -838,36 +858,66 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             throw e;
           }
 
-          // Step 2: Build POST body from copyable fields only. Server-managed
-          // fields (id, createdDateTime, lastModifiedDateTime, hasAttachments,
-          // bodyLastModifiedDateTime) and sub-resource collections are excluded.
-          const postBody: Record<string, unknown> = {};
-          if (srcTask.title) postBody.title = srcTask.title;
-          if (srcTask.body) postBody.body = srcTask.body;
-          if (srcTask.dueDateTime) postBody.dueDateTime = srcTask.dueDateTime;
-          if (srcTask.reminderDateTime) postBody.reminderDateTime = srcTask.reminderDateTime;
-          if (srcTask.startDateTime) postBody.startDateTime = srcTask.startDateTime;
-          if (srcTask.completedDateTime) postBody.completedDateTime = srcTask.completedDateTime;
-          if (srcTask.importance) postBody.importance = srcTask.importance;
-          if (srcTask.status) postBody.status = srcTask.status;
-          if (srcTask.isReminderOn !== undefined) postBody.isReminderOn = srcTask.isReminderOn;
-          if (srcTask.categories?.length) postBody.categories = srcTask.categories;
-          if (srcTask.recurrence) postBody.recurrence = srcTask.recurrence;
+          // ---- PRIMARY: lossless Substrate in-place re-parent ----
+          // When My Day/EXO is enabled, move the SAME underlying item in one
+          // PATCH so checklist items, attachments, the linked resource, and My
+          // Day ride along. The id changes (new id encodes the destination), so
+          // we surface previous_task_id and re-key the cache. Runtime EXO
+          // consent is only known when the call is made; unavailable Substrate
+          // or an unconfirmed move cleanly degrades to the fallback below.
+          if (myDayEnabled(this.env)) {
+            const r = await this.#reparentViaSubstrate(to_list_id, task_id);
+            if (r.ok) {
+              const newId = r.task.Id ?? task_id;
+              // Best-effort cache re-key. Reuse srcTask's expansions so the
+              // has_checklist/has_attachments flags carry to the new id; delta
+              // sync (source removal + dest add) self-heals any gap next cycle.
+              await this.#indexDeleteTask(task_id);
+              await this.#indexUpsertTask({ ...srcTask, id: newId }, to_list_id);
+              return jsonResult({
+                ok: true,
+                method: "substrate_reparent",
+                task_id: newId,
+                previous_task_id: task_id,
+                from_list_id,
+                to_list_id,
+              });
+            }
+            if (r.attempted) {
+              // A re-parent was attempted but didn't confirm — it may have
+              // committed at EWS while dropping its response, so blindly
+              // creating a copy would duplicate. Re-check the source before any
+              // fallback create (the duplicate-creation guard).
+              const recheck = await this.#recheckSource(graph, from_list_id, task_id);
+              if (decideAfterReparentFailure(recheck) === "treat_as_moved") {
+                await this.#indexDeleteTask(task_id);
+                const newId = r.task?.Id;
+                return jsonResult({
+                  ok: true,
+                  method: "substrate_reparent",
+                  task_id: newId ?? task_id,
+                  previous_task_id: task_id,
+                  from_list_id,
+                  to_list_id,
+                  note: newId
+                    ? "Re-parent response was not fully confirmed; treated as moved (delta sync will reconcile)."
+                    : "Source no longer present after an ambiguous re-parent; treated as moved. The task id may have changed — delta sync will reconcile.",
+                });
+              }
+              // Source confirmed still present → safe to fall through to copy.
+            }
+            // r.attempted === false (Substrate unavailable, no PATCH sent) →
+            // fall straight through to the copy/delete fallback.
+          }
 
-          // Collect sub-resource warnings — these exist on source but won't be
-          // on the new task since Graph doesn't accept them in a POST body.
-          const notCopied: string[] = [];
-          if (srcTask.checklistItems?.length)
-            notCopied.push(`${srcTask.checklistItems.length} checklist item(s)`);
-          if (srcTask.linkedResources?.length)
-            notCopied.push(`${srcTask.linkedResources.length} linked resource(s)`);
-          if (srcTask.hasAttachments) notCopied.push("attachment(s)");
-
-          // Step 3: Create in destination list.
-          const dstUrl = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(to_list_id)}/tasks`;
+          // ---- FALLBACK: copy everything to destination, then delete source ----
+          // Lossy path made as lossless as Graph allows. Copy-before-delete: a
+          // required-copy failure aborts with the source fully intact.
+          const postBody = buildMoveCopyBody(srcTask);
+          const dstTasksUrl = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(to_list_id)}/tasks`;
           let newTask: TodoTask;
           try {
-            newTask = await graph.postJson(dstUrl, postBody, TodoTaskSchema);
+            newTask = await graph.postJson(dstTasksUrl, postBody, TodoTaskSchema);
             await this.#indexUpsertTask(newTask, to_list_id);
           } catch (e) {
             if (e instanceof GraphError) {
@@ -881,10 +931,173 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             }
             throw e;
           }
+          const newId = newTask.id;
 
-          // Step 4: Delete from source. Non-fatal on failure — return warning so
-          // caller can retry delete_task rather than losing the new task id.
-          let deleteWarning: string | undefined;
+          // Abort with best-effort cleanup of the just-created destination task.
+          // The source is never touched during the copy phase, so it remains the
+          // valid, complete task (task_id below is the still-live source id).
+          const abort = async (
+            error: string,
+            extra: Record<string, unknown> = {},
+          ): Promise<McpResponse> => {
+            let cleanup_succeeded = true;
+            try {
+              await graph.deleteResource(
+                `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(to_list_id)}/tasks/${encodeURIComponent(newId)}`,
+              );
+              await this.#indexDeleteTask(newId);
+            } catch (e) {
+              cleanup_succeeded = false;
+              log.warn("move_fallback_cleanup_failed", { newId, error: String(e) });
+            }
+            const result: Record<string, unknown> = {
+              ok: false,
+              method: "copy_delete",
+              error,
+              from_list_id,
+              to_list_id,
+              task_id, // source id — still valid, source untouched
+              cleanup_succeeded,
+              ...extra,
+            };
+            if (!cleanup_succeeded) result.orphan_task_id = newId;
+            return jsonResult(result);
+          };
+
+          // Copy checklist items in createdDateTime order.
+          let checklist_copied = 0;
+          const items = (srcTask.checklistItems ?? [])
+            .slice()
+            .sort((a, b) => (a.createdDateTime ?? "").localeCompare(b.createdDateTime ?? ""));
+          for (const it of items) {
+            try {
+              await createChecklistItem(graph, to_list_id, newId, {
+                displayName: it.displayName ?? "",
+                isChecked: it.isChecked,
+              });
+              checklist_copied += 1;
+            } catch (e) {
+              return abort("checklist_copy_failed", { detail: String(e), checklist_copied });
+            }
+          }
+
+          // Copy the linked resource (Graph allows at most one per task).
+          let linked_resources_copied = 0;
+          const lr = (srcTask.linkedResources ?? [])[0];
+          if (lr) {
+            try {
+              await createLinkedResource(graph, to_list_id, newId, {
+                applicationName: lr.applicationName ?? "Linked resource",
+                displayName: lr.displayName,
+                externalId: lr.externalId ?? undefined,
+                webUrl: lr.webUrl ?? undefined,
+              });
+              linked_resources_copied += 1;
+            } catch (e) {
+              return abort("linked_resource_copy_failed", {
+                detail: String(e),
+                checklist_copied,
+              });
+            }
+          }
+
+          // Copy attachments — bytes round-trip through the Worker (Graph has no
+          // server-side copy). Enumerate via the attachments COLLECTION:
+          // `$expand=attachments` is silently ignored on a todoTask (it returns
+          // no `attachments` array), so reading srcTask.attachments would drop
+          // every attachment and then delete the source. List the collection.
+          let attachments_copied = 0;
+          if (srcTask.hasAttachments) {
+            const cfg = await loadAttachmentConfig(this.env);
+            const accessToken = await this.getAccessToken();
+            let srcAttachments: Attachment[];
+            try {
+              srcAttachments = await listAttachments(graph, from_list_id, task_id);
+            } catch (e) {
+              return abort("attachment_list_failed", {
+                detail: String(e),
+                checklist_copied,
+                linked_resources_copied,
+              });
+            }
+            if (srcAttachments.length === 0) {
+              // hasAttachments was true but none enumerated — refuse to delete
+              // the source on an inconsistent read rather than silently lose data.
+              return abort("attachment_enumeration_empty", {
+                checklist_copied,
+                linked_resources_copied,
+              });
+            }
+            for (const meta of srcAttachments) {
+              const counts = { checklist_copied, linked_resources_copied, attachments_copied };
+              if (meta["@odata.type"] !== "#microsoft.graph.taskFileAttachment") {
+                // Reference attachments carry no bytes to re-upload — abort
+                // rather than silently drop (the lossy behavior we're replacing).
+                return abort("reference_attachment_not_copyable", {
+                  attachment_id: meta.id,
+                  ...counts,
+                });
+              }
+              let full;
+              try {
+                full = await getFileAttachment(graph, from_list_id, task_id, meta.id);
+              } catch (e) {
+                return abort("attachment_read_failed", {
+                  attachment_id: meta.id,
+                  detail: String(e),
+                  ...counts,
+                });
+              }
+              if (!full.contentBytes) {
+                return abort("attachment_missing_bytes", { attachment_id: meta.id, ...counts });
+              }
+              const bytes = bytesFromBase64(full.contentBytes);
+              if (bytes.byteLength > PER_FILE_MAX_BYTES) {
+                return abort("attachment_too_large", {
+                  attachment_id: meta.id,
+                  size: bytes.byteLength,
+                  max: PER_FILE_MAX_BYTES,
+                  ...counts,
+                });
+              }
+              try {
+                await attachFile(graph, accessToken, {
+                  listId: to_list_id,
+                  taskId: newId,
+                  name: full.name ?? "attachment",
+                  bytes,
+                  contentType: full.contentType ?? "application/octet-stream",
+                  maxInlineBytes: cfg.max_inline_bytes,
+                });
+                attachments_copied += 1;
+              } catch (e) {
+                return abort("attachment_upload_failed", {
+                  attachment_id: meta.id,
+                  detail: String(e),
+                  ...counts,
+                });
+              }
+            }
+          }
+
+          // Carry My Day (best-effort, only if enabled). Reads the source's
+          // CommittedDay via Substrate BEFORE the source delete, then applies it
+          // to the destination copy. Never aborts. (Mostly relevant when the
+          // primary re-parent failed and fell through here; when My Day is
+          // enabled the primary path normally handles the move whole.)
+          let my_day_carried = false;
+          let my_day_skipped_reason: string | undefined;
+          if (myDayEnabled(this.env)) {
+            const carry = await this.#carryMyDay(from_list_id, to_list_id, task_id, newId);
+            my_day_carried = carry.carried;
+            if (!carry.carried) my_day_skipped_reason = carry.reason;
+          } else {
+            my_day_skipped_reason = "my_day_disabled";
+          }
+
+          // Delete the source — non-fatal on failure (return ok:true + warning
+          // so the caller can retry delete_task rather than lose the new id).
+          let warning: string | undefined;
           try {
             await graph.deleteResource(
               `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(from_list_id)}/tasks/${encodeURIComponent(task_id)}`,
@@ -892,20 +1105,32 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             await this.#indexDeleteTask(task_id);
           } catch (e) {
             const detail = e instanceof GraphError ? e.detail : String(e);
-            deleteWarning = `Task created in destination (new_task_id: ${newTask.id}) but source delete failed: ${detail ?? "unknown"}. Retry: delete_task({ list_id: "${from_list_id}", task_id: "${task_id}" }).`;
+            warning = `Copied to destination (task_id: ${newId}) but source delete failed: ${detail ?? "unknown"}. Retry: delete_task({ list_id: "${from_list_id}", task_id: "${task_id}" }).`;
             log.warn("move_task_delete_failed", { from_list_id, task_id, detail });
           }
 
+          // Fix destination cache flags — the bare POST response lacked
+          // sub-resource state, so set them from what we copied.
+          await this.#indexSetFlags(newId, {
+            has_checklist: checklist_copied > 0,
+            has_attachments: attachments_copied > 0,
+          });
+
           const result: Record<string, unknown> = {
             ok: true,
-            new_task_id: newTask.id,
+            method: "copy_delete",
+            task_id: newId,
+            previous_task_id: task_id,
             from_list_id,
             to_list_id,
+            checklist_copied,
+            linked_resources_copied,
+            attachments_copied,
+            my_day_carried,
           };
-          if (deleteWarning) result.warning = deleteWarning;
-          if (notCopied.length) result.sub_resources_not_copied = notCopied;
-
-          return { content: [{ type: "text", text: JSON.stringify(result) }] };
+          if (my_day_skipped_reason) result.my_day_skipped_reason = my_day_skipped_reason;
+          if (warning) result.warning = warning;
+          return jsonResult(result);
         }),
     );
 
@@ -1102,11 +1327,11 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
               hint: "Task not found in the index; pass `list` explicitly.",
             });
           }
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/checklistItems`;
-          const body: Record<string, unknown> = { displayName: display_name };
-          if (is_checked !== undefined) body.isChecked = is_checked;
           try {
-            const item = await graph.postJson(url, body, ChecklistItemSchema);
+            const item = await createChecklistItem(graph, list_id, task_id, {
+              displayName: display_name,
+              isChecked: is_checked,
+            });
             await this.#indexSetFlags(task_id, { has_checklist: true });
             return {
               content: [
@@ -1374,13 +1599,13 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
               hint: "Task not found in the index; pass `list` explicitly.",
             });
           }
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/linkedResources`;
-          const body: Record<string, unknown> = { applicationName: application_name };
-          if (display_name !== undefined) body.displayName = display_name;
-          if (external_id !== undefined) body.externalId = external_id;
-          if (web_url !== undefined) body.webUrl = web_url;
           try {
-            const resource = await graph.postJson(url, body, LinkedResourceSchema);
+            const resource = await createLinkedResource(graph, list_id, task_id, {
+              applicationName: application_name,
+              displayName: display_name,
+              externalId: external_id,
+              webUrl: web_url,
+            });
             // No DO write: linked resources aren't an indexed field; the task
             // already exists in the index and the next delta sync reconciles.
             return {
@@ -1532,10 +1757,6 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     );
 
     // Attachment collection schema — used inline by list_attachments.
-    const AttachmentCollectionSchema = z
-      .object({ value: z.array(AttachmentSchema) })
-      .passthrough();
-
     this.server.registerTool(
       "list_attachments",
       {
@@ -1555,9 +1776,8 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
               hint: "Task not found in the index; pass `list` explicitly.",
             });
           }
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/attachments`;
           try {
-            const result = await graph.getJson(url, AttachmentCollectionSchema);
+            const attachments = await listAttachments(graph, list_id, task_id);
             return {
               content: [
                 {
@@ -1566,8 +1786,8 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                     ok: true,
                     list_id,
                     task_id,
-                    count: result.value.length,
-                    attachments: result.value,
+                    count: attachments.length,
+                    attachments,
                   }),
                 },
               ],
@@ -3092,6 +3312,118 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       detail: detail ?? "",
       hint: "Office 365 Exchange Online Tasks.ReadWrite is not consented/granted. Re-run /authorize, or add the EXO Tasks.ReadWrite permission to the Entra app registration (see DEPLOYMENT.md).",
     });
+  }
+
+  // Build a SubstrateClient outside the withSubstrate wrapper (used by move_task,
+  // which runs in the Graph context). Mirrors withSubstrate's construction
+  // (agent.ts withSubstrate): token logic lives in the sole-refresher DO; this
+  // just injects the anchor mailbox. The caller is responsible for the
+  // myDayEnabled gate and for swallowing my_day_unavailable / SubstrateError.
+  async #buildSubstrateClient(): Promise<SubstrateClient> {
+    const ident = await loadIdentity(this.env);
+    return new SubstrateClient(
+      {
+        getSubstrateAccessToken: () => this.#index().getSubstrateAccessToken(),
+        forceSubstrateRefresh: () => this.#index().forceSubstrateRefresh(),
+      },
+      ident?.anchorMailbox ?? null,
+    );
+  }
+
+  // move_task PRIMARY path: attempt the lossless in-place re-parent. Returns a
+  // discriminated result so the handler can branch without exceptions:
+  //   { ok: true, task }                         — confirmed moved (re-key cache)
+  //   { ok: false, attempted: false, reason }    — no PATCH sent (Substrate
+  //                                                 unavailable) → straight to
+  //                                                 fallback, no dup risk
+  //   { ok: false, attempted: true, reason, task? } — a PATCH WAS sent but the
+  //                                                 move isn't confirmed → run
+  //                                                 the duplicate-creation guard
+  async #reparentViaSubstrate(
+    toListId: string,
+    taskId: string,
+  ): Promise<
+    | { ok: true; task: SubstrateTask }
+    | { ok: false; attempted: boolean; reason: string; task?: SubstrateTask }
+  > {
+    try {
+      const sub = await this.#buildSubstrateClient();
+      const task = await sub.reparentTask(toListId, taskId);
+      if (isReparentConfirmed(task, toListId)) return { ok: true, task };
+      // 200 that ignored ParentFolderId — a silent no-op. The item likely
+      // didn't move, but treat as attempted so the guard re-checks the source.
+      log.warn("move_reparent_unconfirmed", {
+        taskId,
+        toListId,
+        parent: task.ParentFolderId ?? null,
+      });
+      return { ok: false, attempted: true, reason: "reparent_not_confirmed", task };
+    } catch (e) {
+      // Token mint failed (EXO scope not consented). No PATCH was sent, so no
+      // EWS commit could have happened — safe to go straight to the fallback.
+      if (e instanceof Error && e.message.includes("my_day_unavailable")) {
+        return { ok: false, attempted: false, reason: "my_day_unavailable" };
+      }
+      // The server saw a write attempt (even a 4xx) — the move MAY have
+      // committed, so the guard must run before any fallback create.
+      if (e instanceof SubstrateError) {
+        log.warn("move_reparent_substrate_error", { status: e.status, detail: e.detail });
+        return { ok: false, attempted: true, reason: `substrate_${e.status}` };
+      }
+      // Network / timeout / dropped response — ambiguous; guard.
+      log.warn("move_reparent_failed", { error: String(e) });
+      return { ok: false, attempted: true, reason: "reparent_error" };
+    }
+  }
+
+  // move_task duplicate-creation guard input: is the source task still there?
+  // 200 → present; 404 (or the malformed-id 400 the rest of the handler treats
+  // as gone) → absent; anything else (5xx / network) → unknown (the helper
+  // decideAfterReparentFailure treats unknown conservatively as already-moved).
+  async #recheckSource(
+    graph: GraphClient,
+    fromListId: string,
+    taskId: string,
+  ): Promise<{ sourcePresent: boolean | "unknown" }> {
+    try {
+      await graph.getJson(
+        `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(fromListId)}/tasks/${encodeURIComponent(taskId)}`,
+        TodoTaskSchema,
+      );
+      return { sourcePresent: true };
+    } catch (e) {
+      if (e instanceof GraphError) {
+        const innerCode = getGraphInnerErrorCode(e.detail);
+        if (e.status === 404 || (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")) {
+          return { sourcePresent: false };
+        }
+      }
+      log.warn("move_recheck_source_failed", { fromListId, taskId, error: String(e) });
+      return { sourcePresent: "unknown" };
+    }
+  }
+
+  // move_task FALLBACK My-Day carry: read the source's CommittedDay via
+  // Substrate (Graph doesn't expose it) BEFORE the source is deleted, then apply
+  // it to the destination copy. Best-effort — every failure is swallowed into a
+  // reason and never aborts the move.
+  async #carryMyDay(
+    fromListId: string,
+    toListId: string,
+    oldTaskId: string,
+    newTaskId: string,
+  ): Promise<{ carried: boolean; reason?: string }> {
+    try {
+      const sub = await this.#buildSubstrateClient();
+      const src = await sub.getTask(fromListId, oldTaskId);
+      const day = committedDatePart(src.CommittedDay);
+      if (!day) return { carried: false, reason: "source_not_in_my_day" };
+      await sub.patchTask(toListId, newTaskId, { CommittedDay: day, PostponedDay: null });
+      return { carried: true };
+    } catch (e) {
+      log.warn("move_carry_my_day_failed", { error: String(e) });
+      return { carried: false, reason: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   // Singleton TodoIndex DO stub — the cross-list index + sole token refresher.

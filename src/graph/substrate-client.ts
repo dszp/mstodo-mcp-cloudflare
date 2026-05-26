@@ -66,6 +66,10 @@ export const SubstrateTaskSchema = z
     // PostponedDay == today suppresses a task from My Day even when CommittedDay
     // is set, so add_to_my_day clears it. Surfaced for confirmation.
     PostponedDay: z.string().nullable().optional(),
+    // The owning folder. A cross-list move re-parents the item by PATCHing this
+    // to the destination folder id; the response echoes it so the caller can
+    // confirm the move actually took (move_task's reparent-confirmed check).
+    ParentFolderId: z.string().optional(),
   })
   .passthrough();
 export type SubstrateTask = z.infer<typeof SubstrateTaskSchema>;
@@ -113,6 +117,41 @@ export class SubstrateClient {
     body: Record<string, unknown>,
   ): Promise<SubstrateTask> {
     const res = await this.#fetchWithRetry(taskUrl(folderId, taskId), "PATCH", JSON.stringify(body));
+    const json = (await res.json()) as unknown;
+    return SubstrateTaskSchema.parse(json);
+  }
+
+  // GET a single task. Used by move_task's copy/delete fallback to read the
+  // source task's CommittedDay (My Day membership — not exposed by Graph) before
+  // deleting the source, so it can be re-applied to the destination copy.
+  async getTask(folderId: string, taskId: string): Promise<SubstrateTask> {
+    const res = await this.#fetchWithRetry(taskUrl(folderId, taskId), "GET");
+    const json = (await res.json()) as unknown;
+    return SubstrateTaskSchema.parse(json);
+  }
+
+  // Lossless cross-list move: re-parent the SAME underlying item into another
+  // folder in one call by PATCHing ParentFolderId to the destination. This is
+  // exactly what the To Do web app's drag-and-drop issues — the destination
+  // folder appears in BOTH the URL path and the body. Unlike a Graph
+  // create/delete, the item rides along whole: checklist items, attachments, a
+  // linked resource, and My Day (CommittedDay) all survive. The task's Id DOES
+  // change (the new Id encodes the destination folder), so callers re-key any
+  // cache from the returned task's Id. `orderDateTime` is the list-position
+  // timestamp; pass the source value through to preserve manual ordering, or
+  // omit it (the move works without it — the server keeps the existing value).
+  async reparentTask(
+    destFolderId: string,
+    taskId: string,
+    orderDateTime?: string,
+  ): Promise<SubstrateTask> {
+    const body: Record<string, unknown> = { ParentFolderId: destFolderId };
+    if (orderDateTime !== undefined) body.OrderDateTime = orderDateTime;
+    const res = await this.#fetchWithRetry(
+      taskUrl(destFolderId, taskId),
+      "PATCH",
+      JSON.stringify(body),
+    );
     const json = (await res.json()) as unknown;
     return SubstrateTaskSchema.parse(json);
   }
