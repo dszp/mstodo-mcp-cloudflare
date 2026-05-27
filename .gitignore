@@ -36,3 +36,6 @@ worker-configuration.d.ts
 .claude/*.md
 PLAN-MY-DAY.md
 PLAN-MOVE-TASK.md
+
+# Local design specs / brainstorming docs (not tracked)
+docs/superpowers/
