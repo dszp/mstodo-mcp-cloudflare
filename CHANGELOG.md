@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] – 2026-05-27
+
 ### Added
 - **Manual (drag-to-reorder) ordering for regular tasks (opt-in, Substrate).** Two new tools
   expose the To Do app's manual list order — the order shown when no explicit Sort is applied —
@@ -25,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tasks.ReadWrite` scope), registered unconditionally so the tool list stays flag-stable. The
   ordering arithmetic lives in a pure, unit-tested `src/mcp/reorder.ts`; the manual-order comparator
   is shared with `list_my_day_tasks` (`compareOrderDateTimeDesc` in `substrate-client.ts`).
+
+### Changed
+- **My Day tools now return full task detail and manual-order sorting.** `list_my_day_tasks`,
+  `add_to_my_day`, and `remove_from_my_day` project a shared Substrate detail block (status,
+  importance, due/start/completed dates, reminder, `has_attachments`, categories, `body_preview`,
+  created/last-modified, `order_datetime`) from the same response — no extra lookup.
+  `list_my_day_tasks` sorts by `order_datetime` descending to mirror the app's manual
+  drag-to-reorder order. The Substrate detail schemas are `.optional()` + passthrough, so an
+  unseen field casing yields `null` rather than a parse failure, and `DateTimeTimeZone` fields
+  accept both the `{DateTime,TimeZone}` object and a bare ISO string. (`committed_day` is only the
+  *most recent* date a task was on My Day — there is no history beyond that single last date.)
 
 ## [0.6.0] – 2026-05-27
 

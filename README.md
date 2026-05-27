@@ -72,6 +72,11 @@ The server exposes a Microsoft To Do tool surface over MCP. Highlights:
     `exclude_types`/`completed` filters. `exclude_types:["excluded"]` drops noise
     (e.g. flagged-email lists) from results without deleting anything.
   - `find_task_list`, `get_pending_across_lists`, `get_recently_completed`.
+- **My Day & manual order (opt-in, Substrate)** — gated behind `ENABLE_MY_DAY=true` (these use the
+  undocumented Substrate endpoint the To Do web app uses, because My Day and the manual
+  drag-to-reorder position are invisible to Graph): `list_my_day_tasks`, `add_to_my_day`,
+  `remove_from_my_day`; `list_tasks_by_manual_order` (one list in the app's manual order) and
+  `reorder_task` (move a task to top/bottom, before/after another, or a 1-based slot).
 - **Config** — `get_list_config`/`set_list_config` (classification patterns,
   `no_sync`, `sync_flagged_emails`), `set_list_alias`, `get_link_rules`/
   `set_link_rules`, `get_attachment_config`/`set_attachment_config`, `extract_links`.
