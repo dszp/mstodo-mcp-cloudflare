@@ -37,7 +37,7 @@ import {
 import { loadAttachmentConfig, loadLinkRules, loadListsConfig, storeAttachmentConfig, storeLinkRules, storeListsConfig } from "../config/loader";
 import { runLinkRules, type LinkRuleMatch } from "../config/link-rules-engine";
 import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema, ListsConfigSchema } from "../config/schemas";
-import { classifyList, stripEmoji } from "../config/classifier";
+import { classifyList, pinClassifications, stripEmoji } from "../config/classifier";
 import { resolveListId } from "../config/aliases";
 import { resolveListScope, resolveStatusFilter } from "../config/query-scope";
 import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
@@ -327,12 +327,30 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       async ({ type: typeFilter }): Promise<McpResponse> =>
         this.withGraph("list_lists", async (graph) => {
           const { lists, source } = await this.getRoster(graph);
-          const config = await loadListsConfig(this.env);
-          const hasPatterns = config.patterns.length > 0;
+          let config = await loadListsConfig(this.env);
 
+          // Pin current name-classifications to immutable list IDs so a later
+          // rename can't change a list's class. One-time per list; once every
+          // matched list is pinned this writes nothing (added === 0).
+          if (config.patterns.length > 0) {
+            const { overrides, added } = pinClassifications(
+              lists.map((l) => ({ list_id: l.id, display_name: l.displayName ?? null })),
+              config,
+            );
+            if (added > 0) {
+              config = { ...config, overrides };
+              await storeListsConfig(this.env, config).catch((e) =>
+                log.warn("list_pin_persist_failed", { error: String(e) }),
+              );
+            }
+          }
+
+          // Annotate when any classification exists (patterns OR manual pins).
+          const hasClass =
+            config.patterns.length > 0 || Object.keys(config.overrides).length > 0;
           const annotated = lists.map((l) => ({
             ...summarizeList(l),
-            ...(hasPatterns ? { type: classifyList(l.displayName ?? "", config) } : {}),
+            ...(hasClass ? { type: classifyList(l.displayName ?? "", config, l.id) } : {}),
           }));
 
           const filtered = typeFilter
@@ -2420,6 +2438,14 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
               { list_id: id, display_name: listById.get(id) ?? null },
             ]),
           );
+          // Pinned classifications (ID → class), resolved to display names. These
+          // win over name patterns and survive renames.
+          const enrichedOverrides = Object.fromEntries(
+            Object.entries(config.overrides).map(([id, type]) => [
+              id,
+              { type, display_name: listById.get(id) ?? null },
+            ]),
+          );
           return {
             content: [
               {
@@ -2428,8 +2454,10 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                   ok: true,
                   pattern_count: config.patterns.length,
                   alias_count: Object.keys(config.aliases).length,
+                  override_count: Object.keys(config.overrides).length,
                   patterns: config.patterns,
                   aliases: enrichedAliases,
+                  overrides: enrichedOverrides,
                   no_sync: config.no_sync,
                   sync_flagged_emails: config.sync_flagged_emails,
                 }),
@@ -2445,10 +2473,13 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         description:
           "Update list config. Omitted fields are preserved (not reset). `patterns` replaces the " +
           "classification pattern list (pass [] to clear; first match wins, emoji stripped, each must be " +
-          "valid JS RegExp). `no_sync` excludes lists from delta sync, matched by wellknownListName (e.g. " +
-          '"flaggedEmails") or Graph list ID — the list stays visible and on-demand-readable but is not ' +
-          "indexed. `sync_flagged_emails` opts the large flaggedEmails well-known list back IN (it is skipped " +
-          "by default to conserve the daily write budget). Does not affect aliases — use set_list_alias.",
+          "valid JS RegExp). `overrides` replaces the ID-pinned classification map (Graph list ID → class), " +
+          "which wins over name patterns and survives renames; list_lists auto-pins newly name-matched lists, " +
+          "so use this to change a pin or drop a key to revert a list to pattern-based. `no_sync` excludes " +
+          'lists from delta sync, matched by wellknownListName (e.g. "flaggedEmails") or Graph list ID — the ' +
+          "list stays visible and on-demand-readable but is not indexed. `sync_flagged_emails` opts the large " +
+          "flaggedEmails well-known list back IN (it is skipped by default to conserve the daily write budget). " +
+          "Does not affect aliases — use set_list_alias.",
         inputSchema: {
           patterns: z
             .array(ListPatternSchema)
@@ -2456,6 +2487,14 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .describe(
               "Full replacement pattern array (omit to leave unchanged; [] to clear). Each: pattern " +
               "(RegExp source), flags (default 'i'), type ('todo' | 'reference' | 'excluded').",
+            ),
+          overrides: z
+            .record(z.string().min(1), z.enum(["todo", "reference", "excluded"]))
+            .optional()
+            .describe(
+              "Full replacement map of Graph list ID → class (omit to leave unchanged; {} to clear all pins). " +
+              "Pinned classes win over name patterns and survive renames. Dropping a key reverts that list to " +
+              "pattern-based — it will re-pin from patterns on the next list_lists.",
             ),
           no_sync: z
             .array(z.string().min(1))
@@ -2470,7 +2509,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .describe("Set true to index the large flaggedEmails list (off by default). Omit to leave unchanged."),
         },
       },
-      async ({ patterns, no_sync, sync_flagged_emails }): Promise<McpResponse> =>
+      async ({ patterns, overrides, no_sync, sync_flagged_emails }): Promise<McpResponse> =>
         instrument("set_list_config", async () => {
           if (patterns !== undefined) {
             const invalid: Array<{ pattern: string; flags: string; error: string }> = [];
@@ -2493,6 +2532,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           const config = ListsConfigSchema.parse({
             patterns: patterns ?? existing.patterns,
             aliases: existing.aliases,
+            overrides: overrides ?? existing.overrides,
             no_sync: no_sync ?? existing.no_sync,
             sync_flagged_emails: sync_flagged_emails ?? existing.sync_flagged_emails,
           });
@@ -2508,6 +2548,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                 text: JSON.stringify({
                   ok: true,
                   pattern_count: config.patterns.length,
+                  override_count: Object.keys(config.overrides).length,
                   no_sync: config.no_sync,
                   sync_flagged_emails: config.sync_flagged_emails,
                 }),
@@ -2941,7 +2982,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             log.warn("index_roster_read_failed", { error: String(e) });
           }
           const listIds = roster
-            .filter((l) => classifyList(l.display_name ?? "", config) === type)
+            .filter((l) => classifyList(l.display_name ?? "", config, l.list_id) === type)
             .map((l) => l.list_id);
           // No lists of this class → genuinely empty (NOT "all lists": an empty
           // `lists` filter would widen query() to every list).
@@ -2994,7 +3035,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
               log.warn("index_roster_read_failed", { error: String(e) });
             }
             listIds = roster
-              .filter((l) => classifyList(l.display_name ?? "", config) === type)
+              .filter((l) => classifyList(l.display_name ?? "", config, l.list_id) === type)
               .map((l) => l.list_id);
             // type given but no lists match → empty (don't widen to all lists).
             if (listIds.length === 0) {

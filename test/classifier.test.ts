@@ -1,10 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { stripEmoji, classifyList } from "../src/config/classifier";
+import { stripEmoji, classifyList, pinClassifications } from "../src/config/classifier";
 import type { ListsConfig } from "../src/config/schemas";
 
-const cfg = (patterns: ListsConfig["patterns"]): ListsConfig => ({
+const cfg = (
+  patterns: ListsConfig["patterns"],
+  overrides: ListsConfig["overrides"] = {},
+): ListsConfig => ({
   patterns,
   aliases: {},
+  overrides,
   no_sync: [],
   sync_flagged_emails: false,
 });
@@ -43,5 +47,57 @@ describe("classifyList", () => {
 
   it("returns unclassified when no pattern matches", () => {
     expect(classifyList("RANDOM LIST", cfg(patterns))).toBe("unclassified");
+  });
+});
+
+describe("classifyList — ID overrides (pinned)", () => {
+  const patterns = [{ pattern: "^WORK$", flags: "i", type: "todo" as const }];
+
+  it("an ID override wins over a matching name pattern", () => {
+    const config = cfg(patterns, { "list-1": "reference" });
+    expect(classifyList("WORK", config, "list-1")).toBe("reference");
+  });
+
+  it("an ID override applies regardless of the display name (rename-immune)", () => {
+    const config = cfg([], { "list-1": "reference" });
+    expect(classifyList("SOME BRAND NEW NAME", config, "list-1")).toBe("reference");
+  });
+
+  it("falls back to name patterns when the id is not pinned", () => {
+    const config = cfg(patterns, { "list-1": "reference" });
+    expect(classifyList("WORK", config, "list-2")).toBe("todo");
+  });
+});
+
+describe("pinClassifications", () => {
+  const patterns = [
+    { pattern: "^WORK$", flags: "i", type: "todo" as const },
+    { pattern: "^ARCHIVE$", flags: "i", type: "reference" as const },
+  ];
+
+  it("pins each name-matched list to its id; leaves unmatched lists unpinned", () => {
+    const lists = [
+      { list_id: "id-w", display_name: "WORK" },
+      { list_id: "id-a", display_name: "ARCHIVE" },
+      { list_id: "id-x", display_name: "RANDOM" },
+    ];
+    const { overrides, added } = pinClassifications(lists, cfg(patterns));
+    expect(added).toBe(2);
+    expect(overrides).toEqual({ "id-w": "todo", "id-a": "reference" });
+  });
+
+  it("never overwrites an existing pin (a user-set class survives a name change)", () => {
+    const config = cfg(patterns, { "id-w": "excluded" });
+    const lists = [{ list_id: "id-w", display_name: "WORK" }]; // pattern says todo
+    const { overrides, added } = pinClassifications(lists, config);
+    expect(added).toBe(0);
+    expect(overrides["id-w"]).toBe("excluded");
+  });
+
+  it("is idempotent: a second pass over the same roster adds nothing", () => {
+    const lists = [{ list_id: "id-w", display_name: "WORK" }];
+    const first = pinClassifications(lists, cfg(patterns));
+    const second = pinClassifications(lists, cfg(patterns, first.overrides));
+    expect(second.added).toBe(0);
   });
 });

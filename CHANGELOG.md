@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **ID-pinned list classification (rename-safe).** List classification now follows the immutable
+  Graph list ID, not the display name. `ListsConfig` gains an `overrides` map (`{ list_id → todo |
+  reference | excluded }`) consulted **before** the name patterns; `classifyList` takes an optional
+  `listId`. `list_lists` auto-pins every name-matched list to its ID the first time it sees it
+  (`pinClassifications`, idempotent — steady state writes nothing; pins from the live roster, so a
+  cold first call converges on the next), after which renaming a list no longer changes its class.
+  `get_list_config` surfaces `overrides` (enriched with display names) and `override_count`;
+  `set_list_config` gains an `overrides` param (full replacement; drop a key to revert a list to
+  pattern-based — it re-pins from patterns on the next `list_lists`). Name patterns remain the
+  bootstrap for newly-seen lists. (Orphan pins for deleted lists are harmless and cleared via
+  `set_list_config`.)
+
 ### Fixed
 - **Fair per-list delta-sync rotation.** When the list roster exceeds the per-cycle page
   budget (`MAX_PAGES_PER_CYCLE`), lists beyond the budget no longer starve. `#listIdsByPriority`

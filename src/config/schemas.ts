@@ -98,6 +98,15 @@ export const ListsConfigSchema = z.object({
     .describe(
       "Map of alias → Graph list ID. Multiple aliases may point to the same list ID.",
     ),
+  overrides: z
+    .record(z.string().min(1), z.enum(["todo", "reference", "excluded"]))
+    .default({})
+    .describe(
+      "Map of Graph list ID → classification, pinned so a rename can't silently change a list's class. " +
+      "Checked BEFORE name patterns; auto-populated by list_lists the first time a list is classified by a " +
+      "pattern, then it follows the immutable ID. Edit via set_list_config.overrides; drop a key to revert a " +
+      "list to pattern-based (it re-pins from patterns on the next list_lists).",
+    ),
   no_sync: z
     .array(z.string().min(1))
     .default([])

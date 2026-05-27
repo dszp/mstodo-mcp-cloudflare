@@ -49,7 +49,7 @@ export function resolveListScope(input: {
   if (!lists && !types && !exclude_types) return undefined;
 
   const classOf = new Map<string, Classification>(
-    roster.map((l) => [l.list_id, classifyList(l.display_name ?? "", config)]),
+    roster.map((l) => [l.list_id, classifyList(l.display_name ?? "", config, l.list_id)]),
   );
   // Ids in an explicit `lists` but absent from the roster (passthrough Graph
   // ids) classify as "unclassified".

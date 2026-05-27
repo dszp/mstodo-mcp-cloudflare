@@ -5,6 +5,7 @@ import type { ListsConfig } from "../src/config/schemas";
 const config = (aliases: Record<string, string>): ListsConfig => ({
   patterns: [],
   aliases,
+  overrides: {},
   no_sync: [],
   sync_flagged_emails: false,
 });
