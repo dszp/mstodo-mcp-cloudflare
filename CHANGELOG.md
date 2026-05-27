@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] – 2026-05-26
+
 ### Added
 - **Cross-server attachment download (`mint_download_link` + public `/download`).** The
   inverse of the web-upload flow: `mint_download_link` returns a short-lived (≤ 5 min),
@@ -16,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scoped to one attachment) and is **burned on the first reachable GET** — single-use against
   an honest consumer, not a transactional guarantee. ON by default; set
   `ENABLE_DOWNLOAD_LINKS="false"` to disable both the tool and the endpoint.
+- **1Password secret references in `.dev.vars`.** `scripts/push-secrets.sh` now resolves any
+  value of the form `op://<vault>/<item>[/<section>]/<field>` via the `op` CLI at push time
+  (literals still work, surrounding quotes are stripped), so secrets can stay out of the file.
 
 ### Fixed
 - **Reported version now matches the release.** `/health` (`version`) and the MCP server
@@ -27,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the id always changes on both paths — read `task_id` + `previous_task_id`), and noted that a
   failure to enumerate attachments also aborts the fallback with the source intact. Description-only;
   no behavior change.
+- Upgraded Wrangler 4.94.0 → 4.95.0 (dev dependency).
 
 ## [0.4.0] – 2026-05-26
 
