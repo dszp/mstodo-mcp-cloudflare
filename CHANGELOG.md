@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Reported version now matches the release.** `/health` (`version`) and the MCP server
+  name were hardcoded to stale values (`0.2.0` / `0.3.0`). Both now read `package.json`'s
+  `version` at build time via a single `src/version.ts`, so they can't drift again.
+
 ### Changed
 - **`move_task` tool description corrected.** Removed the misleading "whether the id was preserved"
   (the id always changes on both paths — read `task_id` + `previous_task_id`), and noted that a

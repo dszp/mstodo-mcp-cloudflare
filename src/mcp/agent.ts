@@ -10,6 +10,7 @@ import { SubstrateClient, SubstrateError } from "../graph/substrate-client";
 import { OWNER_DO_NAME, rowToList, rowToSummary, type ListRow, type TaskRow } from "../cache/sql";
 import type { TodoIndex } from "../cache/index-do";
 import { mapPool } from "../graph/concurrency";
+import { VERSION } from "../version";
 import { parseDateInput } from "../util/dates";
 import {
   createUploadCapability,
@@ -254,7 +255,7 @@ function getGraphInnerErrorCode(detail: string | undefined): string | undefined 
 }
 
 export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvider {
-  server = new McpServer({ name: "mstodo-mcp", version: "0.3.0" });
+  server = new McpServer({ name: "mstodo-mcp", version: VERSION });
 
   async init() {
     this.server.registerTool(

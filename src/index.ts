@@ -4,6 +4,7 @@ import { TodoIndex } from "./cache/index-do";
 import { OWNER_DO_NAME } from "./cache/sql";
 import AuthHandler from "./auth/handler";
 import { handleUpload } from "./upload/handler";
+import { VERSION } from "./version";
 
 export { MSToDoMCP, TodoIndex };
 
@@ -25,7 +26,7 @@ export default {
 
     if (url.pathname === "/health") {
       return new Response(
-        JSON.stringify({ ok: true, service: "mstodo-mcp", version: "0.2.0" }),
+        JSON.stringify({ ok: true, service: "mstodo-mcp", version: VERSION }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
