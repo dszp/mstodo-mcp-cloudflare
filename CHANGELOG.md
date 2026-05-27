@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Manual (drag-to-reorder) ordering for regular tasks (opt-in, Substrate).** Two new tools
+  expose the To Do app's manual list order — the order shown when no explicit Sort is applied —
+  which is backed by the Substrate-only `OrderDateTime` field (invisible to Graph):
+  - `list_tasks_by_manual_order(list, status?, top?)` — returns one list's tasks in manual order
+    (OrderDateTime descending, nulls last), Substrate-shaped detail identical to the My Day tools.
+    Single-list only (manual order isn't comparable across lists); `status` defaults to
+    `incomplete`; capped at `top` (default 100, max 200), no pagination.
+  - `reorder_task(task_id, list?, position, …)` — moves a task by PATCHing `OrderDateTime`.
+    `position` is `top` / `bottom`, `before` / `after` a `reference_task_id`, `index` (1-based
+    slot), or `set` (explicit ISO `order_datetime`, debug escape hatch). Relative positions compute
+    a millisecond midpoint between neighbors; an exhausted gap returns `order_precision_exhausted`.
+    Editing manual order is **not visible** while the list has an explicit Sort applied in the app.
+
+  Both are gated by `withSubstrate` (require `ENABLE_MY_DAY=true` + the Exchange Online
+  `Tasks.ReadWrite` scope), registered unconditionally so the tool list stays flag-stable. The
+  ordering arithmetic lives in a pure, unit-tested `src/mcp/reorder.ts`; the manual-order comparator
+  is shared with `list_my_day_tasks` (`compareOrderDateTimeDesc` in `substrate-client.ts`).
+
 ## [0.6.0] – 2026-05-27
 
 ### Added

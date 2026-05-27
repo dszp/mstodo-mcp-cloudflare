@@ -10,6 +10,7 @@ import {
   SubstrateClient,
   SubstrateError,
   projectSubstrateTaskDetails,
+  compareOrderDateTimeDesc,
 } from "../graph/substrate-client";
 import { OWNER_DO_NAME, rowToList, rowToSummary, type ListRow, type TaskRow } from "../cache/sql";
 import type { TodoIndex } from "../cache/index-do";
@@ -46,6 +47,7 @@ import { resolveListId } from "../config/aliases";
 import { resolveListScope, resolveStatusFilter } from "../config/query-scope";
 import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
 import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
+import { computeReorder, msToOrder, orderToMs, type ReorderSpec } from "./reorder";
 import type { SubstrateTask } from "../graph/substrate-client";
 import {
   createChecklistItem,
@@ -3309,12 +3311,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           // descending. We aggregate across folders, so the sort happens here on
           // the combined array. Tasks missing an order_datetime sort last; ties
           // hold their enumeration order (Array.prototype.sort is stable).
-          tasks.sort((a, b) => {
-            if (a.order_datetime === b.order_datetime) return 0;
-            if (a.order_datetime === null) return 1;
-            if (b.order_datetime === null) return -1;
-            return a.order_datetime < b.order_datetime ? 1 : -1;
-          });
+          tasks.sort((a, b) => compareOrderDateTimeDesc(a.order_datetime, b.order_datetime));
           return {
             content: [
               {
@@ -3326,6 +3323,206 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                   folders_scanned: roster.length,
                   folders_errored,
                   tasks,
+                }),
+              },
+            ],
+          };
+        }),
+    );
+
+    this.server.registerTool(
+      "list_tasks_by_manual_order",
+      {
+        description:
+          "List one Microsoft To Do list's tasks in the app's MANUAL (drag-to-reorder) order (undocumented Substrate endpoint). Mirrors the order you get when no explicit Sort is applied to the list in the To Do app — backed by OrderDateTime, returned descending (top of the list first). Each task carries the same Substrate detail block as the My Day tools (status, importance, dates, reminder, categories, body_preview, order_datetime). Note: this is Substrate-shaped detail, not the cached `list_tasks` summary, and `task_id` is the Substrate id (which differs from the Graph id for a task that was moved between lists). One Substrate round-trip per call; capped at `top` (no pagination). Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+        inputSchema: {
+          list: z
+            .string()
+            .min(1)
+            .describe("List alias (from get_list_config), display name, or Graph list ID."),
+          status: z
+            .enum(["incomplete", "completed", "all"])
+            .optional()
+            .describe("Which tasks to include. Default 'incomplete' (everything not Completed)."),
+          top: z
+            .number()
+            .int()
+            .min(1)
+            .max(200)
+            .optional()
+            .describe("Maximum tasks to return. Default 100; max 200."),
+        },
+      },
+      async ({ list, status, top }): Promise<McpResponse> =>
+        this.withSubstrate("list_tasks_by_manual_order", async (sub) => {
+          const list_id = await this.resolveList(list);
+          const limit = top ?? 100;
+          const want = status ?? "incomplete";
+
+          const folderTasks = await sub.listFolderTasks(list_id);
+          // Substrate returns ALL tasks (incl. completed); filter client-side on
+          // the raw Status (PascalCase, e.g. "Completed"). 'all' keeps everything.
+          const filtered = folderTasks.filter((t) => {
+            const completed = (t.Status ?? "").toLowerCase() === "completed";
+            if (want === "completed") return completed;
+            if (want === "incomplete") return !completed;
+            return true;
+          });
+          // Manual order = OrderDateTime descending, nulls last (shared comparator,
+          // identical to the My Day aggregation).
+          filtered.sort((a, b) => compareOrderDateTimeDesc(a.OrderDateTime ?? null, b.OrderDateTime ?? null));
+          const truncated = filtered.length > limit;
+          const tasks = filtered.slice(0, limit).map((t) => ({
+            list_id,
+            task_id: t.Id ?? null,
+            title: t.Subject ?? null,
+            ...projectSubstrateTaskDetails(t),
+          }));
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  list_id,
+                  status: want,
+                  count: tasks.length,
+                  truncated,
+                  tasks,
+                }),
+              },
+            ],
+          };
+        }),
+    );
+
+    this.server.registerTool(
+      "reorder_task",
+      {
+        description:
+          "Change a task's MANUAL (drag-to-reorder) position in its list by setting OrderDateTime (undocumented Substrate endpoint). `position`: 'top'/'bottom' (move to the start/end of manual order), 'before'/'after' (relative to `reference_task_id`), 'index' (1-based slot via `index`, 1 = top), or 'set' (explicit `order_datetime`, a debug escape hatch). IMPORTANT: this edits manual order — if the list currently has an explicit Sort applied in the To Do app, the change is not VISIBLE until that sort is removed. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+        inputSchema: {
+          task_id: z.string().min(1).describe("Microsoft Graph task id of the task to move."),
+          list: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Owning list (alias, display name, or Graph list ID). Optional — resolved from the index when omitted; pass it if the task isn't indexed yet.",
+            ),
+          position: z
+            .enum(["top", "bottom", "before", "after", "index", "set"])
+            .describe("Where to move the task."),
+          reference_task_id: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("Required for position 'before'/'after': the task to position relative to (same list)."),
+          index: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("Required for position 'index': 1-based slot in manual order (1 = top)."),
+          order_datetime: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("Required for position 'set': explicit OrderDateTime (ISO 8601). Debug escape hatch."),
+        },
+      },
+      async ({ task_id, list, position, reference_task_id, index, order_datetime }): Promise<McpResponse> =>
+        this.withSubstrate("reorder_task", async (sub) => {
+          const list_id = await this.resolveListForTask(list, task_id);
+          if (!list_id) {
+            return errResponse("list_required", {
+              task_id,
+              hint: "Task not found in the index; pass `list` explicitly.",
+            });
+          }
+
+          // Resolve the new OrderDateTime string for the PATCH.
+          let newOrder: string;
+          if (position === "set") {
+            if (!order_datetime) {
+              return errResponse("order_datetime_required", { hint: "Pass order_datetime for position 'set'." });
+            }
+            if (orderToMs(order_datetime) === null) {
+              return errResponse("invalid_order_datetime", { order_datetime, hint: "Use an ISO 8601 timestamp." });
+            }
+            newOrder = order_datetime;
+          } else {
+            // Compute relative to the OTHER tasks' OrderDateTime values. Exclude
+            // the moving task (by id) so position math isn't off by one, and drop
+            // null/unparseable orders (no comparable position). Caveat: the
+            // listing's Substrate `.Id` may differ from the Graph `task_id` for a
+            // task that was reparented (moved between lists); in that rare case the
+            // moving task isn't excluded and 'index' math can be off by one. The
+            // edge ops (top/bottom) and value-based before/after are unaffected.
+            const folderTasks = await sub.listFolderTasks(list_id);
+            const orders = folderTasks
+              .filter((t) => t.Id !== task_id)
+              .map((t) => orderToMs(t.OrderDateTime ?? null))
+              .filter((ms): ms is number => ms !== null);
+
+            let spec: ReorderSpec;
+            if (position === "top" || position === "bottom") {
+              spec = { kind: position };
+            } else if (position === "index") {
+              if (index === undefined) {
+                return errResponse("index_required", { hint: "Pass index (1-based) for position 'index'." });
+              }
+              spec = { kind: "index", index };
+            } else {
+              // before / after
+              if (!reference_task_id) {
+                return errResponse("reference_required", {
+                  position,
+                  hint: "Pass reference_task_id for position 'before'/'after'.",
+                });
+              }
+              let ref: SubstrateTask;
+              try {
+                ref = await sub.getTask(list_id, reference_task_id);
+              } catch (e) {
+                if (e instanceof SubstrateError && e.status === 404) {
+                  return errResponse("reference_not_in_list", { list_id, reference_task_id });
+                }
+                throw e;
+              }
+              const referenceMs = orderToMs(ref.OrderDateTime ?? null);
+              if (referenceMs === null) {
+                return errResponse("reference_has_no_order", {
+                  reference_task_id,
+                  hint: "The reference task has no manual-order value; move it first (e.g. position 'top').",
+                });
+              }
+              spec = { kind: position, referenceMs };
+            }
+
+            const computed = computeReorder(spec, orders);
+            if (!computed.ok) {
+              return errResponse(computed.reason, {
+                hint: "No room between neighbors at millisecond precision; use position 'top'/'bottom' to reset.",
+              });
+            }
+            newOrder = msToOrder(computed.ms);
+          }
+
+          const task = await sub.patchTask(list_id, task_id, { OrderDateTime: newOrder });
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  list_id,
+                  task_id,
+                  position,
+                  title: task.Subject ?? null,
+                  ...projectSubstrateTaskDetails(task),
+                  // Echo the value we PATCHed if the response omits it.
+                  order_datetime: task.OrderDateTime ?? newOrder,
                 }),
               },
             ],

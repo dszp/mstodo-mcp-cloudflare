@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { SubstrateClient, type SubstrateTokenProvider } from "../src/graph/substrate-client";
+import {
+  SubstrateClient,
+  compareOrderDateTimeDesc,
+  type SubstrateTokenProvider,
+} from "../src/graph/substrate-client";
 
 // The cross-list move (lossless re-parent) and the My-Day-carry read on the
 // copy/delete fallback are the only new Substrate HTTP shapes move_task adds.
@@ -38,6 +42,30 @@ function stubFetch(response: unknown, status = 200): { calls: Captured[] } {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("compareOrderDateTimeDesc (shared manual-order sort)", () => {
+  it("sorts later OrderDateTime first (descending = nearer the top)", () => {
+    const arr = ["2026-01-01T00:00:00Z", "2026-03-01T00:00:00Z", "2026-02-01T00:00:00Z"];
+    expect([...arr].sort(compareOrderDateTimeDesc)).toEqual([
+      "2026-03-01T00:00:00Z",
+      "2026-02-01T00:00:00Z",
+      "2026-01-01T00:00:00Z",
+    ]);
+  });
+  it("places null OrderDateTime last", () => {
+    const arr = [null, "2026-01-01T00:00:00Z", null, "2026-02-01T00:00:00Z"];
+    expect([...arr].sort(compareOrderDateTimeDesc)).toEqual([
+      "2026-02-01T00:00:00Z",
+      "2026-01-01T00:00:00Z",
+      null,
+      null,
+    ]);
+  });
+  it("treats equal values (and two nulls) as equal", () => {
+    expect(compareOrderDateTimeDesc("x", "x")).toBe(0);
+    expect(compareOrderDateTimeDesc(null, null)).toBe(0);
+  });
 });
 
 describe("SubstrateClient.reparentTask (lossless cross-list move)", () => {
