@@ -55,9 +55,22 @@ export function assertSubstrateUrl(url: string): void {
   }
 }
 
-// Lenient — the Substrate task carries many Outlook fields we don't care about.
-// We only read Id (to map back to a Graph task id), Subject (display), and
-// CommittedDay (the My Day toggle). passthrough() keeps the rest intact.
+// A DateTimeTimeZone-shaped value (Outlook REST `{ DateTime, TimeZone }`).
+// Substrate has been seen to send either the object or a bare ISO string for
+// these, and occasionally null — accept all three so a shape drift never fails
+// the parse. The handler normalizes to a single ISO string downstream.
+const DateTimeTimeZoneLike = z
+  .union([
+    z.object({ DateTime: z.string().optional(), TimeZone: z.string().optional() }).passthrough(),
+    z.string(),
+  ])
+  .nullable();
+
+// Lenient — the Substrate task carries many Outlook fields. We model the subset
+// the My Day tools project (identity, My Day toggle, status/importance, dates,
+// reminder, categories, body, order) plus passthrough() to keep the rest intact.
+// Every added field is .optional() so a wrong/absent key yields `undefined`, not
+// a parse failure — the to-do web client's exact casings aren't documented.
 export const SubstrateTaskSchema = z
   .object({
     Id: z.string().optional(),
@@ -70,9 +83,98 @@ export const SubstrateTaskSchema = z
     // to the destination folder id; the response echoes it so the caller can
     // confirm the move actually took (move_task's reparent-confirmed check).
     ParentFolderId: z.string().optional(),
+    // OrderDateTime drives manual (drag-to-reorder) list position — the same
+    // field reparentTask passes through to preserve ordering. Higher = nearer
+    // the top of the list in the To Do UI's manual sort.
+    OrderDateTime: z.string().nullable().optional(),
+    // Detail fields the My Day tools project. Status/Importance are free strings
+    // (To Do sends e.g. "NotStarted"/"Completed", "Low"/"Normal"/"High") — we
+    // don't pin the enum so an unseen value still rides through.
+    Status: z.string().nullable().optional(),
+    Importance: z.string().nullable().optional(),
+    DueDateTime: DateTimeTimeZoneLike.optional(),
+    StartDateTime: DateTimeTimeZoneLike.optional(),
+    CompletedDateTime: DateTimeTimeZoneLike.optional(),
+    ReminderDateTime: DateTimeTimeZoneLike.optional(),
+    IsReminderOn: z.boolean().nullable().optional(),
+    HasAttachments: z.boolean().nullable().optional(),
+    Categories: z.array(z.string()).nullable().optional(),
+    Body: z
+      .object({ ContentType: z.string().optional(), Content: z.string().optional() })
+      .passthrough()
+      .nullable()
+      .optional(),
+    CreatedDateTime: z.string().nullable().optional(),
+    LastModifiedDateTime: z.string().nullable().optional(),
   })
   .passthrough();
 export type SubstrateTask = z.infer<typeof SubstrateTaskSchema>;
+
+// Shape of the projected detail block shared by every My Day tool. Identity
+// fields (list_id, task_id, title) are added by the caller — this is only the
+// per-task detail that rides along on the same Substrate response.
+export interface SubstrateTaskDetails {
+  status: string | null;
+  importance: string | null;
+  due_date: string | null;
+  start_date: string | null;
+  completed_date: string | null;
+  is_reminder_on: boolean | null;
+  reminder_date: string | null;
+  has_attachments: boolean | null;
+  categories: string[];
+  body_preview: string | null;
+  created_date: string | null;
+  last_modified_date: string | null;
+  order_datetime: string | null;
+}
+
+// Normalize a DateTimeTimeZone-shaped value to a bare ISO string (or null).
+function dtTzToIso(v: SubstrateTask["DueDateTime"]): string | null {
+  if (v == null) return null;
+  if (typeof v === "string") return v;
+  return typeof v.DateTime === "string" ? v.DateTime : null;
+}
+
+// Date portion (YYYY-MM-DD) of an ISO-ish string.
+function datePart(iso: string | null): string | null {
+  return iso ? iso.slice(0, 10) : null;
+}
+
+// First ~200 chars of the task body, with tags/whitespace flattened. To Do
+// stores the note as HTML or text; we strip markup for a readable preview.
+function bodyPreview(body: SubstrateTask["Body"]): string | null {
+  const content = body && typeof body.Content === "string" ? body.Content : null;
+  if (!content) return null;
+  const text = content
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? text.slice(0, 200) : null;
+}
+
+// Project the detail fields that ride along on every Substrate task response.
+// Shared by list_my_day_tasks, add_to_my_day, and remove_from_my_day so the
+// per-task shape stays identical across all three. Due/start are date-only
+// (To Do treats them as calendar dates stored at UTC midnight); reminder,
+// completed, created, and last-modified are kept as full timestamps.
+export function projectSubstrateTaskDetails(t: SubstrateTask): SubstrateTaskDetails {
+  return {
+    status: t.Status ?? null,
+    importance: t.Importance ?? null,
+    due_date: datePart(dtTzToIso(t.DueDateTime)),
+    start_date: datePart(dtTzToIso(t.StartDateTime)),
+    completed_date: dtTzToIso(t.CompletedDateTime),
+    is_reminder_on: t.IsReminderOn ?? null,
+    reminder_date: dtTzToIso(t.ReminderDateTime),
+    has_attachments: t.HasAttachments ?? null,
+    categories: t.Categories ?? [],
+    body_preview: bodyPreview(t.Body),
+    created_date: t.CreatedDateTime ?? null,
+    last_modified_date: t.LastModifiedDateTime ?? null,
+    order_datetime: t.OrderDateTime ?? null,
+  };
+}
 
 // Extract the task array from a folder-tasks GET response without assuming a
 // fixed envelope. Substrate's task fields are PascalCase, and across folders the

@@ -6,7 +6,11 @@ import { errResponse, instrument, type McpResponse } from "../observability/inst
 import { log } from "../log";
 import { fetchMe, loadIdentity, loadTokens, myDayEnabled, REFRESH_SKEW_MS } from "../auth/microsoft";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
-import { SubstrateClient, SubstrateError } from "../graph/substrate-client";
+import {
+  SubstrateClient,
+  SubstrateError,
+  projectSubstrateTaskDetails,
+} from "../graph/substrate-client";
 import { OWNER_DO_NAME, rowToList, rowToSummary, type ListRow, type TaskRow } from "../cache/sql";
 import type { TodoIndex } from "../cache/index-do";
 import { mapPool } from "../graph/concurrency";
@@ -3113,7 +3117,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "add_to_my_day",
       {
         description:
-          "Add a Microsoft To Do task to My Day (undocumented Substrate endpoint). Sets the task's CommittedDay. `date` defaults to today in the Worker's configured timezone; pass an explicit YYYY-MM-DD (interpreted in the user's local timezone) to target another day. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+          "Add a Microsoft To Do task to My Day (undocumented Substrate endpoint). Sets the task's CommittedDay. `date` defaults to today in the Worker's configured timezone; pass an explicit YYYY-MM-DD (interpreted in the user's local timezone) to target another day. Returns the task's current detail (status, importance, dates, etc.) from the same response. Note: committed_day records only the most recent date the task was on My Day (whether or not completed); there is no history beyond that single last-on-My-Day date. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
         inputSchema: {
           task_id: z.string().min(1).describe("Microsoft Graph task id."),
           list: z
@@ -3161,10 +3165,12 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                   ok: true,
                   list_id,
                   task_id,
+                  title: task.Subject ?? null,
                   committed_day,
                   committed_day_raw: task.CommittedDay ?? null,
                   postponed_day_raw: task.PostponedDay ?? null,
                   in_my_day: committed_day === day,
+                  ...projectSubstrateTaskDetails(task),
                 }),
               },
             ],
@@ -3176,7 +3182,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "remove_from_my_day",
       {
         description:
-          "Remove a Microsoft To Do task from My Day (undocumented Substrate endpoint) by clearing its CommittedDay. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+          "Remove a Microsoft To Do task from My Day (undocumented Substrate endpoint) by clearing its CommittedDay. Returns the task's current detail (status, importance, dates, etc.) from the same response. Note: committed_day records only the most recent date the task was on My Day (whether or not completed); there is no history beyond that single last-on-My-Day date. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
         inputSchema: {
           task_id: z.string().min(1).describe("Microsoft Graph task id."),
           list: z
@@ -3207,9 +3213,11 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                   ok: true,
                   list_id,
                   task_id,
+                  title: task.Subject ?? null,
                   committed_day,
                   committed_day_raw: task.CommittedDay ?? null,
                   in_my_day: committed_day !== null,
+                  ...projectSubstrateTaskDetails(task),
                 }),
               },
             ],
@@ -3221,7 +3229,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "list_my_day_tasks",
       {
         description:
-          "List Microsoft To Do tasks in My Day for a given day (undocumented Substrate endpoint). `date` defaults to today in the Worker's configured timezone. Iterates the indexed list roster and aggregates matches across lists. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+          "List Microsoft To Do tasks in My Day for a given day (undocumented Substrate endpoint). `date` defaults to today in the Worker's configured timezone. Iterates the indexed list roster and aggregates matches across lists. Each task carries detail that rides along on the Substrate response — status, importance, due/start/completed dates, reminder, categories, body_preview, and order_datetime — with no extra lookup. Results are sorted by order_datetime descending, mirroring the To Do app's manual (drag-to-reorder) order. Note: committed_day is only the most recent date the task was on My Day (whether or not it was completed); there is no history beyond that single last-on-My-Day date, regardless of whether it was today or another day. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
         inputSchema: {
           date: z
             .string()
@@ -3259,14 +3267,16 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           // client-side on the DATE PORTION of CommittedDay — substrate stores it
           // as a full datetime, so a server `$filter=CommittedDay eq '2026-05-25'`
           // (bare date) wouldn't match.
-          const tasks: Array<{
-            list_id: string;
-            display_name: string | null;
-            task_id: string | null;
-            title: string | null;
-            committed_day: string | null;
-            committed_day_raw: string | null;
-          }> = [];
+          const tasks: Array<
+            {
+              list_id: string;
+              display_name: string | null;
+              task_id: string | null;
+              title: string | null;
+              committed_day: string | null;
+              committed_day_raw: string | null;
+            } & ReturnType<typeof projectSubstrateTaskDetails>
+          > = [];
           let folders_errored = 0;
           for (const l of roster) {
             let folderTasks;
@@ -3291,9 +3301,20 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                 title: t.Subject ?? null,
                 committed_day: committedDatePart(t.CommittedDay),
                 committed_day_raw: t.CommittedDay ?? null,
+                ...projectSubstrateTaskDetails(t),
               });
             }
           }
+          // Mirror the To Do app's manual (drag-to-reorder) order: OrderDateTime
+          // descending. We aggregate across folders, so the sort happens here on
+          // the combined array. Tasks missing an order_datetime sort last; ties
+          // hold their enumeration order (Array.prototype.sort is stable).
+          tasks.sort((a, b) => {
+            if (a.order_datetime === b.order_datetime) return 0;
+            if (a.order_datetime === null) return 1;
+            if (b.order_datetime === null) return -1;
+            return a.order_datetime < b.order_datetime ? 1 : -1;
+          });
           return {
             content: [
               {

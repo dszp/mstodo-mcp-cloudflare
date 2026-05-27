@@ -14,6 +14,7 @@ import {
   extractTasks,
   SubstrateError,
   SubstrateTaskSchema,
+  projectSubstrateTaskDetails,
 } from "../src/graph/substrate-client";
 
 // Minimal Env stub — these helpers only read ENABLE_MY_DAY.
@@ -121,6 +122,68 @@ describe("SubstrateTaskSchema", () => {
   });
   it("accepts a null CommittedDay (task not in My Day)", () => {
     expect(SubstrateTaskSchema.parse({ Id: "x", CommittedDay: null }).CommittedDay).toBeNull();
+  });
+});
+
+describe("projectSubstrateTaskDetails (shared My Day detail projection)", () => {
+  it("projects status, importance, dates, reminder, categories, body, and order", () => {
+    const t = SubstrateTaskSchema.parse({
+      Id: "x",
+      Subject: "Pay invoice",
+      Status: "InProgress",
+      Importance: "High",
+      // Due/start are date-semantic — surfaced as YYYY-MM-DD.
+      DueDateTime: { DateTime: "2026-05-28T00:00:00.0000000", TimeZone: "UTC" },
+      StartDateTime: { DateTime: "2026-05-27T00:00:00.0000000", TimeZone: "UTC" },
+      // Reminder/completed are timestamps — surfaced whole.
+      ReminderDateTime: { DateTime: "2026-05-28T09:00:00.0000000", TimeZone: "UTC" },
+      CompletedDateTime: null,
+      IsReminderOn: true,
+      HasAttachments: false,
+      Categories: ["Work", "Finance"],
+      Body: { ContentType: "html", Content: "<p>Call <b>vendor</b> re: invoice</p>" },
+      CreatedDateTime: "2026-05-20T12:00:00Z",
+      LastModifiedDateTime: "2026-05-27T08:30:00Z",
+      OrderDateTime: "2026-05-27T14:03:00Z",
+    });
+    expect(projectSubstrateTaskDetails(t)).toEqual({
+      status: "InProgress",
+      importance: "High",
+      due_date: "2026-05-28",
+      start_date: "2026-05-27",
+      completed_date: null,
+      is_reminder_on: true,
+      reminder_date: "2026-05-28T09:00:00.0000000",
+      has_attachments: false,
+      categories: ["Work", "Finance"],
+      body_preview: "Call vendor re: invoice",
+      created_date: "2026-05-20T12:00:00Z",
+      last_modified_date: "2026-05-27T08:30:00Z",
+      order_datetime: "2026-05-27T14:03:00Z",
+    });
+  });
+
+  it("tolerates a bare ISO string for a DateTimeTimeZone field", () => {
+    const t = SubstrateTaskSchema.parse({ Id: "x", DueDateTime: "2026-06-01T00:00:00Z" });
+    expect(projectSubstrateTaskDetails(t).due_date).toBe("2026-06-01");
+  });
+
+  it("nulls/empties absent fields rather than throwing", () => {
+    const d = projectSubstrateTaskDetails(SubstrateTaskSchema.parse({ Id: "x" }));
+    expect(d.status).toBeNull();
+    expect(d.importance).toBeNull();
+    expect(d.due_date).toBeNull();
+    expect(d.is_reminder_on).toBeNull();
+    expect(d.has_attachments).toBeNull();
+    expect(d.categories).toEqual([]);
+    expect(d.body_preview).toBeNull();
+    expect(d.order_datetime).toBeNull();
+  });
+
+  it("truncates a long body preview to 200 chars", () => {
+    const long = "x".repeat(500);
+    const t = SubstrateTaskSchema.parse({ Id: "x", Body: { Content: long } });
+    expect(projectSubstrateTaskDetails(t).body_preview).toHaveLength(200);
   });
 });
 
