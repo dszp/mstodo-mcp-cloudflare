@@ -75,8 +75,6 @@ Releases are cut **from `dev`**, then merged/pushed to `main` and tagged. The co
 4. Commit as `Release X.Y.Z: <theme>`.
 5. Tag `vX.Y.Z` and push the branch + tag.
 
-> The version strings hardcoded in `src/index.ts` (`/health`) and `src/mcp/agent.ts` (`McpServer` name) are **stale and not kept in sync** with releases — `package.json` is the source of truth. Don't assume they're correct; flag if you touch that code.
-
 ## Conventions & invariants worth preserving
 - **Only `TodoIndex` refreshes tokens.** Don't add token-endpoint calls elsewhere; route through the singleton's serializer.
 - **Host-pin before attaching a Bearer token** — keep `assertGraphUrl` / `assertSubstrateUrl` in front of every authed request when adding endpoints.
