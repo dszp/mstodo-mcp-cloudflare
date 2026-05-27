@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] – 2026-05-27
+
+### Security
+- **Structured Microsoft error logging.** `postToken` and `fetchMe` (`src/auth/microsoft.ts`)
+  no longer log raw Microsoft error-response bodies. They now emit only non-sensitive
+  identifying fields — `error`/`error_codes`/`correlation_id` from the Entra `/token` shape,
+  `code`/`message` (capped) from the Graph shape — falling back to a short truncated slice for
+  non-JSON. The full body still rides on `TokenExchangeError.detail` (in-process only, never
+  logged), so the `AADSTS65001` My Day latch is unchanged. Removes any tail risk of
+  token-adjacent detail reaching logs; no behavior change beyond log shape.
+
+### Added
+- **Security model section in the README.** Consolidates the load-bearing invariants
+  (single-owner fail-closed gate, host-pinning before token attachment, single token refresher,
+  owner-only config, secret-less capability tokens, redacted logging) that were previously
+  scattered across sections, clarifying the single-user threat model.
+
 ## [0.5.1] – 2026-05-27
 
 ### Changed

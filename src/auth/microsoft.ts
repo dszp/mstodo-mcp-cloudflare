@@ -118,6 +118,40 @@ export function buildAuthorizeUrl(
   return u.toString();
 }
 
+// Microsoft error responses are JSON, but the shapes differ: the Entra /token
+// endpoint is flat ({error, error_description, error_codes, correlation_id,
+// trace_id, ...}) while Graph nests under `error` ({error: {code, message}}).
+// Pull only the non-sensitive identifying fields for logs/messages so we never
+// emit a raw body that could, in some failure modes, carry token-adjacent
+// detail. Falls back to a short truncated slice when the body isn't JSON we
+// recognize. The full body still rides on TokenExchangeError.detail (in-process
+// only, never logged) so the AADSTS65001 latch in index-do.ts keeps working.
+function summarizeMsError(text: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (typeof parsed.error === "string") {
+      // Entra token-endpoint (flat) shape.
+      return {
+        error: parsed.error,
+        error_codes: parsed.error_codes,
+        correlation_id: parsed.correlation_id,
+      };
+    }
+    const inner = parsed.error;
+    if (inner && typeof inner === "object") {
+      // Graph (nested) shape: { error: { code, message } }.
+      const e = inner as Record<string, unknown>;
+      return {
+        code: e.code,
+        message: typeof e.message === "string" ? e.message.slice(0, 200) : undefined,
+      };
+    }
+  } catch {
+    // not JSON — fall through to the truncated slice
+  }
+  return { body: text.slice(0, 200) };
+}
+
 async function postToken(env: Env, body: URLSearchParams): Promise<TokenResponse> {
   const res = await fetch(`${tenantBase(env)}/token`, {
     method: "POST",
@@ -126,7 +160,7 @@ async function postToken(env: Env, body: URLSearchParams): Promise<TokenResponse
   });
   const text = await res.text();
   if (!res.ok) {
-    log.warn("ms_token_error", { status: res.status, body: text.slice(0, 500) });
+    log.warn("ms_token_error", { status: res.status, ...summarizeMsError(text) });
     throw new TokenExchangeError(`microsoft_token_${res.status}`, text);
   }
   return JSON.parse(text) as TokenResponse;
@@ -237,7 +271,7 @@ export async function fetchMe(accessToken: string): Promise<MeIdentity> {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`graph_me_${res.status}: ${text.slice(0, 300)}`);
+    throw new Error(`graph_me_${res.status}: ${JSON.stringify(summarizeMsError(text))}`);
   }
   return (await res.json()) as MeIdentity;
 }

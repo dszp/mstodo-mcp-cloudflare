@@ -92,6 +92,33 @@ Small, slowly-changing state — your OAuth tokens, the owner-identity record, a
 config blobs below — lives in Cloudflare **KV (a key-value store)**. The large,
 frequently-queried task corpus lives in the Durable Object's SQLite, not KV.
 
+## Security model
+
+The server is **strictly single-user** by design, and a few invariants are load-bearing —
+worth stating in one place:
+
+- **One owner, fail-closed.** Every sign-in is gated at the OAuth callback: the Microsoft `/me`
+  `mail`/`userPrincipalName` must equal the `OWNER_EMAIL` secret, and a non-matching identity is
+  **403'd before any token is stored**. A missing or mistyped `OWNER_EMAIL` makes the check fail
+  for *everyone* — it locks the owner out, it never opens access.
+- **Host-pinning before authorization.** Every Graph and Substrate URL is pinned to its expected
+  host *before* the Bearer token is attached, so a malicious `@odata.nextLink` can't redirect an
+  authenticated request and exfiltrate the token. Tokens travel only in the `Authorization`
+  header — never in a URL or a log line.
+- **One token refresher.** The singleton `TodoIndex` Durable Object is the sole caller of the
+  Microsoft token endpoint; concurrent sessions funnel through a single refresh chain, so there
+  are no refresh storms and no token-handling logic duplicated across sessions.
+- **Config is owner-only, not an untrusted surface.** The regex rules in `config:lists` /
+  `config:link_rules` are writable only by the authenticated owner (via MCP tools behind the gate
+  above), so user-supplied-regex concerns like ReDoS aren't in the threat model. The link engine
+  additionally bounds work with an 8 KB body cap and a 50 ms budget per task.
+- **Secret-less web surfaces.** `/upload` and `/download` authorize with single-use
+  [capability tokens](#web-upload--upload) — an unguessable random id stored in KV under a TTL,
+  scoped to one task/attachment — so there is no signing key or shared secret to configure or leak.
+- **Logs carry no secrets.** Query strings (which can hold delta tokens) are redacted, Microsoft
+  error bodies are logged as structured fields rather than raw text, and the only PII in logs is
+  the owner's own address in the identity-change line.
+
 ## Configuration
 
 Three optional config blobs live in KV under the `TODO_CACHE` binding. Ready-to-edit

@@ -33,5 +33,6 @@ worker-configuration.d.ts
 *.backup
 .DS_Store
 .claude/settings.local.json
+.claude/*.md
 PLAN-MY-DAY.md
 PLAN-MOVE-TASK.md
