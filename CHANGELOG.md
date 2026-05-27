@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] – 2026-05-27
+
+### Changed
+- **`mint_download_link` docs.** Clarified that the returned `size` is Microsoft Graph's
+  collection metadata and can **overstate** the actual bytes — the authoritative size is the
+  download's `Content-Length` (served bytes are byte-exact to the source, verified to a 4 MiB
+  upload-session attachment). Noted that large attachments work (buffered in Worker memory, up to
+  Graph's ~25 MB max) and that callers should pass an explicit filename to avoid destination
+  collisions. Tool-description + README only; no behavior change.
+
 ## [0.5.0] – 2026-05-26
 
 ### Added
