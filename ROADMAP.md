@@ -96,20 +96,90 @@ deferred** until the §1 API exists:
   (e.g. Postmark). Schedule/config lives in KV; same email template as today.
   Retires the last n8n dependency. **Effort:** ~2–3 days when revisited.
 
-## 4. Email-to-task webhook ingress
+## 4. Graph change-notification subscriptions to augment delta polling (toggleable)
+
+Drive *when* delta sync runs from Microsoft Graph push notifications instead of
+only the timer, collapsing typical update lag from "next cycle interval" to
+Graph-to-webhook latency (sub-second) — i.e. near-instant updates like the native
+To Do apps, while delta polling stays in place as the backstop. **Gated behind a
+new `ENABLE_TASK_SUBSCRIPTIONS` var** (off by default, same pattern as
+`ENABLE_MY_DAY` / `ENABLE_DOWNLOAD_LINKS`) because it adds a public webhook
+receiver and a renewal cron — opt-in surface, not always-on.
+
+**This is a documented public Graph capability, not first-party-only.** Graph
+exposes change-notification subscriptions on
+`/me/todo/lists/{todoTaskListId}/tasks` (one subscription per list, covering all
+tasks in that list). Delegated `Tasks.ReadWrite` is the least-privileged
+permission and **application permissions are "Not supported"** for this resource —
+so it rides the existing delegated auth funneled through `TodoIndex`, not a
+daemon-style app token. The undocumented Substrate plane (which gives us lossless
+`move_task` and My Day CRUD) is unrelated and unlocks nothing subscription-flavored
+beyond what documented Graph already exposes.
+
+**Architectural fit — subscriptions drive delta, they don't replace it.**
+Notification arrives → look up the list ID → invalidate that list's cache → trigger
+the existing per-list delta sync. Every property already built is preserved:
+stale-first prioritization, delta tokens, error tracking, the fair oldest-first
+rotation. The `alarm()`/`runSyncCycle()` scheduler stays as the backstop, just at a
+**much longer `DELTA_SYNC_INTERVAL_MIN`** since most syncs become event-triggered
+rather than timer-driven.
+
+**Pieces to add:**
+
+```
+src/
+  subscriptions/
+    webhook-handler.ts   # public POST /webhook: validation-token echo on create,
+                         #   clientState check, notification → enqueue per-list delta
+    manager.ts           # create/renew/delete subscriptions; map subscriptionId↔listId
+```
+
+- **`POST /webhook` handler**, wired in `index.ts` alongside `handleUpload` /
+  the `/download` handler (public, pre-OAuth). On subscription creation Graph sends
+  a `validationToken` query param that must be echoed back as `text/plain` within
+  10s; on a real notification it validates `clientState` (and verifies the JWT if we
+  ever opt into rich/with-resource-data notifications), resolves the list ID, and
+  enqueues a delta-sync run on the `TodoIndex` singleton.
+- **Renewal cron.** Subscription lifetime maxes at **4,230 minutes (~2.94 days)** for
+  `todoTask`, so a renewal must run well under that — fold it into the existing
+  `*/15` cron (or a dedicated daily one) calling `manager.ts`.
+- **Subscribe/unsubscribe hook in the lists-delta sync.** When the `$delta` on
+  `/me/todo/lists` reports a list created/deleted, create/tear down its subscription
+  so coverage tracks the live list roster (~38 lists today; quotas are non-binding —
+  100 subscriptions per app+tenant, 1,000 per tenant).
+
+**Delta polling stays mandatory — there is no missed-notification safety net for
+`todoTask`.** Graph lifecycle/`missed` events currently cover only Outlook message,
+event, and personal contact. If Graph silently drops a notification we are *not*
+told, so the timer-driven cycle must remain the backstop (just slower); this is why
+the feature augments rather than replaces polling.
+
+**Constraints to price in (all fine for the current single-owner M365 tenant):**
+
+- **Global cloud only** — not available in national clouds (matters only if a
+  GCC/GCC-High tenant is ever onboarded).
+- **No personal MSA (outlook.com) and no Azure AD B2C** — the supported case is the
+  M365 work account, which the `OWNER_EMAIL` gate already enforces.
+
+**One thing to verify before building:** whether Graph delivers *basic-only* or
+supports *rich (with-resource-data)* notifications for `todoTask`. Current read of
+the docs: `todoTask` isn't on the rich-notifications supported-resources list, so
+expect basic-only — meaning after the webhook fires we still GET the changed task by
+ID (one extra round-trip, but architecturally identical since we re-delta the list
+anyway). Confirm against the current rich-notifications page before committing.
+
+**Effort:** ~2–3 days — webhook handler + validation/clientState dance (portable in
+spirit from the `/upload` + `/download` capability handlers), the subscription
+manager, the renewal cron, and the subscribe-on-list-create hook; plus the
+`ENABLE_TASK_SUBSCRIPTIONS` gate and `SERVICE_BASE_URL`-derived webhook
+`notificationUrl`.
+
+## 5. Email-to-task webhook ingress
 
 Migrate the existing email-to-task flow off n8n: a webhook (or Cloudflare Email
 Routing handler) that parses an inbound message and creates a task via the same
 `create_task` logic (link rules apply automatically). Lets the n8n instance be
 retired entirely once §3(b) also lands.
-
-## 5. Multi-user mode
-
-Replace the hardcoded `owner` props and the singleton `idFromName("owner")` DO
-with per-user, KV-scoped tokens and per-user DO keying (the `OWNER_DO_NAME` seam
-in `src/cache/sql.ts` is the deliberate extension point). Significant rework —
-identity wipe, token storage, and the owner gate all become per-user. Only worth
-doing if sharing a single running instance across people becomes a real need.
 
 ## 6. Search ranking tuning
 
@@ -236,3 +306,11 @@ authenticate to each other. Keeps the auth surface minimal and the AI in control
 **Effort:** ~0.5–1 day on the To Do side (mint tool + `/download` endpoint, both
 portable from the §8 capability/handler code); the destination `upload_attachment_url`
 already exists on the Obsidian side and mainly needs the host allowlist hardened.
+
+## 10. Multi-user mode
+
+Replace the hardcoded `owner` props and the singleton `idFromName("owner")` DO
+with per-user, KV-scoped tokens and per-user DO keying (the `OWNER_DO_NAME` seam
+in `src/cache/sql.ts` is the deliberate extension point). Significant rework —
+identity wipe, token storage, and the owner gate all become per-user. Only worth
+doing if sharing a single running instance across people becomes a real need.
