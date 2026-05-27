@@ -523,6 +523,175 @@ describe("TodoIndex delta sync", () => {
   });
 });
 
+describe("TodoIndex delta sync fairness (rotation + error retry)", () => {
+  const LISTS_DELTA = "https://graph.microsoft.com/v1.0/me/todo/lists/delta";
+  const LISTS_DL = "https://graph.microsoft.com/v1.0/me/todo/lists/delta?dl=1";
+  const tasksDelta = (id: string) =>
+    `https://graph.microsoft.com/v1.0/me/todo/lists/${id}/tasks/delta`;
+  const tasksDL = (id: string, n = 1) =>
+    `https://graph.microsoft.com/v1.0/me/todo/lists/${id}/tasks/delta?dl=${n}`;
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  // Overwrite a list's recorded last-sync time so we can stage a precise
+  // staleness ordering independent of wall-clock timing during baseline.
+  async function setLastSynced(
+    stub: ReturnType<typeof indexStub>,
+    listId: string,
+    at: number,
+  ): Promise<void> {
+    await runInDurableObject(stub, async (_inst: TodoIndex, state) => {
+      state.storage.sql.exec(
+        "UPDATE sync_state SET last_synced_at = ? WHERE resource = ?",
+        at,
+        `tasks:${listId}`,
+      );
+    });
+  }
+
+  async function lastSynced(
+    stub: ReturnType<typeof indexStub>,
+    listId: string,
+  ): Promise<number | null> {
+    const s = await stub.syncStatus();
+    return s.resources.find((r) => r.resource === `tasks:${listId}`)?.last_synced_at ?? null;
+  }
+
+  it("with a budget smaller than the roster, syncs the oldest list first (not the rowid head)", async () => {
+    await seedFreshTokens();
+    // Baseline three idle lists A, B, C (inserted in this order → rowid A<B<C).
+    stubGraph({
+      [LISTS_DELTA]: {
+        body: {
+          value: [
+            { id: "list-A", displayName: "A" },
+            { id: "list-B", displayName: "B" },
+            { id: "list-C", displayName: "C" },
+          ],
+          "@odata.deltaLink": LISTS_DL,
+        },
+      },
+      [tasksDelta("list-A")]: { body: { value: [syncTask("a")], "@odata.deltaLink": tasksDL("list-A") } },
+      [tasksDelta("list-B")]: { body: { value: [syncTask("b")], "@odata.deltaLink": tasksDL("list-B") } },
+      [tasksDelta("list-C")]: { body: { value: [syncTask("c")], "@odata.deltaLink": tasksDL("list-C") } },
+    });
+    const stub = indexStub("sync-fairness-rotate");
+    await stub.runSyncCycle(); // full baseline: all three idle
+
+    // Stage staleness: C (the rowid TAIL) is the OLDEST; A (rowid head) newest.
+    await setLastSynced(stub, "list-A", 3000);
+    await setLastSynced(stub, "list-B", 2000);
+    await setLastSynced(stub, "list-C", 1000);
+
+    // Incremental pages: each stored deltaLink returns no changes + a fresh
+    // deltaLink, so a refresh just advances last_synced_at.
+    stubGraph({
+      [LISTS_DL]: { body: { value: [], "@odata.deltaLink": LISTS_DL } },
+      [tasksDL("list-A")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-A", 2) } },
+      [tasksDL("list-B")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-B", 2) } },
+      [tasksDL("list-C")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-C", 2) } },
+    });
+
+    // Budget of 1 task page → exactly one list may sync this cycle.
+    await stub.runSyncCycle(1);
+
+    // The oldest list (C) must have been chosen and refreshed; the rowid-head
+    // (A), already fresh, must NOT have consumed the single slot.
+    expect(await lastSynced(stub, "list-C")).toBeGreaterThan(1000);
+    expect(await lastSynced(stub, "list-A")).toBe(3000);
+  });
+
+  it("retries an errored list ahead of a fresher idle one, recovering it", async () => {
+    await seedFreshTokens();
+    stubGraph({
+      [LISTS_DELTA]: {
+        body: {
+          value: [
+            { id: "list-A", displayName: "A" },
+            { id: "list-B", displayName: "B" },
+          ],
+          "@odata.deltaLink": LISTS_DL,
+        },
+      },
+      [tasksDelta("list-A")]: { body: { value: [syncTask("a")], "@odata.deltaLink": tasksDL("list-A") } },
+      [tasksDelta("list-B")]: { body: { value: [syncTask("b")], "@odata.deltaLink": tasksDL("list-B") } },
+    });
+    const stub = indexStub("sync-fairness-error");
+    await stub.runSyncCycle(); // baseline both idle
+
+    // B's stored deltaLink starts erroring (500); A stays healthy.
+    stubGraph({
+      [LISTS_DL]: { body: { value: [], "@odata.deltaLink": LISTS_DL } },
+      [tasksDL("list-A")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-A", 2) } },
+      [tasksDL("list-B")]: { status: 500, body: { error: { code: "internalServerError" } } },
+    });
+    await stub.runSyncCycle(); // B → error
+    {
+      const s = await stub.syncStatus();
+      expect(s.resources.find((r) => r.resource === "tasks:list-B")?.status).toBe("error");
+    }
+
+    // Stage staleness: A fresh (newest), B old. Under rank-only ordering A (idle)
+    // outranks B (error), so B would never be retried within a tight budget.
+    await setLastSynced(stub, "list-A", 3000);
+    await setLastSynced(stub, "list-B", 1000);
+
+    // B's deltaLink now recovers.
+    stubGraph({
+      [LISTS_DL]: { body: { value: [], "@odata.deltaLink": LISTS_DL } },
+      [tasksDL("list-B")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-B", 2) } },
+    });
+    await stub.runSyncCycle(1); // budget 1 → must pick B (oldest) and recover it
+
+    const s = await stub.syncStatus();
+    expect(s.resources.find((r) => r.resource === "tasks:list-B")?.status).toBe("idle");
+    expect(await lastSynced(stub, "list-B")).toBeGreaterThan(1000);
+  });
+
+  it("a permanently-failing list does not starve healthy lists (errors < budget)", async () => {
+    await seedFreshTokens();
+    // E errors forever; H1, H2 are healthy. With budget 2, E may eat one slot
+    // each cycle but the other slot must rotate through the healthy lists so
+    // both get synced — proving the front-of-line errored list can't monopolize.
+    stubGraph({
+      [LISTS_DELTA]: {
+        body: {
+          value: [
+            { id: "list-E", displayName: "E" },
+            { id: "list-H1", displayName: "H1" },
+            { id: "list-H2", displayName: "H2" },
+          ],
+          "@odata.deltaLink": LISTS_DL,
+        },
+      },
+      [tasksDelta("list-E")]: { body: { value: [syncTask("e")], "@odata.deltaLink": tasksDL("list-E") } },
+      [tasksDelta("list-H1")]: { body: { value: [syncTask("h1")], "@odata.deltaLink": tasksDL("list-H1") } },
+      [tasksDelta("list-H2")]: { body: { value: [syncTask("h2")], "@odata.deltaLink": tasksDL("list-H2") } },
+    });
+    const stub = indexStub("sync-fairness-perma");
+    await stub.runSyncCycle(); // baseline all three idle
+
+    // E is the oldest (front of rotation) and fails on every attempt; the two
+    // healthy lists are newer so they wait their turn.
+    await setLastSynced(stub, "list-E", 1000);
+    await setLastSynced(stub, "list-H1", 2000);
+    await setLastSynced(stub, "list-H2", 3000);
+    stubGraph({
+      [LISTS_DL]: { body: { value: [], "@odata.deltaLink": LISTS_DL } },
+      [tasksDL("list-E")]: { status: 500, body: { error: { code: "internalServerError" } } },
+      [tasksDL("list-H1")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-H1", 2) } },
+      [tasksDL("list-H2")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-H2", 2) } },
+    });
+
+    // Two cycles of budget 2: E burns one slot each, the other rotates H1 then H2.
+    await stub.runSyncCycle(2);
+    await stub.runSyncCycle(2);
+
+    expect(await lastSynced(stub, "list-H1")).toBeGreaterThan(2000);
+    expect(await lastSynced(stub, "list-H2")).toBeGreaterThan(3000);
+  });
+});
+
 describe("TodoIndex syncStatus", () => {
   const LISTS_DELTA = "https://graph.microsoft.com/v1.0/me/todo/lists/delta";
   const TASKS_DELTA_A =

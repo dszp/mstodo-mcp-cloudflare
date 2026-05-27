@@ -794,22 +794,35 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     );
   }
 
-  // List ids ordered so the cycle spends budget on unfinished work first:
-  // mid-cycle resumes, then never-synced/baseline, then idle, then errored.
+  // List ids ordered so the cycle spends its bounded page budget fairly:
+  // unfinished work first (mid-cycle resumes, then never-baselined lists), then
+  // a single "maintenance" tier (idle AND errored) rotated OLDEST-synced first.
+  //
+  // The oldest-first rotation is load-bearing when the roster exceeds
+  // MAX_PAGES_PER_CYCLE: each idle list costs ≥1 page even with no changes, so a
+  // fixed order would re-sync the same head every cycle and permanently starve
+  // the tail (and never retry errored lists, which a rank-by-state scheme parks
+  // last). Sorting by last_synced_at ASC guarantees every list — fresh, stale,
+  // or errored — reaches the front within ⌈roster / budget⌉ cycles. Errored
+  // lists keep their last successful timestamp (the error path doesn't advance
+  // it), so a transient failure is retried promptly while a list that just
+  // synced waits its turn.
   #listIdsByPriority(): string[] {
     const lists = this.sql
       .exec<{ list_id: string }>("SELECT list_id FROM lists")
       .toArray();
-    const rank = (listId: string): number => {
-      const st = this.#getSyncState(`tasks:${listId}`);
-      if (!st || (!st.delta_link && !st.next_link)) return 1; // baseline needed
-      if (st.next_link) return 0; // resume
-      if (st.status === "error") return 3;
-      return 2; // idle
-    };
-    return lists
-      .map((l) => l.list_id)
-      .sort((a, b) => rank(a) - rank(b));
+    const keyed = lists.map((l) => {
+      const st = this.#getSyncState(`tasks:${l.list_id}`);
+      let tier: number;
+      if (st?.next_link) tier = 0; // resume an in-flight baseline/page chain
+      else if (!st || !st.delta_link) tier = 1; // never baselined
+      else tier = 2; // idle or errored — rotate by staleness
+      // Oldest first within a tier; never-synced (null) sorts oldest.
+      return { list_id: l.list_id, tier, age: st?.last_synced_at ?? 0 };
+    });
+    return keyed
+      .sort((a, b) => a.tier - b.tier || a.age - b.age)
+      .map((k) => k.list_id);
   }
 
   #intervalMs(): number {

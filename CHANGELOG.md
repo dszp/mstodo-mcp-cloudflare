@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Fair per-list delta-sync rotation.** When the list roster exceeds the per-cycle page
+  budget (`MAX_PAGES_PER_CYCLE`), lists beyond the budget no longer starve. `#listIdsByPriority`
+  (`src/cache/index-do.ts`) previously ordered idle lists by a fixed rowid order and parked
+  errored lists last, so the same head lists were re-synced every cycle while a fixed tail (and
+  any errored lists) went stale indefinitely with no surfaced error. Idle and errored lists now
+  share one maintenance tier rotated **oldest-synced first**, guaranteeing every list reaches the
+  front within ⌈roster ÷ budget⌉ cycles and that transient errors (`graph_500`/`504`) are retried.
+  Unfinished work (mid-cycle resumes, then never-baselined lists) still takes precedence.
+
 ## [0.5.2] – 2026-05-27
 
 ### Security
