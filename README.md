@@ -153,6 +153,13 @@ not transactional — two truly-concurrent GETs could race.) Metadata is read at
 attachments collection, so `/download` makes a single Graph call for the bytes and trusts no
 request headers.
 
+The returned **`size` is Graph's reported metadata and can overstate the actual bytes** — the
+authoritative size is the download's `Content-Length`. The served bytes are byte-exact to the
+source (verified up to a 4 MiB upload-session attachment), so the transfer is faithful even when
+`size` doesn't match. Large attachments work (Graph returns `contentBytes` on the individual GET
+regardless of the inline-creation ceiling); the practical limit is Graph's ~25 MB attachment max,
+since `/download` buffers the file in Worker memory.
+
 This surface is **ON by default**; set **`ENABLE_DOWNLOAD_LINKS="false"`** (var) to disable both
 `mint_download_link` and `/download` and shrink the attack surface if you don't need it. It also
 requires `SERVICE_BASE_URL` (same as upload); unset/placeholder ⇒ `download_disabled`.

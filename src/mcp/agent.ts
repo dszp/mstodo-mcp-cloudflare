@@ -1996,7 +1996,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "mint_download_link",
       {
         description:
-          "Mint a short-lived (≤ 5 min), single-use URL that serves ONE attachment's raw bytes for a server-to-server transfer — e.g. hand the URL to another MCP server's url-ingest tool to move a file into it. The bytes are fetched server-side and never pass through the model. Returns { download_url, filename, content_type, size, expires_at }. The link is burned on first fetch, so pass it straight to the destination tool; don't expect to reuse it.",
+          "Mint a short-lived (≤ 5 min), single-use URL that serves ONE attachment's raw bytes for a server-to-server transfer — e.g. hand the URL to another MCP server's url-ingest tool to move a file into it. The bytes are fetched server-side and never pass through the model. Returns { download_url, filename, content_type, size, expires_at }. The link is burned on first fetch, so pass it straight to the destination tool; don't expect to reuse it. NOTE: `size` is Microsoft Graph's reported metadata and can OVERSTATE the actual bytes; the authoritative size is the download response's Content-Length (the served bytes are byte-exact to the source). If a filename may collide at the destination, pass an explicit filename there — two attachments on one task can share a name.",
         inputSchema: {
           list: z
             .string()
