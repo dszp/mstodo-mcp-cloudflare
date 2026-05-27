@@ -3,6 +3,14 @@
 # These bindings are used by `wrangler dev` locally. For deploys, use
 # `wrangler secret put <NAME>` instead — secrets are encrypted by Cloudflare
 # and never appear in source.
+#
+# Any value may be a literal OR a 1Password secret reference of the form
+# `op://<vault>/<item>/<field>`. `scripts/push-secrets.sh` resolves references
+# via the `op` CLI at push time (needs `op signin` or OP_SERVICE_ACCOUNT_TOKEN)
+# and leaves literals untouched, so you can keep secrets out of the file:
+#   MS_CLIENT_SECRET=op://Private/MS To-Do MCP/credential
+# Surrounding quotes are stripped, so 1Password's "Copy Secret Reference"
+# (which includes double quotes) can be pasted in verbatim.
 
 # Microsoft Entra app registration — Azure portal → App registrations → your app
 MS_TENANT_ID=

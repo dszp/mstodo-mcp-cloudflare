@@ -171,6 +171,11 @@ bash scripts/push-secrets.sh        # pushes every name from .dev.vars over stdi
 # or individually: npx wrangler secret put MS_CLIENT_SECRET
 ```
 
+Values in `.dev.vars` may be literals or **1Password secret references** (`op://<vault>/<item>/<field>`).
+The push script resolves references via the `op` CLI at push time (`op signin`, or
+`OP_SERVICE_ACCOUNT_TOKEN` for CI) and passes literals through unchanged — so you can avoid storing
+secrets in the file at all.
+
 **Optional — enable web attachment uploads.** To use `create_upload_link` / the `/upload`
 endpoint, set `vars.SERVICE_BASE_URL` in `wrangler.jsonc` (step 3) to this Worker's real public
 origin. That's the only configuration needed — upload links are unguessable capability tokens
