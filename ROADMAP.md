@@ -174,6 +174,13 @@ inline path stays as a fast path for tiny files.
 
 ## 9. Cross-server attachment transfer (`mint_download_link` + server-side pull)
 
+> **Status: To Do source side shipped.** `mint_download_link` + the public `/download`
+> endpoint are implemented (capability token in `OAUTH_KV` under a `download:` prefix,
+> ≤5-min single-use, burned on first reachable GET; gated by `ENABLE_DOWNLOAD_LINKS`,
+> default on). **Still remaining:** the pull-side host allowlist on the *destination*
+> (Obsidian's `upload_attachment_url`), and the reverse direction (`ingest_from_url` into
+> To Do via the Graph upload-session path).
+
 The inverse of §8's upload link: a **server-to-server signed-URL pull** so the AI
 can move an attachment from one MCP server to another (e.g. an MS To Do task →
 an Obsidian vault note) **without the bytes ever traversing the model's context**.

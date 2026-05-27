@@ -13,9 +13,13 @@ import { mapPool } from "../graph/concurrency";
 import { VERSION } from "../version";
 import { parseDateInput } from "../util/dates";
 import {
+  createDownloadCapability,
   createUploadCapability,
   DEFAULT_MAX_FILES,
+  downloadLinksEnabled,
+  MAX_DOWNLOAD_TTL_SECONDS,
   MAX_FILES_CAP,
+  type DownloadCapabilityScope,
   type UploadCapabilityScope,
 } from "../upload/tokens";
 import {
@@ -1981,6 +1985,105 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                   list_name: scope.list_name ?? null,
                   filename: filename ?? null,
                   max_files: scope.max_files ?? null,
+                }),
+              },
+            ],
+          };
+        }),
+    );
+
+    this.server.registerTool(
+      "mint_download_link",
+      {
+        description:
+          "Mint a short-lived (≤ 5 min), single-use URL that serves ONE attachment's raw bytes for a server-to-server transfer — e.g. hand the URL to another MCP server's url-ingest tool to move a file into it. The bytes are fetched server-side and never pass through the model. Returns { download_url, filename, content_type, size, expires_at }. The link is burned on first fetch, so pass it straight to the destination tool; don't expect to reuse it.",
+        inputSchema: {
+          list: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("List alias (from get_list_config), display name, or Graph list ID. Omit to resolve from the index."),
+          task_id: z.string().min(1).describe("Microsoft Graph task id the attachment belongs to."),
+          attachment_id: z
+            .string()
+            .min(1)
+            .describe("Attachment id to serve (from list_attachments)."),
+          ttl_minutes: z
+            .number()
+            .int()
+            .min(1)
+            .max(5)
+            .optional()
+            .describe("Link lifetime in minutes (1–5, default 5)."),
+        },
+      },
+      async ({ list, task_id, attachment_id, ttl_minutes }): Promise<McpResponse> =>
+        this.withGraph("mint_download_link", async (graph) => {
+          if (!downloadLinksEnabled(this.env)) {
+            return errResponse("download_disabled", {
+              detail: "Download links are disabled (ENABLE_DOWNLOAD_LINKS=false).",
+            });
+          }
+          const base = (this.env.SERVICE_BASE_URL ?? "").replace(/\/+$/, "");
+          if (!/^https?:\/\/[^/]+/i.test(base)) {
+            return errResponse("download_disabled", {
+              detail: "SERVICE_BASE_URL is not configured as an absolute URL.",
+            });
+          }
+          if (base.includes("example.workers.dev")) {
+            return errResponse("download_disabled", {
+              detail: "SERVICE_BASE_URL is still the example placeholder — set it to this Worker's real public origin.",
+            });
+          }
+          const list_id = await this.resolveListForTask(list, task_id);
+          if (!list_id) {
+            return errResponse("list_required", {
+              task_id,
+              hint: "Task not found in the index; pass `list` explicitly.",
+            });
+          }
+
+          // Read metadata from the attachments COLLECTION (omits contentBytes), so
+          // minting never pulls the whole file into Worker memory — the bytes are
+          // fetched lazily at /download time.
+          const attachments = await listAttachments(graph, list_id, task_id);
+          const att = attachments.find((a) => a.id === attachment_id);
+          if (!att) {
+            return errResponse("attachment_not_found", { list_id, task_id, attachment_id });
+          }
+          if (att["@odata.type"] !== "#microsoft.graph.taskFileAttachment") {
+            // Only file attachments carry bytes; reference attachments have none.
+            return errResponse("attachment_not_downloadable", { list_id, task_id, attachment_id });
+          }
+          const filename = att.name;
+          const content_type = att.contentType ?? undefined;
+          const size = att.size;
+
+          const scope: DownloadCapabilityScope = { list_id, task_id, attachment_id };
+          if (filename) scope.filename = filename;
+          if (content_type) scope.content_type = content_type;
+          if (typeof size === "number") scope.size = size;
+
+          const ttlSeconds = ttl_minutes
+            ? Math.min(ttl_minutes * 60, MAX_DOWNLOAD_TTL_SECONDS)
+            : undefined;
+          const { token, expiresAt } = await createDownloadCapability(this.env, scope, ttlSeconds);
+          const download_url = `${base}/download?t=${encodeURIComponent(token)}`;
+          log.info("download_link_minted", { list_id, task_id, attachment_id });
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  download_url,
+                  expires_at: expiresAt,
+                  list_id,
+                  task_id,
+                  attachment_id,
+                  filename: filename ?? null,
+                  content_type: content_type ?? null,
+                  size: size ?? null,
                 }),
               },
             ],

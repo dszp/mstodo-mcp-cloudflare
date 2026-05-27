@@ -4,6 +4,7 @@ import { TodoIndex } from "./cache/index-do";
 import { OWNER_DO_NAME } from "./cache/sql";
 import AuthHandler from "./auth/handler";
 import { handleUpload } from "./upload/handler";
+import { handleDownload } from "./upload/download-handler";
 import { VERSION } from "./version";
 
 export { MSToDoMCP, TodoIndex };
@@ -37,6 +38,12 @@ export default {
     // single-use signed link minted by create_upload_link).
     const uploadRes = await handleUpload(req, env);
     if (uploadRes) return uploadRes;
+
+    // Public (non-OAuth) server-to-server download endpoint (ROADMAP §9). Same
+    // null-for-other-paths contract as /upload; authenticates with a single-use
+    // capability token minted by mint_download_link.
+    const downloadRes = await handleDownload(req, env);
+    if (downloadRes) return downloadRes;
 
     return oauthProvider.fetch(req, env, ctx);
   },

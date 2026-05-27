@@ -53,12 +53,14 @@ Three Zod-validated blobs (`schemas.ts`) read/written to fixed `TODO_CACHE` KV k
 `log.{debug,info,warn,error}(event, fields)` emits structured JSON (Workers Observability is enabled in `wrangler.jsonc`). `instrument()` emits a `tool` event with `{name, durationMs, ok, reason}`. Both Graph clients redact query strings before logging (delta tokens / `$filter` carry sensitive data).
 
 ### Bindings (see `wrangler.jsonc`, types in `src/types.ts`)
-- KV: `OAUTH_KV` (PKCE/OAuth state), `TODO_CACHE` (tokens, the three config blobs, upload capability tokens)
+- KV: `OAUTH_KV` (PKCE/OAuth state, upload/download capability tokens), `TODO_CACHE` (tokens, the three config blobs)
 - DO: `TODO_INDEX` (`MSToDoMCP`), `TODO_INDEX_DO` (`TodoIndex`)
 - Secrets: `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `OWNER_EMAIL`
-- Vars: `TIMEZONE`, `DELTA_SYNC_INTERVAL_MIN`, `LIST_METADATA_SOFT_TTL_SEC`, `SERVICE_BASE_URL`, `ENABLE_MY_DAY`
+- Vars: `TIMEZONE`, `DELTA_SYNC_INTERVAL_MIN`, `LIST_METADATA_SOFT_TTL_SEC`, `SERVICE_BASE_URL`, `ENABLE_MY_DAY`, `ENABLE_DOWNLOAD_LINKS`
 
-`create_upload_link` mints an unguessable capability token into `TODO_CACHE`; the `/upload` handler (`src/upload/`) burns it on first use, giving the browser an upload surface without the OAuth token.
+`create_upload_link` mints an unguessable capability token into `OAUTH_KV` (`upload:` prefix); the `/upload` handler (`src/upload/`) burns it on first use, giving the browser an upload surface without the OAuth token.
+
+`mint_download_link` is the inverse (ROADMAP §9): the same capability machinery (`src/upload/tokens.ts`, distinct `download:` prefix, ≤5-min TTL) scoped to one attachment, served by the public `/download` handler (`src/upload/download-handler.ts`, wired in `index.ts` right after `handleUpload`). The handler burns the token **before** the Graph fetch (single-use on first reachable GET, not transactional) and reuses `getAttachmentBytes()` to move bytes server-to-server without the model in the loop. Gated by the `ENABLE_DOWNLOAD_LINKS` var (defaults on; `"false"` disables both the tool and the endpoint).
 
 ## Secrets in `.dev.vars`
 `scripts/push-secrets.sh` pushes each name to Cloudflare over stdin (never argv). A value may be a literal **or** a 1Password reference `op://<vault>/<item>[/<section>]/<field>`, resolved via the `op` CLI at push time (needs `op signin` or `OP_SERVICE_ACCOUNT_TOKEN`); surrounding quotes are stripped, so 1Password's "Copy Secret Reference" pastes in verbatim.

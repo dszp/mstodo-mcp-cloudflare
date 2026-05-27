@@ -107,3 +107,107 @@ export async function lookupUploadCapability(
 export async function consumeUploadCapability(env: Env, token: string): Promise<void> {
   await env.OAUTH_KV.delete(KV_PREFIX + token);
 }
+
+// ── Download capabilities (ROADMAP §9) ───────────────────────────────────────
+// The mirror image of the upload capability, for the server-to-server pull flow:
+// `mint_download_link` bakes one attachment's coordinates + metadata into KV under
+// a random id, and `/download` serves those bytes exactly once for a valid id. The
+// id is the same kind of unguessable CSPRNG nonce; verification, expiry, and
+// single-use work identically. A DISTINCT KV prefix keeps the two namespaces
+// disjoint — an upload token can never be redeemed at /download and vice-versa.
+
+const DOWNLOAD_KV_PREFIX = "download:";
+// ROADMAP §9 hard requirement: a download link must live ≤ 5 minutes so a URL that
+// lands in conversation history goes stale fast. Default and max are both 5 min.
+export const DEFAULT_DOWNLOAD_TTL_SECONDS = 5 * 60;
+export const MAX_DOWNLOAD_TTL_SECONDS = 5 * 60;
+
+/**
+ * Cross-server download links are ON by default; set the `ENABLE_DOWNLOAD_LINKS`
+ * var to "false" in wrangler.jsonc to disable both `mint_download_link` and the
+ * public `/download` endpoint (reduces attack surface for deployments that don't
+ * need the server-to-server pull). Any value other than "false" leaves it on.
+ */
+export function downloadLinksEnabled(env: Env): boolean {
+  return String(env.ENABLE_DOWNLOAD_LINKS ?? "true").toLowerCase() !== "false";
+}
+
+export interface DownloadCapabilityScope {
+  /** Canonical Graph list id the task lives in. */
+  list_id: string;
+  /** Graph task id the attachment hangs off. */
+  task_id: string;
+  /** Graph attachment id to serve. */
+  attachment_id: string;
+  /** Original filename, baked at mint time for the Content-Disposition header. */
+  filename?: string;
+  /** MIME type, baked at mint time so /download makes no metadata Graph call. */
+  content_type?: string;
+  /** Attachment size in bytes, baked at mint time (returned out-of-band per §9). */
+  size?: number;
+}
+
+interface StoredDownloadCapability extends DownloadCapabilityScope {
+  exp: number; // epoch seconds — defense-in-depth alongside the KV TTL
+}
+
+export interface DownloadCapability {
+  /** The opaque random id placed in the download link (`/download?t=<token>`). */
+  token: string;
+  expiresAt: string; // ISO
+}
+
+/**
+ * Mint a single-use download capability: persist the attachment scope in KV under
+ * a random id with a matching TTL, and return the id to embed in the link.
+ * `ttlSeconds` is clamped to [60, MAX_DOWNLOAD_TTL_SECONDS].
+ */
+export async function createDownloadCapability(
+  env: Env,
+  scope: DownloadCapabilityScope,
+  ttlSeconds = DEFAULT_DOWNLOAD_TTL_SECONDS,
+): Promise<DownloadCapability> {
+  const ttl = Math.min(Math.max(Math.floor(ttlSeconds), 60), MAX_DOWNLOAD_TTL_SECONDS);
+  const exp = Math.floor(Date.now() / 1000) + ttl;
+  const id = randomId();
+  const stored: StoredDownloadCapability = { ...scope, exp };
+  await env.OAUTH_KV.put(DOWNLOAD_KV_PREFIX + id, JSON.stringify(stored), { expirationTtl: ttl });
+  return { token: id, expiresAt: new Date(exp * 1000).toISOString() };
+}
+
+/**
+ * Look up a download capability by its id. A KV miss means the link never existed,
+ * has expired (TTL), or was already consumed — all `link_invalid`. Does NOT
+ * consume — call `consumeDownloadCapability` after use.
+ */
+export async function lookupDownloadCapability(
+  env: Env,
+  token: string,
+): Promise<Result<DownloadCapabilityScope>> {
+  if (!token) return { ok: false, reason: "link_invalid" };
+  const raw = (await env.OAUTH_KV.get(
+    DOWNLOAD_KV_PREFIX + token,
+    "json",
+  )) as StoredDownloadCapability | null;
+  if (raw === null) return { ok: false, reason: "link_invalid" };
+  if (!raw.list_id || !raw.task_id || !raw.attachment_id || typeof raw.exp !== "number") {
+    return { ok: false, reason: "link_invalid" };
+  }
+  if (raw.exp * 1000 < Date.now()) return { ok: false, reason: "link_expired" };
+  return {
+    ok: true,
+    value: {
+      list_id: raw.list_id,
+      task_id: raw.task_id,
+      attachment_id: raw.attachment_id,
+      filename: raw.filename,
+      content_type: raw.content_type,
+      size: raw.size,
+    },
+  };
+}
+
+/** Consume a download capability so the link cannot be replayed. */
+export async function consumeDownloadCapability(env: Env, token: string): Promise<void> {
+  await env.OAUTH_KV.delete(DOWNLOAD_KV_PREFIX + token);
+}

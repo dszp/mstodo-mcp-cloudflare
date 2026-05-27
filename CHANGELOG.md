@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Cross-server attachment download (`mint_download_link` + public `/download`).** The
+  inverse of the web-upload flow: `mint_download_link` returns a short-lived (≤ 5 min),
+  single-use URL plus the attachment's `filename` / `content_type` / `size`, intended for
+  another MCP server to fetch **server-side** so the bytes never enter the model's context.
+  The capability mirrors upload (unguessable id in `OAUTH_KV`, distinct `download:` prefix,
+  scoped to one attachment) and is **burned on the first reachable GET** — single-use against
+  an honest consumer, not a transactional guarantee. ON by default; set
+  `ENABLE_DOWNLOAD_LINKS="false"` to disable both the tool and the endpoint.
+
 ### Fixed
 - **Reported version now matches the release.** `/health` (`version`) and the MCP server
   name were hardcoded to stale values (`0.2.0` / `0.3.0`). Both now read `package.json`'s

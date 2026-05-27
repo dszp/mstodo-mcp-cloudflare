@@ -57,6 +57,12 @@ The server exposes a Microsoft To Do tool surface over MCP. Highlights:
   bytes go browser → Worker → Microsoft (≤ 25 MB each, inline or chunked
   upload-session) and never pass through the model. See
   [Web upload](#web-upload--upload) below.
+- **Attachment download** — `mint_download_link` mints a short-lived (≤ 5 min),
+  single-use URL that serves one attachment's bytes for a server-to-server
+  transfer (e.g. handing the URL to another MCP server's url-ingest tool). The
+  bytes are fetched server-side and never pass through the model. ON by default;
+  set `ENABLE_DOWNLOAD_LINKS="false"` to disable. See
+  [Cross-server download](#cross-server-download--download) below.
 - **Cross-list query & search** (answered from the local `TodoIndex` mirror):
   - `query_tasks` — filter by lists, status, date ranges, importance, has-checklist;
     `types`/`exclude_types` (include/exclude by list classification); a `completed`
@@ -134,6 +140,22 @@ There is **no signing key or shared secret** to configure: the id *is* the nonce
 To enable it, set **`SERVICE_BASE_URL`** (var, in `wrangler.jsonc`) — the public origin of this
 Worker (your `workers.dev` URL or custom domain), used to build the link. With it unset (or left
 at the placeholder), `create_upload_link` returns `upload_disabled`.
+
+### Cross-server download (`/download`)
+The inverse of upload: `mint_download_link` returns a short-lived (≤ 5 min), **single-use** URL
+plus the attachment's metadata (`filename`, `content_type`, `size`). The intended consumer is
+another MCP server's url-ingest tool — it fetches the URL **server-side**, so the bytes move
+server → server and never enter the model's context. The capability mechanics mirror upload (an
+unguessable id in `OAUTH_KV` under the `download:` prefix, scoped to one attachment), and the link
+is **burned on the first reachable GET** whatever the outcome — so it can't be replayed if it
+later lands in conversation history. (Single-use against an honest consumer; like `/upload` it is
+not transactional — two truly-concurrent GETs could race.) Metadata is read at mint time from the
+attachments collection, so `/download` makes a single Graph call for the bytes and trusts no
+request headers.
+
+This surface is **ON by default**; set **`ENABLE_DOWNLOAD_LINKS="false"`** (var) to disable both
+`mint_download_link` and `/download` and shrink the attack surface if you don't need it. It also
+requires `SERVICE_BASE_URL` (same as upload); unset/placeholder ⇒ `download_disabled`.
 
 ## Reset
 

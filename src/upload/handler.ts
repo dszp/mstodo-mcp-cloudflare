@@ -48,7 +48,7 @@ const DEDUP_CONTENT_MAX_BYTES = 6 * 1024 * 1024;
 const DEDUP_SIZE_BAND_LOW = 0.9;
 const DEDUP_SIZE_BAND_HIGH = 1.6;
 
-function json(body: unknown, status = 200): Response {
+export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
@@ -62,12 +62,12 @@ function html(body: string, status = 200): Response {
   });
 }
 
-function ownerIndex(env: Env): DurableObjectStub<TodoIndex> {
+export function ownerIndex(env: Env): DurableObjectStub<TodoIndex> {
   return env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName(OWNER_DO_NAME));
 }
 
 // Strip path components and control characters from a browser-supplied filename.
-function sanitizeName(name: string): string {
+export function sanitizeName(name: string): string {
   const base = name.split(/[\\/]/).pop() ?? name;
   let clean = "";
   for (const ch of base) {
@@ -77,7 +77,7 @@ function sanitizeName(name: string): string {
   return clean.slice(0, 255) || "upload";
 }
 
-function statusForReason(reason: string): number {
+export function statusForReason(reason: string): number {
   switch (reason) {
     case "too_large":
     case "too_large_batch":
@@ -96,7 +96,7 @@ function statusForReason(reason: string): number {
 }
 
 // Map a thrown GraphError to a typed reason for the upload response.
-function reasonForGraphError(e: GraphError): { reason: string; detail: string } {
+export function reasonForGraphError(e: GraphError): { reason: string; detail: string } {
   const detail = e.detail ?? "";
   if (e.status === 404 || (e.status === 400 && detail.includes("ErrorInvalidIdMalformed"))) {
     return { reason: "task_not_found", detail };
