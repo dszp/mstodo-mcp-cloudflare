@@ -97,8 +97,32 @@ export function generateStateToken(): string {
   return base64UrlEncode(bytes);
 }
 
+const MS_LOGIN_HOST = "login.microsoftonline.com";
+
 function tenantBase(env: Env): string {
-  return `https://login.microsoftonline.com/${encodeURIComponent(env.MS_TENANT_ID)}/oauth2/v2.0`;
+  return `https://${MS_LOGIN_HOST}/${encodeURIComponent(env.MS_TENANT_ID)}/oauth2/v2.0`;
+}
+
+// Defense-in-depth: the token request carries the confidential client_secret in
+// its body, so pin scheme + host before sending it — the secret must only ever
+// leave over TLS to Entra, never to an attacker-influenced URL. Mirrors the
+// Graph/Substrate host-pinning done before a Bearer token is attached.
+// MS_TENANT_ID is the only interpolated part of the URL (a path segment), so the
+// check passes today; assert anyway so a future endpoint change can't silently
+// downgrade the transport or redirect the secret.
+function assertTokenEndpoint(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new TokenExchangeError("token_endpoint_invalid", url);
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname !== MS_LOGIN_HOST) {
+    throw new TokenExchangeError(
+      "token_endpoint_host_rejected",
+      `${parsed.protocol}//${parsed.host}`,
+    );
+  }
 }
 
 export function buildAuthorizeUrl(
@@ -153,7 +177,9 @@ function summarizeMsError(text: string): Record<string, unknown> {
 }
 
 async function postToken(env: Env, body: URLSearchParams): Promise<TokenResponse> {
-  const res = await fetch(`${tenantBase(env)}/token`, {
+  const url = `${tenantBase(env)}/token`;
+  assertTokenEndpoint(url); // pin TLS + Entra host before the secret leaves
+  const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body,
@@ -276,11 +302,19 @@ export async function fetchMe(accessToken: string): Promise<MeIdentity> {
   return (await res.json()) as MeIdentity;
 }
 
-// Decode the (unverified) claims from a JWT's payload segment. We only read it
-// to extract the tenant id (`tid`) from our OWN freshly-issued access token at
-// callback time — never to make a trust decision — so signature verification is
-// unnecessary here. base64url → base64 with padding, then atob + JSON.parse.
-// Returns null on any malformed input rather than throwing.
+// Decode the (UNVERIFIED) claims from a JWT payload segment.
+//
+// SECURITY INVARIANT: this is only ever called on a token WE just received
+// directly from Entra over TLS (auth/handler.ts, on our own freshly-issued
+// access_token) to read non-security claims (tid/oid) for the Substrate
+// x-anchormailbox header. It MUST NOT be used to make an authorization decision
+// — the owner gate is isOwner() evaluated against a fresh, authenticated Graph
+// /me call, never against these claims. Because the token is trusted by
+// transport and is never an authz input, signature verification is unnecessary
+// here (and Entra access tokens are not intended to be validated by a client
+// that isn't the token's target resource). Do NOT feed this an externally
+// supplied token. base64url → base64 + padding, then atob + JSON.parse; returns
+// null on any malformed input rather than throwing.
 export function decodeJwtClaims(jwt: string): Record<string, unknown> | null {
   const parts = jwt.split(".");
   if (parts.length < 2) return null;
@@ -300,7 +334,18 @@ export function buildAnchorMailbox(oid: string, tid: string): string {
 }
 
 export function isOwner(env: Env, me: MeIdentity): boolean {
-  const expected = env.OWNER_EMAIL.trim().toLowerCase();
+  // Fail closed if the gate itself is misconfigured. OWNER_EMAIL is typed as a
+  // required string, but a missing/blank secret at runtime must NEVER widen the
+  // gate: coalesce undefined and treat empty as "deny everyone" with a loud
+  // warning, rather than letting `.trim()` throw (undefined) or comparing against
+  // "". This gate is load-bearing — the server is strictly single-user.
+  const expected = (env.OWNER_EMAIL ?? "").trim().toLowerCase();
+  if (expected === "") {
+    log.warn("owner_email_misconfigured", {
+      hint: "OWNER_EMAIL secret is empty or unset; denying all callers (fail-closed).",
+    });
+    return false;
+  }
   const candidates = [me.mail, me.userPrincipalName]
     .filter((v): v is string => typeof v === "string" && v.length > 0)
     .map((v) => v.trim().toLowerCase());

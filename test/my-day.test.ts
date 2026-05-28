@@ -4,6 +4,8 @@ import {
   myDayEnabled,
   decodeJwtClaims,
   buildAnchorMailbox,
+  isOwner,
+  type MeIdentity,
   SCOPES,
   EXO_TASKS_SCOPE,
   SUBSTRATE_SCOPES,
@@ -26,6 +28,34 @@ function fakeJwt(claims: Record<string, unknown>): string {
     btoa(JSON.stringify(o)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   return `${b64url({ alg: "none", typ: "JWT" })}.${b64url(claims)}.sig`;
 }
+
+describe("isOwner (single-user gate, fail-closed)", () => {
+  const me = (over: Partial<MeIdentity> = {}): MeIdentity => ({
+    id: "id",
+    displayName: "D",
+    mail: "owner@example.com",
+    userPrincipalName: "owner@example.com",
+    ...over,
+  });
+  const ownerEnv = (ownerEmail?: string): Env => ({ OWNER_EMAIL: ownerEmail }) as unknown as Env;
+
+  it("matches on mail or userPrincipalName, case/space-insensitively", () => {
+    expect(isOwner(ownerEnv("Owner@Example.com"), me({ mail: "  owner@example.com " }))).toBe(true);
+    expect(
+      isOwner(ownerEnv("owner@example.com"), me({ mail: null, userPrincipalName: "OWNER@example.com" })),
+    ).toBe(true);
+  });
+
+  it("denies a non-matching identity", () => {
+    expect(isOwner(ownerEnv("owner@example.com"), me({ mail: "intruder@evil.com", userPrincipalName: "intruder@evil.com" }))).toBe(false);
+  });
+
+  it("fails CLOSED when OWNER_EMAIL is empty or unset (never widens the gate)", () => {
+    expect(isOwner(ownerEnv(""), me())).toBe(false);
+    expect(isOwner(ownerEnv("   "), me())).toBe(false);
+    expect(isOwner(ownerEnv(undefined), me())).toBe(false);
+  });
+});
 
 describe("myDayEnabled", () => {
   it("is true only for the string 'true' (case-insensitive)", () => {

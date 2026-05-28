@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of My Day and is immediately reorderable. Re-adding a task that is already on My Day therefore
   bumps it back to the top — matching the To Do app.
 
+### Security
+- **The `OWNER_EMAIL` owner gate now fails closed on misconfiguration.** `isOwner` explicitly
+  denies all callers (with a logged `owner_email_misconfigured` warning) when `OWNER_EMAIL` is unset
+  or blank, instead of relying on the implicit empty-string compare / `.trim()` throw. The
+  single-user gate can never silently widen if the secret is missing.
+- **The Microsoft token endpoint is host-pinned before the client secret is sent.** `postToken`
+  asserts the URL is HTTPS to `login.microsoftonline.com` before POSTing the confidential
+  `client_secret`, mirroring the existing Graph/Substrate Bearer-token host-pinning — defense in
+  depth so the secret can never leave over a downgraded or redirected transport.
+
 ## [0.8.0] – 2026-05-28
 
 ### Added
