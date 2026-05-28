@@ -281,6 +281,45 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     this.sql.exec(`UPDATE tasks SET ${sets.join(", ")} WHERE task_id = ?`, ...params, taskId);
   }
 
+  // Write-through for Substrate-only fields the cache holds. The patch shape
+  // lets callers update one or all fields independently (e.g. add_to_my_day
+  // sets committed_day; the background scan sets all four from the Substrate
+  // response). No-op if the task isn't indexed — the next Graph delta creates
+  // the row and the scan fills the fields in. Only the four Substrate columns
+  // are ever touched; Graph-side columns are left alone.
+  updateMyDayFields(
+    taskId: string,
+    patch: {
+      committed_day?: string | null;
+      committed_order?: string | null;
+      order_datetime?: string | null;
+      postponed_day?: string | null;
+    },
+  ): void {
+    const sets: string[] = [];
+    const bind: unknown[] = [];
+    const keys = ["committed_day", "committed_order", "order_datetime", "postponed_day"] as const;
+    for (const k of keys) {
+      if (Object.prototype.hasOwnProperty.call(patch, k)) {
+        sets.push(`${k} = ?`);
+        bind.push(patch[k] ?? null);
+      }
+    }
+    if (sets.length === 0) return;
+    bind.push(taskId);
+    this.sql.exec(`UPDATE tasks SET ${sets.join(", ")} WHERE task_id = ?`, ...bind);
+  }
+
+  // Clear My Day membership fields when a task leaves My Day. Leaves
+  // order_datetime alone — source-list manual order is independent of My Day.
+  clearMyDayFields(taskId: string): void {
+    this.updateMyDayFields(taskId, {
+      committed_day: null,
+      committed_order: null,
+      postponed_day: null,
+    });
+  }
+
   findListForTask(
     taskId: string,
   ): { list_id: string; display_name: string | null } | null {
