@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] – 2026-05-28
+
 ### Added
 - **My Day manual ordering (`reorder_my_day_task`).** Drag-reorder a task *within* My Day for a
   given day by setting the Substrate-only `CommittedOrder` field — the My Day analogue of
