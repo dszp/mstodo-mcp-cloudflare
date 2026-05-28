@@ -48,6 +48,7 @@ import { resolveListScope, resolveStatusFilter } from "../config/query-scope";
 import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
 import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
 import { computeReorder, msToOrder, orderToMs, type ReorderSpec } from "./reorder";
+import { collectMyDayNeighborOrders, findMyDayRowById } from "./my-day-order";
 import type { SubstrateTask } from "../graph/substrate-client";
 import {
   createChecklistItem,
@@ -211,6 +212,39 @@ function taskResponse(args: { task: TodoTask; list_id: string }): McpResponse {
           ok: true,
           list_id: args.list_id,
           task: detailedTask(args.task),
+        }),
+      },
+    ],
+  };
+}
+
+// Response envelope for reorder_my_day_task, mirroring reorder_task's shape on
+// the Substrate plane: identity + position + the projected task detail, echoing
+// the value we PATCHed if Substrate omits it from the response.
+function reorderMyDayResponse(args: {
+  list_id: string;
+  task_id: string;
+  date: string;
+  position: string;
+  task: SubstrateTask;
+  newOrder: string;
+}): McpResponse {
+  const { list_id, task_id, date, position, task, newOrder } = args;
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          ok: true,
+          list_id,
+          task_id,
+          date,
+          position,
+          title: task.Subject ?? null,
+          ...projectSubstrateTaskDetails(task),
+          committed_day: committedDatePart(task.CommittedDay),
+          // Echo the value we PATCHed if the response omits it.
+          committed_order: task.CommittedOrder ?? newOrder,
         }),
       },
     ],
@@ -3598,6 +3632,137 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
               },
             ],
           };
+        }),
+    );
+
+    this.server.registerTool(
+      "reorder_my_day_task",
+      {
+        description:
+          "Change a task's MANUAL position WITHIN My Day for a given day by setting CommittedOrder (undocumented Substrate endpoint). This is the My Day analogue of reorder_task: My Day order (CommittedOrder) is independent of source-list order (OrderDateTime) — reordering here never affects the list, and vice versa. `position`: 'top'/'bottom', 'before'/'after' (relative to `reference_task_id`, which must also be on My Day for the same day), 'index' (1-based, 1 = top), or 'set' (explicit `committed_order`, a debug escape hatch). The task (and any reference) must already be on My Day for `date` (use add_to_my_day first). Neighbors are the day's INCOMPLETE My Day tasks across all lists, read from the SQLite cache (same source as list_my_day_tasks), so the only Substrate round-trip is the write. `date` defaults to today in the Worker timezone. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+        inputSchema: {
+          task_id: z.string().min(1).describe("Microsoft Graph task id of the task to move."),
+          list: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Owning list (alias, display name, or Graph list ID). Optional — resolved from the index when omitted; pass it if the task isn't indexed yet.",
+            ),
+          position: z
+            .enum(["top", "bottom", "before", "after", "index", "set"])
+            .describe("Where to move the task within My Day."),
+          reference_task_id: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("Required for 'before'/'after': a task that is also on My Day for `date`."),
+          index: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("Required for position 'index': 1-based slot in My Day order (1 = top)."),
+          committed_order: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("Required for position 'set': explicit CommittedOrder (ISO 8601). Debug escape hatch."),
+          date: z
+            .string()
+            .optional()
+            .describe("Day whose My Day order to edit, YYYY-MM-DD. Defaults to today in the Worker timezone."),
+        },
+      },
+      async ({ task_id, list, position, reference_task_id, index, committed_order, date }): Promise<McpResponse> =>
+        this.withSubstrate("reorder_my_day_task", async (sub) => {
+          const list_id = await this.resolveListForTask(list, task_id);
+          if (!list_id) {
+            return errResponse("list_required", {
+              task_id,
+              hint: "Task not found in the index; pass `list` explicitly.",
+            });
+          }
+          const day = date ?? todayInTimeZone(this.env.TIMEZONE);
+          if (!MY_DAY_DATE_RE.test(day)) {
+            return errResponse("invalid_date", { date: day, hint: "Use YYYY-MM-DD." });
+          }
+
+          // 'set' is the debug escape hatch: write the raw value, no neighbor
+          // gathering and no membership check (mirrors reorder_task's 'set').
+          if (position === "set") {
+            if (!committed_order) {
+              return errResponse("committed_order_required", { hint: "Pass committed_order for position 'set'." });
+            }
+            if (orderToMs(committed_order) === null) {
+              return errResponse("invalid_committed_order", { committed_order, hint: "Use an ISO 8601 timestamp." });
+            }
+            const set = await sub.patchTask(list_id, task_id, { CommittedOrder: committed_order });
+            await this.#index().updateMyDayFields(task_id, { committed_order });
+            return reorderMyDayResponse({ list_id, task_id, date: day, position, task: set, newOrder: committed_order });
+          }
+
+          // My Day is a cross-list aggregation. Read the day's set straight from
+          // the SQLite cache (queryMyDayForDate already filters to the day and
+          // drops postponed tasks) — the SAME source list_my_day_tasks shows, so
+          // the reorder is consistent with what the user sees, with zero Substrate
+          // reads for neighbor-gathering. The only Substrate round-trip is the
+          // PATCH below.
+          const { rows } = await this.#index().queryMyDayForDate(day);
+          const mover = findMyDayRowById(rows, task_id);
+          if (!mover) {
+            return errResponse("task_not_on_my_day", {
+              task_id,
+              date: day,
+              hint: "Add the task to My Day for this date first (add_to_my_day), pass the correct `date`, or wait for the My Day cache to warm.",
+            });
+          }
+          const neighbors = collectMyDayNeighborOrders(rows, task_id);
+
+          let spec: ReorderSpec;
+          if (position === "top" || position === "bottom") {
+            spec = { kind: position };
+          } else if (position === "index") {
+            if (index === undefined) {
+              return errResponse("index_required", { hint: "Pass index (1-based) for position 'index'." });
+            }
+            spec = { kind: "index", index };
+          } else {
+            // before / after — the reference must also be on My Day for `day`.
+            // Read its CommittedOrder from the cached set (it may live in a
+            // different list than the moving task).
+            if (!reference_task_id) {
+              return errResponse("reference_required", {
+                position,
+                hint: "Pass reference_task_id for position 'before'/'after'.",
+              });
+            }
+            const ref = findMyDayRowById(rows, reference_task_id);
+            if (!ref) {
+              return errResponse("reference_not_on_my_day", { reference_task_id, date: day });
+            }
+            const referenceMs = orderToMs(ref.committed_order);
+            if (referenceMs === null) {
+              return errResponse("reference_has_no_committed_order", {
+                reference_task_id,
+                hint: "The reference task has no My Day order; move it first (e.g. position 'top').",
+              });
+            }
+            spec = { kind: position, referenceMs };
+          }
+
+          const computed = computeReorder(spec, neighbors);
+          if (!computed.ok) {
+            return errResponse(computed.reason, {
+              hint: "No room between neighbors at millisecond precision; use position 'top'/'bottom' to reset.",
+            });
+          }
+          const newOrder = msToOrder(computed.ms);
+          const task = await sub.patchTask(list_id, task_id, { CommittedOrder: newOrder });
+          // Write-through so list_my_day_tasks reflects the new order immediately,
+          // without waiting for the next background scan.
+          await this.#index().updateMyDayFields(task_id, { committed_order: newOrder });
+          return reorderMyDayResponse({ list_id, task_id, date: day, position, task, newOrder });
         }),
     );
   }
