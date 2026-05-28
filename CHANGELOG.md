@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] – 2026-05-28
+
 ### Added
 - **`update_task` can backdate a task's completion** via a new optional `completed_date` (ISO 8601).
   Marks the task completed as of that date instead of "now" — for a task you finished earlier but
@@ -52,6 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   / `stale`. Body preview is derived from the cached HTML-stripped body (first 200 chars).
 
 ### Fixed
+- **The background My Day scan (and the sync alarm) no longer stall on a roster larger than
+  the per-cycle page budget.** A steady-state cycle issues one delta page per list, so a roster
+  with more than `MAX_PAGES_PER_CYCLE` (30) lists always spent its page budget mid-rotation and
+  reported itself "mid-cycle" even though every list it touched was caught up. That pinned the
+  alarm on the 2-second fast cadence indefinitely (instead of re-arming every
+  `DELTA_SYNC_INTERVAL_MIN`) and held the calm-cycle gate shut, so the background My Day scan
+  never ran — `list_my_day_tasks` stayed empty with `cache_as_of: null`. Now only a genuinely
+  draining baseline / page-chain (an outstanding `@odata.nextLink`) keeps the fast cadence; a
+  cycle that merely rotated past its page budget with everything caught up is treated as calm,
+  so the scan runs and the alarm settles back to the configured interval.
 - **`list_my_day_tasks` honors `PostponedDay`.** A task with `CommittedDay == day` AND
   `PostponedDay == day` is suppressed by the official client; the MCP now matches that filter.
 
