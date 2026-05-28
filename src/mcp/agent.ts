@@ -3181,7 +3181,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "add_to_my_day",
       {
         description:
-          "Add a Microsoft To Do task to My Day (undocumented Substrate endpoint). Sets the task's CommittedDay. `date` defaults to today in the Worker's configured timezone; pass an explicit YYYY-MM-DD (interpreted in the user's local timezone) to target another day. Returns the task's current detail (status, importance, dates, etc.) from the same response. Note: committed_day records only the most recent date the task was on My Day (whether or not completed); there is no history beyond that single last-on-My-Day date. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+          "Add a Microsoft To Do task to My Day (undocumented Substrate endpoint). Sets the task's CommittedDay. `date` defaults to today in the Worker's configured timezone; pass an explicit YYYY-MM-DD (interpreted in the user's local timezone) to target another day. Also seeds the task's My Day manual-order position (CommittedOrder = now), so it appears at the top of My Day and can be reordered with reorder_my_day_task — re-adding a task therefore bumps it back to the top. Returns the task's current detail (status, importance, dates, etc.) from the same response. Note: committed_day records only the most recent date the task was on My Day (whether or not completed); there is no history beyond that single last-on-My-Day date. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
         inputSchema: {
           task_id: z.string().min(1).describe("Microsoft Graph task id."),
           list: z
@@ -3210,6 +3210,13 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           if (!MY_DAY_DATE_RE.test(day)) {
             return errResponse("invalid_date", { date: day, hint: "Use YYYY-MM-DD." });
           }
+          // Seed the My Day manual-order position (CommittedOrder = now) so the
+          // freshly-added task lands at the TOP of My Day (highest CommittedOrder)
+          // and is immediately reorderable — mirroring how a new task gets an
+          // OrderDateTime, and how the To Do app surfaces newly-added My Day items
+          // at the top. now() (UTC ISO, ms) is strictly greater than existing past
+          // CommittedOrder values, so a re-add also bumps the task to the top.
+          const committedOrder = new Date().toISOString();
           // Set CommittedDay AND clear PostponedDay. A task previously removed
           // from My Day carries PostponedDay=that-day; while PostponedDay==today
           // the client suppresses the task from My Day even with CommittedDay set,
@@ -3219,22 +3226,18 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           const task = await sub.patchTask(list_id, task_id, {
             CommittedDay: day,
             PostponedDay: null,
+            CommittedOrder: committedOrder,
           });
           // Write-through into the cache so list_my_day_tasks reflects this add
-          // immediately, without waiting for the next background scan. Mirrors
-          // whatever Substrate echoed back. committed_order is only written if
-          // Substrate actually returned one (don't clobber a scan-set value with
-          // null when this tool didn't set it — setting CommittedOrder belongs to
-          // the reorder tooling, not here).
-          const myDayPatch: Parameters<TodoIndex["updateMyDayFields"]>[1] = {
+          // immediately, without waiting for the next background scan. Mirror
+          // whatever Substrate echoed back, falling back to the values we sent
+          // (Substrate occasionally omits an echoed field).
+          await this.#index().updateMyDayFields(task_id, {
             committed_day: task.CommittedDay ? task.CommittedDay.slice(0, 10) : day,
             postponed_day: task.PostponedDay ? task.PostponedDay.slice(0, 10) : null,
             order_datetime: task.OrderDateTime ?? null,
-          };
-          if (task.CommittedOrder !== undefined) {
-            myDayPatch.committed_order = task.CommittedOrder ?? null;
-          }
-          await this.#index().updateMyDayFields(task_id, myDayPatch);
+            committed_order: task.CommittedOrder ?? committedOrder,
+          });
           const committed_day = committedDatePart(task.CommittedDay);
           return {
             content: [
