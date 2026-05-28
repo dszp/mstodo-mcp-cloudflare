@@ -3370,7 +3370,9 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           // sub-cadence (3 windows missed → something is wrong, or the DO has
           // been idle long enough that the cache cannot be trusted).
           const cycleMs = Number(this.env.DELTA_SYNC_INTERVAL_MIN || "15") * 60_000;
-          const everyN = Number(this.env.MY_DAY_SCAN_EVERY_N_CYCLES || "4");
+          // Floor to match the DO's #myDayScanEveryNCycles(), so the stale
+          // window mirrors the cadence the scan actually runs at.
+          const everyN = Math.floor(Number(this.env.MY_DAY_SCAN_EVERY_N_CYCLES || "4"));
           const scanWindow =
             (Number.isFinite(cycleMs) ? cycleMs : 15 * 60_000) *
             (Number.isFinite(everyN) && everyN >= 1 ? everyN : 4);
