@@ -3732,8 +3732,8 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           // reads for neighbor-gathering. The only Substrate round-trip is the
           // PATCH below.
           const { rows } = await this.#index().queryMyDayForDate(day);
-          const mover = findMyDayRowById(rows, task_id);
-          if (!mover) {
+          // Membership probe: the mover must be in the day's cached set.
+          if (!findMyDayRowById(rows, task_id)) {
             return errResponse("task_not_on_my_day", {
               task_id,
               date: day,
