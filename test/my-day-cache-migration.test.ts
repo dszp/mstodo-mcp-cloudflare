@@ -162,3 +162,67 @@ describe("write-through RPC methods", () => {
     });
   });
 });
+
+describe("queryMyDayForDate", () => {
+  it("returns rows committed to the date, ordered by committed_order DESC (nulls last) then order_datetime DESC", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM tasks");
+      const insert = (id: string, day: string | null, co: string | null, od: string | null, postponed: string | null = null) =>
+        ctx.storage.sql.exec(
+          "INSERT INTO tasks (task_id, list_id, status, title, committed_day, committed_order, order_datetime, postponed_day) VALUES (?, 'L', 'notStarted', ?, ?, ?, ?, ?)",
+          id, id, day, co, od, postponed,
+        );
+      insert("top",      "2026-05-27", "2026-05-27T06:00:00Z", "2026-05-01T00:00:00Z");
+      insert("mid",      "2026-05-27", "2026-05-27T04:00:00Z", "2026-05-09T00:00:00Z");
+      insert("legacy",   "2026-05-27", null,                    "2026-05-27T07:00:00Z");
+      insert("other",    "2026-05-28", "2026-05-28T06:00:00Z", null);
+      insert("not-mine", null,         null,                    null);
+
+      const { rows } = await instance.queryMyDayForDate("2026-05-27");
+      expect(rows.map((r) => r.task_id)).toEqual(["top", "mid", "legacy"]);
+    });
+  });
+
+  it("excludes a task postponed to the same day (faithful to the app's filter)", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM tasks");
+      ctx.storage.sql.exec(
+        "INSERT INTO tasks (task_id, list_id, status, title, committed_day, committed_order, postponed_day) VALUES ('show', 'L', 'notStarted', 's', '2026-05-27', '2026-05-27T05:00:00Z', NULL)",
+      );
+      ctx.storage.sql.exec(
+        "INSERT INTO tasks (task_id, list_id, status, title, committed_day, committed_order, postponed_day) VALUES ('hide', 'L', 'notStarted', 'h', '2026-05-27', '2026-05-27T06:00:00Z', '2026-05-27')",
+      );
+      const { rows } = await instance.queryMyDayForDate("2026-05-27");
+      expect(rows.map((r) => r.task_id)).toEqual(["show"]);
+    });
+  });
+
+  it("includes a task postponed to a different day", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM tasks");
+      ctx.storage.sql.exec(
+        "INSERT INTO tasks (task_id, list_id, status, title, committed_day, committed_order, postponed_day) VALUES ('t', 'L', 'notStarted', 't', '2026-05-27', '2026-05-27T05:00:00Z', '2026-05-26')",
+      );
+      const { rows } = await instance.queryMyDayForDate("2026-05-27");
+      expect(rows.map((r) => r.task_id)).toEqual(["t"]);
+    });
+  });
+
+  it("returns an empty result when nothing is committed to the date", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM tasks");
+      const { rows } = await instance.queryMyDayForDate("2026-12-31");
+      expect(rows).toEqual([]);
+    });
+  });
+});
+
+describe("getMyDayScanState", () => {
+  it("returns nulls when the scan has never run", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM sync_state WHERE resource = 'my_day_scan'");
+      const state = await instance.getMyDayScanState();
+      expect(state).toEqual({ last_scan_at_ms: null, status: null, last_error: null });
+    });
+  });
+});

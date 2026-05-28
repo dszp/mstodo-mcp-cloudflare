@@ -503,6 +503,52 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return { rows };
   }
 
+  // Read path for list_my_day_tasks. Single DO query, zero Substrate round
+  // trips. Filter = committed_day equals the target day AND not postponed to
+  // that same day (faithful to the official client's My Day projection).
+  // Sort = committed_order DESC (nulls last), then order_datetime DESC (nulls
+  // last) for tasks not yet assigned a My Day order, then task_id DESC for a
+  // stable tie-break. Backed by the tasks_committed_day index.
+  queryMyDayForDate(day: string): { rows: TaskRow[] } {
+    const rows = this.sql
+      .exec(
+        `SELECT * FROM tasks
+         WHERE committed_day = ?
+           AND (postponed_day IS NULL OR postponed_day <> ?)
+         ORDER BY committed_order IS NULL,
+                  committed_order DESC,
+                  order_datetime IS NULL,
+                  order_datetime DESC,
+                  task_id DESC`,
+        day,
+        day,
+      )
+      .toArray() as unknown as TaskRow[];
+    return { rows };
+  }
+
+  // When the background Substrate scan last completed (epoch ms) and its
+  // outcome. Used by list_my_day_tasks to advertise staleness AND by the scan
+  // gate in runSyncCycle to decide whether to fire. Keyed on the dedicated
+  // sync_state resource "my_day_scan" (not tied to any list).
+  getMyDayScanState(): {
+    last_scan_at_ms: number | null;
+    status: string | null;
+    last_error: string | null;
+  } {
+    const row = this.sql
+      .exec<{ last_synced_at: number | null; status: string | null; last_error: string | null }>(
+        "SELECT last_synced_at, status, last_error FROM sync_state WHERE resource = ?",
+        "my_day_scan",
+      )
+      .toArray()[0];
+    return {
+      last_scan_at_ms: row?.last_synced_at ?? null,
+      status: row?.status ?? null,
+      last_error: row?.last_error ?? null,
+    };
+  }
+
   // -- Ops ------------------------------------------------------------------
   // Read-only health probe (sync_status tool). Reports one row per resource —
   // the roster ("lists") plus one per roster list ("tasks:{listId}") — built
