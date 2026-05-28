@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import type { TodoIndex } from "../src/cache/index-do";
-import { isScanDue } from "../src/cache/index-do";
+import { isScanDue, selectDueScanLists } from "../src/cache/index-do";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -219,12 +219,77 @@ describe("queryMyDayForDate", () => {
 });
 
 describe("getMyDayScanState", () => {
-  it("returns nulls when the scan has never run", async () => {
+  it("returns nulls when no list has been scanned yet", async () => {
     await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
-      ctx.storage.sql.exec("DELETE FROM sync_state WHERE resource = 'my_day_scan'");
+      ctx.storage.sql.exec("DELETE FROM sync_state WHERE resource LIKE 'myday:%'");
       const state = await instance.getMyDayScanState();
       expect(state).toEqual({ last_scan_at_ms: null, status: null, last_error: null });
     });
+  });
+
+  it("reports the OLDEST per-list scan time and a 'partial' status on any error", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM sync_state WHERE resource LIKE 'myday:%'");
+      const put = (listId: string, ts: number, status: string, err: string | null) =>
+        ctx.storage.sql.exec(
+          "INSERT INTO sync_state (resource, last_synced_at, status, last_error) VALUES (?, ?, ?, ?)",
+          `myday:${listId}`,
+          ts,
+          status,
+          err,
+        );
+      put("A", 5000, "idle", null);
+      put("B", 1000, "error", "boom"); // oldest + errored
+      put("C", 9000, "idle", null);
+      const state = await instance.getMyDayScanState();
+      expect(state.last_scan_at_ms).toBe(1000); // oldest across lists
+      expect(state.status).toBe("partial"); // some list errored
+      expect(state.last_error).toBe("boom");
+    });
+  });
+
+  it("reports 'idle' when every scanned list is healthy", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM sync_state WHERE resource LIKE 'myday:%'");
+      ctx.storage.sql.exec(
+        "INSERT INTO sync_state (resource, last_synced_at, status, last_error) VALUES ('myday:A', 7000, 'idle', NULL)",
+      );
+      const state = await instance.getMyDayScanState();
+      expect(state).toEqual({ last_scan_at_ms: 7000, status: "idle", last_error: null });
+    });
+  });
+});
+
+describe("selectDueScanLists", () => {
+  const window = 60 * 60_000;
+  // Realistic epoch-ms "now" so that never-scanned (null → 0) is genuinely the
+  // oldest, the way it is in production (real timestamps are large positives).
+  const now = 1_700_000_000_000;
+  it("picks never-scanned and stale lists, oldest-first, capped at max", () => {
+    const entries = [
+      { list_id: "fresh", last: now - 1_000 }, // within window → not due
+      { list_id: "stale-old", last: now - window - 5_000 }, // due, older
+      { list_id: "never", last: null }, // due, sorts oldest (0)
+      { list_id: "stale-new", last: now - window - 1_000 }, // due, newer than stale-old
+    ];
+    const picked = selectDueScanLists(entries, window, 2, now);
+    expect(picked).toEqual(["never", "stale-old"]); // oldest two due, fresh excluded
+  });
+
+  it("returns every due list when max exceeds the due count", () => {
+    const entries = [
+      { list_id: "a", last: null },
+      { list_id: "b", last: now - window - 1 },
+    ];
+    expect(selectDueScanLists(entries, window, 10, now).sort()).toEqual(["a", "b"]);
+  });
+
+  it("returns nothing when all lists are within the window", () => {
+    const entries = [
+      { list_id: "a", last: now - 1 },
+      { list_id: "b", last: now - 2 },
+    ];
+    expect(selectDueScanLists(entries, window, 5, now)).toEqual([]);
   });
 });
 

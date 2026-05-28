@@ -178,18 +178,23 @@ manager, the renewal cron, and the subscribe-on-list-create hook; plus the
 
 > **Status: Phase 1 shipped.** Four new `tasks` columns (`committed_day`, `committed_order`,
 > `order_datetime`, `postponed_day`) populated by a background Substrate scan inside
-> `runSyncCycle` (age-gated; cadence `MY_DAY_SCAN_EVERY_N_CYCLES`, default 4) plus write-through
-> on `add_to_my_day` / `remove_from_my_day`. `list_my_day_tasks` is cache-backed — zero live
-> Substrate round-trips on the read path — and now honors `PostponedDay` faithfully. Schema
+> `runSyncCycle` plus write-through on `add_to_my_day` / `remove_from_my_day`.
+> `list_my_day_tasks` is cache-backed — zero live Substrate round-trips on the read path — and
+> now honors `PostponedDay` faithfully. The scan is **budgeted**: each list is rescanned at most
+> once per `MY_DAY_SCAN_EVERY_N_CYCLES` window, but only `MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE`
+> lists are scanned per cycle (oldest-first rotation, calm cycles only), so the scan's Substrate
+> requests stay well under the Workers free-tier subrequest ceiling on any roster size. Schema
 > versioning uses a `schema_meta` table (Workers DO SQLite blocks `PRAGMA user_version`).
 > **Still remaining (Phase 2):** drive scan invalidation from §4 change notifications so the
 > cache tightens toward near-live without polling Substrate at all.
 
-**Known limitations carried into Phase 1:** `listFolderTasks` doesn't paginate (folders larger
-than Substrate's default page size only refresh their first page from the scan; write-through
-still covers user-touched tasks). The cache wins when reads-per-window exceed scans-per-window;
-at the default hourly scan, light users may pay slightly more API budget — tune
-`MY_DAY_SCAN_EVERY_N_CYCLES` up if usage is low.
+**Free-tier safety vs. freshness (the per-cycle budget knob).** `MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE`
+(default 6) bounds the scan's per-request cost: a large roster is covered over ⌈roster ÷ cap⌉ calm
+cycles rather than one burst, so free-tier deployments never approach the 50-subrequest ceiling.
+Workers Paid deployments can raise the cap (up to the roster size) to refresh the whole roster
+every cycle. **Other limitations:** `listFolderTasks` doesn't paginate (folders larger than
+Substrate's default page size only refresh their first page from the scan; write-through still
+covers user-touched tasks).
 
 ## 5. Email-to-task webhook ingress
 

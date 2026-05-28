@@ -64,7 +64,14 @@
     // has no delta, so the scan is a full per-folder enumeration — keep this >1
     // to avoid doubling per-cycle requests. Default 4 ≈ hourly at the 15-min
     // base. Tune UP if usage is low; DOWN for fresher off-device My Day membership.
-    "MY_DAY_SCAN_EVERY_N_CYCLES": "4"
+    "MY_DAY_SCAN_EVERY_N_CYCLES": "4",
+    // Max lists the My Day scan touches per cycle (one Substrate GET each),
+    // oldest-first with rotation across cycles. Small by default so the scan
+    // stays well under the Workers free-tier 50-subrequest/request ceiling even
+    // on a large roster; the full roster is still covered over a few cycles.
+    // Raise it on the Workers Paid plan (1000 ceiling) to scan more — or the
+    // whole roster — per cycle for fresher off-device My Day membership.
+    "MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE": "6"
   },
 
   "observability": { "enabled": true }

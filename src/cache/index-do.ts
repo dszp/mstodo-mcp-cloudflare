@@ -42,9 +42,9 @@ import { shouldSkipSync } from "../config/sync-policy";
 // Task 6.
 
 // Age-based scan gate. True iff we've never scanned, or the last scan completed
-// at least `windowMs` ago. Persistent state (the sync_state "my_day_scan" row)
-// drives this, so a DO eviction doesn't trigger an immediate re-scan — only true
-// staleness does.
+// at least `windowMs` ago. Persistent per-list state (the sync_state
+// "myday:{listId}" rows) drives this, so a DO eviction doesn't trigger an
+// immediate re-scan — only true staleness does.
 export function isScanDue(
   lastScanMs: number | null,
   windowMs: number,
@@ -52,6 +52,27 @@ export function isScanDue(
 ): boolean {
   if (lastScanMs === null) return true;
   return nowMs - lastScanMs >= windowMs;
+}
+
+// Budgeted, fair selection for the per-cycle My Day scan. From the roster's
+// per-list last-scan times, pick the lists due for a rescan (never scanned, or
+// older than the window), oldest-first, capped at `max` per cycle. The
+// oldest-first rotation guarantees every list reaches the front within
+// ⌈roster / max⌉ scan cycles — the same fairness the task-delta loop uses — so
+// a small `max` keeps each cycle's Substrate subrequests well under the Workers
+// free-tier ceiling without ever starving a list. Never-scanned lists (null)
+// sort oldest, so a fresh roster is covered first.
+export function selectDueScanLists(
+  entries: Array<{ list_id: string; last: number | null }>,
+  windowMs: number,
+  max: number,
+  nowMs: number = Date.now(),
+): string[] {
+  return entries
+    .filter((e) => isScanDue(e.last, windowMs, nowMs))
+    .sort((a, b) => (a.last ?? 0) - (b.last ?? 0))
+    .slice(0, Math.max(0, Math.floor(max)))
+    .map((e) => e.list_id);
 }
 
 // Precomputed UPSERT statement (all columns; update every non-key column on
@@ -390,6 +411,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
     this.sql.exec("DELETE FROM lists WHERE list_id = ?", listId);
     this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
+    this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
   }
 
   // Roster reads — the `lists` table is the authoritative roster.
@@ -543,25 +565,40 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return { rows };
   }
 
-  // When the background Substrate scan last completed (epoch ms) and its
-  // outcome. Used by list_my_day_tasks to advertise staleness AND by the scan
-  // gate in runSyncCycle to decide whether to fire. Keyed on the dedicated
-  // sync_state resource "my_day_scan" (not tied to any list).
+  // Aggregate freshness of the budgeted per-list My Day scan, for
+  // list_my_day_tasks to advertise staleness. The scan rotates through lists a
+  // few per cycle (see #runMyDayScanBatch), recording one "myday:{listId}" row
+  // each. `last_scan_at_ms` is the OLDEST per-list scan time — worst-case
+  // freshness across the roster — so a single lagging list keeps the advisory
+  // honest. `status` is "partial" if any list last errored, else "idle"; both
+  // null when nothing has been scanned yet.
   getMyDayScanState(): {
     last_scan_at_ms: number | null;
     status: string | null;
     last_error: string | null;
   } {
-    const row = this.sql
+    const rows = this.sql
       .exec<{ last_synced_at: number | null; status: string | null; last_error: string | null }>(
-        "SELECT last_synced_at, status, last_error FROM sync_state WHERE resource = ?",
-        "my_day_scan",
+        "SELECT last_synced_at, status, last_error FROM sync_state WHERE resource LIKE 'myday:%'",
       )
-      .toArray()[0];
+      .toArray();
+    if (rows.length === 0) return { last_scan_at_ms: null, status: null, last_error: null };
+    let oldest: number | null = null;
+    let anyError = false;
+    let firstError: string | null = null;
+    for (const r of rows) {
+      if (r.last_synced_at != null) {
+        oldest = oldest == null ? r.last_synced_at : Math.min(oldest, r.last_synced_at);
+      }
+      if (r.status && r.status !== "idle") {
+        anyError = true;
+        if (firstError == null) firstError = r.last_error ?? null;
+      }
+    }
     return {
-      last_scan_at_ms: row?.last_synced_at ?? null,
-      status: row?.status ?? null,
-      last_error: row?.last_error ?? null,
+      last_scan_at_ms: oldest,
+      status: anyError ? "partial" : "idle",
+      last_error: firstError,
     };
   }
 
@@ -737,16 +774,6 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       if (skip(l.list_id)) this.#purgeSkippedList(l.list_id);
     }
 
-    // Background My Day Substrate scan, age-gated against the configured window.
-    // Reads the persisted last-scan time so DO evictions don't trigger immediate
-    // re-scans; only genuine staleness does.
-    const { last_scan_at_ms } = this.getMyDayScanState();
-    if (isScanDue(last_scan_at_ms, this.#myDayScanWindowMs())) {
-      await this.#runMyDaySubstrateScan().catch((e) =>
-        log.warn("my_day_scan_failed", { error: String(e) }),
-      );
-    }
-
     // 3. Per-list task delta, prioritizing unfinished work, skipping no_sync lists.
     let remaining = maxTaskPages;
     for (const listId of this.#listIdsByPriority()) {
@@ -758,6 +785,18 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       const r = await this.#syncResource(`tasks:${listId}`, tasksDeltaUrl(listId), remaining);
       remaining -= r.pagesFetched;
       anyMidCycle ||= r.midCycle;
+    }
+
+    // 4. Background My Day Substrate scan — ONLY on calm cycles (no baseline
+    //    still draining), so its subrequests never stack with the task-delta
+    //    page burst. Budgeted to a few folders per cycle with oldest-first
+    //    rotation, keeping each request well under the Workers free-tier
+    //    subrequest ceiling regardless of roster size. Runs last so the gate
+    //    sees the cycle's final mid-cycle state.
+    if (!anyMidCycle) {
+      await this.#runMyDayScanBatch().catch((e) =>
+        log.warn("my_day_scan_failed", { error: String(e) }),
+      );
     }
     return anyMidCycle;
   }
@@ -940,16 +979,34 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       .map((k) => k.list_id);
   }
 
-  // Background My Day Substrate scan. One sequential listFolderTasks per roster
-  // list (EXO MailboxConcurrency forbids parallel), upserting the four
-  // Substrate-only fields onto existing tasks rows. Tasks not yet in the cache
-  // are ignored (updateMyDayFields is a no-op on a missing task_id; the next
-  // Graph delta creates the row, the next scan fills the fields). Caller gates
-  // by isScanDue() so this runs at most once per window. Errors isolate per
-  // folder. A my_day_unavailable / SubstrateError 403 (denied/latched scope)
-  // aborts the scan cleanly without disturbing the rest of runSyncCycle.
-  async #runMyDaySubstrateScan(): Promise<void> {
+  // Budgeted background My Day Substrate scan. Substrate has no delta, so each
+  // list is a full per-folder enumeration; running the whole roster in one cycle
+  // would stack N Substrate GETs onto the task-delta page burst and can blow the
+  // Workers free-tier subrequest ceiling. Instead we scan at most
+  // MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE lists per call, oldest-scanned first
+  // (selectDueScanLists), recording a per-list "myday:{listId}" sync_state row.
+  // Over ⌈roster / cap⌉ calm cycles every list is refreshed within its window;
+  // raising the cap (paid plans) scans more — or the whole roster — per cycle.
+  //
+  // Sequential GETs (EXO MailboxConcurrency forbids parallel). Tasks not yet in
+  // the cache are ignored (updateMyDayFields no-ops on a missing task_id; the
+  // next Graph delta creates the row, a later scan fills the fields). A
+  // my_day_unavailable / SubstrateError 403 (denied/latched scope) aborts the
+  // batch cleanly. Per-folder errors leave that list's last-scan time untouched
+  // so it stays due and is retried on the next calm cycle (no starvation,
+  // mirroring the task-delta error path).
+  async #runMyDayScanBatch(): Promise<void> {
     if (!myDayEnabled(this.env)) return;
+
+    const windowMs = this.#myDayScanWindowMs();
+    const max = this.#myDayScanMaxFoldersPerCycle();
+    const entries = this.listLists().map((l) => ({
+      list_id: l.list_id,
+      last: this.#getSyncState(`myday:${l.list_id}`)?.last_synced_at ?? null,
+    }));
+    const due = selectDueScanLists(entries, windowMs, max);
+    if (due.length === 0) return;
+
     const ident = await loadIdentity(this.env);
     const sub = new SubstrateClient(
       {
@@ -959,15 +1016,12 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       ident?.anchorMailbox ?? null,
     );
 
-    const lists = this.listLists();
     let folders_scanned = 0;
     let folders_errored = 0;
-    let last_error: string | null = null;
 
-    for (const l of lists) {
+    for (const listId of due) {
       try {
-        const folderTasks = await sub.listFolderTasks(l.list_id);
-        folders_scanned += 1;
+        const folderTasks = await sub.listFolderTasks(listId);
         for (const t of folderTasks) {
           if (!t.Id) continue;
           this.updateMyDayFields(t.Id, {
@@ -977,42 +1031,41 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
             postponed_day: t.PostponedDay ? t.PostponedDay.slice(0, 10) : null,
           });
         }
+        // Success: stamp last_synced_at = now so this list drops to the back of
+        // the rotation until its window lapses again.
+        this.#setSyncState(`myday:${listId}`, {
+          last_synced_at: Date.now(),
+          status: "idle",
+          last_error: null,
+        });
+        folders_scanned += 1;
       } catch (e) {
         if (e instanceof Error && e.message.includes("my_day_unavailable")) {
-          this.#recordMyDayScan({ status: "unavailable", last_error: e.message });
+          log.warn("my_day_scan_unavailable", { error: e.message });
           return;
         }
         if (e instanceof SubstrateError && e.status === 403) {
           this.markMyDayUnavailable();
-          this.#recordMyDayScan({ status: "unavailable", last_error: e.detail ?? "403" });
+          log.warn("my_day_scan_unavailable", { error: e.detail ?? "403" });
           return;
         }
         folders_errored += 1;
-        last_error = e instanceof Error ? e.message : String(e);
-        log.warn("my_day_scan_folder_failed", { list_id: l.list_id, error: last_error });
+        const msg = e instanceof Error ? e.message : String(e);
+        // Record the error WITHOUT advancing last_synced_at, so the list stays
+        // due and is retried on the next calm cycle (transient failures recover
+        // promptly; a never-successful list keeps logging rather than silently
+        // dropping out).
+        this.#setSyncState(`myday:${listId}`, { status: "error", last_error: msg });
+        log.warn("my_day_scan_folder_failed", { list_id: listId, error: msg });
       }
     }
 
-    this.#recordMyDayScan({
-      status: folders_errored === 0 ? "idle" : "partial",
-      last_error,
+    log.info("my_day_scan_batch", {
+      folders_scanned,
+      folders_errored,
+      due: due.length,
+      roster: entries.length,
     });
-    log.info("my_day_scan_complete", { folders_scanned, folders_errored, lists: lists.length });
-  }
-
-  #recordMyDayScan(args: { status: string; last_error: string | null }): void {
-    this.sql.exec(
-      `INSERT INTO sync_state (resource, last_synced_at, status, last_error)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(resource) DO UPDATE SET
-         last_synced_at = excluded.last_synced_at,
-         status = excluded.status,
-         last_error = excluded.last_error`,
-      "my_day_scan",
-      Date.now(),
-      args.status,
-      args.last_error,
-    );
   }
 
   #intervalMs(): number {
@@ -1027,5 +1080,13 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
 
   #myDayScanWindowMs(): number {
     return this.#intervalMs() * this.#myDayScanEveryNCycles();
+  }
+
+  // Max lists scanned per cycle. Small by default so the scan's Substrate GETs
+  // stay well under the Workers free-tier subrequest ceiling even on a large
+  // roster; raise it on paid plans to scan more (or the whole roster) per cycle.
+  #myDayScanMaxFoldersPerCycle(): number {
+    const n = Number(this.env.MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 6;
   }
 }

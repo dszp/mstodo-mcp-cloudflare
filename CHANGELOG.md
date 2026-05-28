@@ -21,11 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 - **My Day SQLite cache (Phase 1).** Four new columns on the `tasks` table —
   `committed_day`, `committed_order`, `order_datetime`, `postponed_day` — populated by a
-  background Substrate scan inside `runSyncCycle` (age-gated to once per
+  background Substrate scan inside `runSyncCycle` (each list rescanned at most once per
   `MY_DAY_SCAN_EVERY_N_CYCLES × DELTA_SYNC_INTERVAL_MIN` minutes; default ≈ hourly) and by
   write-through on `add_to_my_day` / `remove_from_my_day`. The scan is a per-folder
-  enumeration (Substrate has no delta), amortized across cycles instead of paid on every
-  read; write-through keeps user-touched tasks instantly current. Caching `postponed_day`
+  enumeration (Substrate has no delta), **budgeted to `MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE`
+  lists per cycle with oldest-first rotation and run only on calm (non-baseline) cycles**, so
+  its Substrate requests stay well under the Workers free-tier subrequest ceiling regardless
+  of roster size; write-through keeps user-touched tasks instantly current. Caching `postponed_day`
   closes a latent My-Day-filter bug: tasks postponed to today no longer surface in
   `list_my_day_tasks` output even though the To Do app hides them.
 - **`list_my_day_tasks` is now cache-backed.** Zero live Substrate round-trips on the read
@@ -38,7 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tasks_committed_day` index and rewrites the `tasks_au` FTS trigger to fire only on
   title/body_plain updates so background-scan writes don't churn FTS. Schema version is
   tracked in a one-row `schema_meta` table (Workers DO SQLite blocks `PRAGMA user_version`).
-- **Config:** new var `MY_DAY_SCAN_EVERY_N_CYCLES` (default `"4"`).
+- **Config:** new vars `MY_DAY_SCAN_EVERY_N_CYCLES` (default `"4"` — per-list rescan window)
+  and `MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE` (default `"6"` — lists scanned per cycle; raise it on
+  the Workers Paid plan to scan more, or the whole roster, per cycle).
 
 ### Changed
 - **`list_my_day_tasks` response shape** is now built from the cache: per-task fields are
