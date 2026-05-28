@@ -12,7 +12,7 @@ import {
   projectSubstrateTaskDetails,
   compareOrderDateTimeDesc,
 } from "../graph/substrate-client";
-import { OWNER_DO_NAME, rowToList, rowToSummary, type ListRow, type TaskRow } from "../cache/sql";
+import { OWNER_DO_NAME, epochToIso, rowToList, rowToSummary, type ListRow, type TaskRow } from "../cache/sql";
 import type { TodoIndex } from "../cache/index-do";
 import { mapPool } from "../graph/concurrency";
 import { VERSION } from "../version";
@@ -3293,7 +3293,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "list_my_day_tasks",
       {
         description:
-          "List Microsoft To Do tasks in My Day for a given day (undocumented Substrate endpoint). `date` defaults to today in the Worker's configured timezone. Iterates the indexed list roster and aggregates matches across lists. Each task carries detail that rides along on the Substrate response — status, importance, due/start/completed dates, reminder, categories, body_preview, and order_datetime — with no extra lookup. Results are sorted by order_datetime descending, mirroring the To Do app's manual (drag-to-reorder) order. Note: committed_day is only the most recent date the task was on My Day (whether or not it was completed); there is no history beyond that single last-on-My-Day date, regardless of whether it was today or another day. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
+          "List Microsoft To Do tasks in My Day for a given day (cache-backed, zero live Substrate round-trips). `date` defaults to today in the Worker's configured timezone. Reads the SQLite cache populated by the background My Day Substrate scan (cadence: MY_DAY_SCAN_EVERY_N_CYCLES × DELTA_SYNC_INTERVAL_MIN, default ~hourly) and by write-through on add_to_my_day / remove_from_my_day. Faithful to the To Do app's My Day filter (committed_day matches AND not postponed to that same day). Sort: committed_order DESC (the My Day drag-to-reorder order, mirroring the app), falling back to order_datetime for tasks not yet assigned a My Day order. Response includes cache_as_of (epoch ms of last scan) and stale (true when the scan hasn't completed in ~3× its window). Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope.",
         inputSchema: {
           date: z
             .string()
@@ -3302,78 +3302,57 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         },
       },
       async ({ date }): Promise<McpResponse> =>
-        this.withSubstrate("list_my_day_tasks", async (sub) => {
+        // Still gated by withSubstrate so the tool stays opt-in and the
+        // my_day_unavailable / EXO-disabled paths return the same shape — even
+        // though the read path no longer touches Substrate.
+        this.withSubstrate("list_my_day_tasks", async (_sub) => {
           const day = date ?? todayInTimeZone(this.env.TIMEZONE);
           if (!MY_DAY_DATE_RE.test(day)) {
             return errResponse("invalid_date", { date: day, hint: "Use YYYY-MM-DD." });
           }
-          let roster: ListRow[] = [];
-          try {
-            roster = await this.#index().listLists();
-          } catch (e) {
-            log.warn("index_roster_read_failed", { error: String(e) });
-          }
-          if (roster.length === 0) {
-            // My Day reads fan out per-folder, so we need the folder roster. The
-            // Substrate API can't supply it the way Graph enumerates lists, so a
-            // cold index can't be served live here. Kick a sync (mirrors
-            // #warmIfEmpty) and tell the caller to retry once it warms.
-            await this.#index()
-              .ensureSyncing()
-              .catch((e) => log.warn("index_ensure_syncing_failed", { error: String(e) }));
-            return errResponse("index_cold", {
-              hint: "List roster is still warming. Retry in a few seconds, or call list_lists once to warm the index.",
-            });
-          }
-          // One substrate GET per folder, fetched SEQUENTIALLY. EXO enforces a
-          // low per-mailbox concurrency cap (MailboxConcurrency); fanning these
-          // out in parallel trips ApplicationThrottled (429). We match
-          // client-side on the DATE PORTION of CommittedDay — substrate stores it
-          // as a full datetime, so a server `$filter=CommittedDay eq '2026-05-25'`
-          // (bare date) wouldn't match.
-          const tasks: Array<
-            {
-              list_id: string;
-              display_name: string | null;
-              task_id: string | null;
-              title: string | null;
-              committed_day: string | null;
-              committed_day_raw: string | null;
-            } & ReturnType<typeof projectSubstrateTaskDetails>
-          > = [];
-          let folders_errored = 0;
-          for (const l of roster) {
-            let folderTasks;
-            try {
-              folderTasks = await sub.listFolderTasks(l.list_id);
-            } catch (e) {
-              // One bad/throttled/missing folder must not fail the whole
-              // aggregation — log, count it, and keep going (partial result).
-              folders_errored += 1;
-              log.warn("my_day_list_folder_failed", {
-                list_id: l.list_id,
-                error: String(e),
-              });
-              continue;
-            }
-            for (const t of folderTasks) {
-              if (committedDatePart(t.CommittedDay) !== day) continue;
-              tasks.push({
-                list_id: l.list_id,
-                display_name: l.display_name,
-                task_id: t.Id ?? null,
-                title: t.Subject ?? null,
-                committed_day: committedDatePart(t.CommittedDay),
-                committed_day_raw: t.CommittedDay ?? null,
-                ...projectSubstrateTaskDetails(t),
-              });
-            }
-          }
-          // Mirror the To Do app's manual (drag-to-reorder) order: OrderDateTime
-          // descending. We aggregate across folders, so the sort happens here on
-          // the combined array. Tasks missing an order_datetime sort last; ties
-          // hold their enumeration order (Array.prototype.sort is stable).
-          tasks.sort((a, b) => compareOrderDateTimeDesc(a.order_datetime, b.order_datetime));
+          const index = this.#index();
+          const [{ rows }, scan, lists] = await Promise.all([
+            index.queryMyDayForDate(day),
+            index.getMyDayScanState(),
+            index.listLists().catch(() => [] as ListRow[]),
+          ]);
+          const nameByList = new Map(lists.map((l) => [l.list_id, l.display_name]));
+
+          const tasks = rows.map((r) => ({
+            list_id: r.list_id,
+            display_name: nameByList.get(r.list_id) ?? null,
+            task_id: r.task_id,
+            title: r.title,
+            committed_day: r.committed_day,
+            committed_day_raw: r.committed_day ? `${r.committed_day}T00:00:00Z` : null,
+            committed_order: r.committed_order,
+            order_datetime: r.order_datetime,
+            postponed_day: r.postponed_day,
+            status: r.status,
+            importance: r.importance,
+            due_date: epochToIso(r.due_at)?.slice(0, 10) ?? null,
+            start_date: epochToIso(r.start_at)?.slice(0, 10) ?? null,
+            completed_date: epochToIso(r.completed_at) ?? null,
+            is_reminder_on: r.is_reminder_on == null ? null : !!r.is_reminder_on,
+            reminder_date: epochToIso(r.reminder_at) ?? null,
+            has_attachments: r.has_attachments == null ? null : !!r.has_attachments,
+            categories: r.categories_json ? (JSON.parse(r.categories_json) as string[]) : [],
+            body_preview: r.body_plain ? r.body_plain.slice(0, 200) : null,
+            created_date: epochToIso(r.created_at) ?? null,
+            last_modified_date: epochToIso(r.modified_at) ?? null,
+          }));
+
+          // "stale" = the scan hasn't completed within ~3× the configured
+          // sub-cadence (3 windows missed → something is wrong, or the DO has
+          // been idle long enough that the cache cannot be trusted).
+          const cycleMs = Number(this.env.DELTA_SYNC_INTERVAL_MIN || "15") * 60_000;
+          const everyN = Number(this.env.MY_DAY_SCAN_EVERY_N_CYCLES || "4");
+          const scanWindow =
+            (Number.isFinite(cycleMs) ? cycleMs : 15 * 60_000) *
+            (Number.isFinite(everyN) && everyN >= 1 ? everyN : 4);
+          const ageMs = scan.last_scan_at_ms ? Date.now() - scan.last_scan_at_ms : null;
+          const stale = ageMs === null || ageMs > scanWindow * 3;
+
           return {
             content: [
               {
@@ -3382,8 +3361,9 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                   ok: true,
                   date: day,
                   count: tasks.length,
-                  folders_scanned: roster.length,
-                  folders_errored,
+                  cache_as_of: scan.last_scan_at_ms,
+                  cache_status: scan.status,
+                  stale,
                   tasks,
                 }),
               },

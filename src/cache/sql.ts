@@ -190,7 +190,7 @@ function dtzToEpoch(
   return Number.isNaN(ms) ? null : ms;
 }
 
-function epochToIso(n: number | null): string | undefined {
+export function epochToIso(n: number | null): string | undefined {
   return n == null ? undefined : new Date(n).toISOString();
 }
 
