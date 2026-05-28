@@ -203,7 +203,11 @@ function detailedTask(t: TodoTask) {
   };
 }
 
-function taskResponse(args: { task: TodoTask; list_id: string }): McpResponse {
+function taskResponse(args: {
+  task: TodoTask;
+  list_id: string;
+  my_day?: { committed_day: string | null; committed_order: string | null } | null;
+}): McpResponse {
   return {
     content: [
       {
@@ -212,6 +216,10 @@ function taskResponse(args: { task: TodoTask; list_id: string }): McpResponse {
           ok: true,
           list_id: args.list_id,
           task: detailedTask(args.task),
+          // Present only when include_my_day was requested. `null` = requested but
+          // the task isn't in the cache / My Day is off (unknown); an object with
+          // null fields = indexed but not on My Day.
+          ...(args.my_day !== undefined ? { my_day: args.my_day } : {}),
         }),
       },
     ],
@@ -542,7 +550,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "get_task",
       {
         description:
-          "Return one Microsoft To Do task by id with inline expansions (checklistItems, linkedResources, attachments) and the full body. `list` is optional — when omitted it is resolved from the index via task_id (pass it explicitly to skip the lookup or when the index hasn't seen the task yet). Returns task_not_found if the id is invalid, or list_required if the list can't be inferred.",
+          "Return one Microsoft To Do task by id with inline expansions (checklistItems, linkedResources, attachments) and the full body. `list` is optional — when omitted it is resolved from the index via task_id (pass it explicitly to skip the lookup or when the index hasn't seen the task yet). Returns task_not_found if the id is invalid, or list_required if the list can't be inferred. Pass include_my_day: true to also return the task's My Day fields (committed_day, committed_order) from the SQLite cache — off by default.",
         inputSchema: {
           list: z
             .string()
@@ -553,9 +561,15 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .string()
             .min(1)
             .describe("Microsoft Graph task id."),
+          include_my_day: z
+            .boolean()
+            .optional()
+            .describe(
+              "When true, also return the task's My Day fields (committed_day, committed_order) read from the SQLite cache (no extra Substrate round-trip). Off by default. my_day is null when the task isn't cached or My Day is disabled; an object with null fields means cached but not on My Day.",
+            ),
         },
       },
-      async ({ list, task_id }): Promise<McpResponse> =>
+      async ({ list, task_id, include_my_day }): Promise<McpResponse> =>
         this.withGraph("get_task", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
           if (!list_id) {
@@ -577,7 +591,16 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
 
           try {
             const task = await graph.getJson(url.toString(), TodoTaskSchema);
-            return taskResponse({ task, list_id });
+            // include_my_day: cache read (committed_day/committed_order are
+            // Substrate-only and invisible to Graph). null = not cached or My Day
+            // off (unknown); {null,null} = cached but not on My Day. Omitted when
+            // not requested.
+            const my_day = include_my_day
+              ? myDayEnabled(this.env)
+                ? await this.#index().getMyDayFields(task_id)
+                : null
+              : undefined;
+            return taskResponse({ task, list_id, my_day });
           } catch (e) {
             // 404 = valid-shape id that doesn't exist; 400 + ErrorInvalidIdMalformed
             // = id isn't syntactically a Graph id. Both are "task can't be retrieved"

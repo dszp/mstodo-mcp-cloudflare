@@ -218,6 +218,41 @@ describe("queryMyDayForDate", () => {
   });
 });
 
+describe("getMyDayFields", () => {
+  it("returns committed_day/committed_order for an indexed task", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM tasks");
+      ctx.storage.sql.exec(
+        "INSERT INTO tasks (task_id, list_id, status, title, committed_day, committed_order) VALUES ('t1', 'L', 'notStarted', 't', '2026-05-27', '2026-05-27T05:00:00Z')",
+      );
+      expect(await instance.getMyDayFields("t1")).toEqual({
+        committed_day: "2026-05-27",
+        committed_order: "2026-05-27T05:00:00Z",
+      });
+    });
+  });
+
+  it("returns both-null for an indexed task that is not on My Day", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM tasks");
+      ctx.storage.sql.exec(
+        "INSERT INTO tasks (task_id, list_id, status, title) VALUES ('t2', 'L', 'notStarted', 't')",
+      );
+      expect(await instance.getMyDayFields("t2")).toEqual({
+        committed_day: null,
+        committed_order: null,
+      });
+    });
+  });
+
+  it("returns null when the task is not in the cache", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM tasks");
+      expect(await instance.getMyDayFields("never-indexed")).toBeNull();
+    });
+  });
+});
+
 describe("getMyDayScanState", () => {
   it("returns nulls when no list has been scanned yet", async () => {
     await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {

@@ -391,6 +391,22 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return rows.length > 0 ? rows[0] : null;
   }
 
+  // My Day fields for a single task, for get_task's opt-in include_my_day —
+  // a cache read, no Substrate round-trip. `null` means the task isn't in the
+  // cache (unknown). A row with both fields null means "indexed but not on My
+  // Day". Keyed by Graph task id (the same id Graph delta and write-through use).
+  getMyDayFields(
+    taskId: string,
+  ): { committed_day: string | null; committed_order: string | null } | null {
+    const rows = this.sql
+      .exec<{ committed_day: string | null; committed_order: string | null }>(
+        "SELECT committed_day, committed_order FROM tasks WHERE task_id = ?",
+        taskId,
+      )
+      .toArray();
+    return rows.length > 0 ? rows[0] : null;
+  }
+
   // -- List roster ----------------------------------------------------------
   upsertList(list: TodoTaskList): void {
     const r = listToRow(list);
