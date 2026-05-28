@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **My Day manual ordering (`reorder_my_day_task`).** Drag-reorder a task *within* My Day for a
+  given day by setting the Substrate-only `CommittedOrder` field — the My Day analogue of
+  `reorder_task`'s `OrderDateTime`, and fully independent of it (reordering in My Day never touches
+  the source-list order, and vice versa). Supports `top`/`bottom`/`before`/`after`/`index`/`set`,
+  scoped to a `date` (default today). Neighbors, mover membership, and the `before`/`after`
+  reference are all read from the SQLite My Day cache (the same source `list_my_day_tasks` shows),
+  so the reorder is consistent with what you see and the only Substrate round-trip is the write.
+  Requires `ENABLE_MY_DAY=true` + the Exchange Online Tasks.ReadWrite scope.
+- **`get_task` opt-in `include_my_day`.** When true, `get_task` also returns the task's My Day
+  fields (`committed_day`, `committed_order`) read from the SQLite cache — no extra Substrate
+  round-trip. Off by default. `my_day` is `null` when the task isn't cached or My Day is disabled;
+  an object with null fields means cached but not on My Day.
+- **`committed_order` surfaced** on every Substrate-shaped response (`add_to_my_day`,
+  `remove_from_my_day`, `list_tasks_by_manual_order`, the reorder tools) alongside `order_datetime`.
+  `list_my_day_tasks` already surfaced it from the cache.
+
+### Changed
+- **`add_to_my_day` now seeds `CommittedOrder` (= now)** so a freshly-added task appears at the top
+  of My Day and is immediately reorderable. Re-adding a task that is already on My Day therefore
+  bumps it back to the top — matching the To Do app.
+
 ## [0.8.0] – 2026-05-28
 
 ### Added
