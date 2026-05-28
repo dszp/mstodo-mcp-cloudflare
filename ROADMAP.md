@@ -174,6 +174,23 @@ manager, the renewal cron, and the subscribe-on-list-create hook; plus the
 `ENABLE_TASK_SUBSCRIPTIONS` gate and `SERVICE_BASE_URL`-derived webhook
 `notificationUrl`.
 
+### 4a. SQLite cache of the Substrate-only fields (CommittedDay / CommittedOrder / OrderDateTime / PostponedDay) — ✅ Phase 1 DONE
+
+> **Status: Phase 1 shipped.** Four new `tasks` columns (`committed_day`, `committed_order`,
+> `order_datetime`, `postponed_day`) populated by a background Substrate scan inside
+> `runSyncCycle` (age-gated; cadence `MY_DAY_SCAN_EVERY_N_CYCLES`, default 4) plus write-through
+> on `add_to_my_day` / `remove_from_my_day`. `list_my_day_tasks` is cache-backed — zero live
+> Substrate round-trips on the read path — and now honors `PostponedDay` faithfully. Schema
+> versioning uses a `schema_meta` table (Workers DO SQLite blocks `PRAGMA user_version`).
+> **Still remaining (Phase 2):** drive scan invalidation from §4 change notifications so the
+> cache tightens toward near-live without polling Substrate at all.
+
+**Known limitations carried into Phase 1:** `listFolderTasks` doesn't paginate (folders larger
+than Substrate's default page size only refresh their first page from the scan; write-through
+still covers user-touched tasks). The cache wins when reads-per-window exceed scans-per-window;
+at the default hourly scan, light users may pay slightly more API budget — tune
+`MY_DAY_SCAN_EVERY_N_CYCLES` up if usage is low.
+
 ## 5. Email-to-task webhook ingress
 
 Migrate the existing email-to-task flow off n8n: a webhook (or Cloudflare Email

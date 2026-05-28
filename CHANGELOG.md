@@ -19,6 +19,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can't hold a fixed completion date. Completion is stored at **date granularity** (any time-of-day
   is dropped to midnight UTC). The normal complete-now path (`status: completed`, no date) is
   unchanged.
+- **My Day SQLite cache (Phase 1).** Four new columns on the `tasks` table —
+  `committed_day`, `committed_order`, `order_datetime`, `postponed_day` — populated by a
+  background Substrate scan inside `runSyncCycle` (age-gated to once per
+  `MY_DAY_SCAN_EVERY_N_CYCLES × DELTA_SYNC_INTERVAL_MIN` minutes; default ≈ hourly) and by
+  write-through on `add_to_my_day` / `remove_from_my_day`. The scan is a per-folder
+  enumeration (Substrate has no delta), amortized across cycles instead of paid on every
+  read; write-through keeps user-touched tasks instantly current. Caching `postponed_day`
+  closes a latent My-Day-filter bug: tasks postponed to today no longer surface in
+  `list_my_day_tasks` output even though the To Do app hides them.
+- **`list_my_day_tasks` is now cache-backed.** Zero live Substrate round-trips on the read
+  path (previously O(roster size) sequential Substrate GETs per call). Response gains
+  `cache_as_of` (epoch ms of last scan), `cache_status`, and `stale` (true when the scan
+  window has lapsed ≥ 3×).
+- **New DO RPC:** `updateMyDayFields(task_id, patch)`, `clearMyDayFields(task_id)`,
+  `queryMyDayForDate(date)`, `getMyDayScanState()`.
+- **Schema migration ladder** (`src/cache/migrations.ts`); v1 adds the four columns +
+  `tasks_committed_day` index and rewrites the `tasks_au` FTS trigger to fire only on
+  title/body_plain updates so background-scan writes don't churn FTS. Schema version is
+  tracked in a one-row `schema_meta` table (Workers DO SQLite blocks `PRAGMA user_version`).
+- **Config:** new var `MY_DAY_SCAN_EVERY_N_CYCLES` (default `"4"`).
+
+### Changed
+- **`list_my_day_tasks` response shape** is now built from the cache: per-task fields are
+  Graph-cased (e.g. `status: "notStarted"` / `"completed"` instead of Substrate's PascalCase).
+  All previously-surfaced fields remain and `postponed_day` is now also surfaced; the per-call
+  `folders_scanned` / `folders_errored` counters are replaced by `cache_as_of` / `cache_status`
+  / `stale`. Body preview is derived from the cached HTML-stripped body (first 200 chars).
+
+### Fixed
+- **`list_my_day_tasks` honors `PostponedDay`.** A task with `CommittedDay == day` AND
+  `PostponedDay == day` is suppressed by the official client; the MCP now matches that filter.
 
 ## [0.7.0] – 2026-05-27
 
