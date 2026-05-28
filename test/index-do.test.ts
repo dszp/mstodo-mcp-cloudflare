@@ -436,6 +436,49 @@ describe("TodoIndex delta sync", () => {
     ).toEqual(["a", "b"]);
   });
 
+  it("budget rotation: a fully-baselined roster larger than the page budget is NOT mid-cycle", async () => {
+    await seedFreshTokens();
+    const listB = { id: "list-B", displayName: "Home" };
+    const listC = { id: "list-C", displayName: "Errands" };
+    const TASKS_DELTA_B =
+      "https://graph.microsoft.com/v1.0/me/todo/lists/list-B/tasks/delta";
+    const TASKS_DELTA_C =
+      "https://graph.microsoft.com/v1.0/me/todo/lists/list-C/tasks/delta";
+    const TASKS_DL_B = `${TASKS_DELTA_B}?dl=1`;
+    const TASKS_DL_C = `${TASKS_DELTA_C}?dl=1`;
+    stubGraph({
+      [LISTS_DELTA]: {
+        body: { value: [listA, listB, listC], "@odata.deltaLink": LISTS_DL },
+      },
+      [TASKS_DELTA_A]: {
+        body: { value: [syncTask("a")], "@odata.deltaLink": TASKS_DL_A },
+      },
+      [TASKS_DELTA_B]: {
+        body: { value: [syncTask("b")], "@odata.deltaLink": TASKS_DL_B },
+      },
+      [TASKS_DELTA_C]: {
+        body: { value: [syncTask("c")], "@odata.deltaLink": TASKS_DL_C },
+      },
+    });
+    const stub = indexStub("sync-budget-rotation");
+    await stub.runSyncCycle(); // full baseline: every list reaches a deltaLink
+
+    // Steady state: every list is caught up (incremental delta → deltaLink, no
+    // nextLink). With a task-page budget of 2 and 3 lists, the loop runs out of
+    // budget before the 3rd list — but nothing is actually draining. The cycle
+    // must report NOT mid-cycle, otherwise the alarm pins the 2s fast cadence
+    // forever (roster > MAX_PAGES_PER_CYCLE) and the calm-cycle-gated My Day
+    // scan never runs.
+    stubGraph({
+      [LISTS_DL]: { body: { value: [], "@odata.deltaLink": LISTS_DL } },
+      [TASKS_DL_A]: { body: { value: [], "@odata.deltaLink": TASKS_DL_A } },
+      [TASKS_DL_B]: { body: { value: [], "@odata.deltaLink": TASKS_DL_B } },
+      [TASKS_DL_C]: { body: { value: [], "@odata.deltaLink": TASKS_DL_C } },
+    });
+    const midCycle = await stub.runSyncCycle(2);
+    expect(midCycle).toBe(false);
+  });
+
   it("410: purges the list's rows and re-baselines on the next cycle", async () => {
     await seedFreshTokens();
     stubGraph({

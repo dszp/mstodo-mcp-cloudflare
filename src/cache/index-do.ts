@@ -750,15 +750,21 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
 
   // Run one budget-bounded cycle: roster first (drives which lists to sync),
   // then per-list task delta. `maxTaskPages` bounds task pages only (the roster
-  // is small and gets ROSTER_MAX_PAGES). Returns true if any resource is still
-  // mid-cycle so the caller re-arms soon. Public so tests can drive it with a
-  // small budget; alarm() calls it with the default.
+  // is small and gets ROSTER_MAX_PAGES). Returns true iff a resource is still
+  // genuinely *draining* (a baseline / page-chain left an outstanding nextLink)
+  // so the caller re-arms on the fast cadence. Crucially, merely running out of
+  // the per-cycle page budget mid-rotation does NOT count: when the roster is
+  // larger than the budget, every cycle ends with budget spent, but the lists
+  // it touched are caught up — that's steady state, not a drain. Conflating the
+  // two (the original bug) pinned the alarm at the 2s fast cadence forever on a
+  // roster > MAX_PAGES_PER_CYCLE and starved the calm-cycle-gated My Day scan.
+  // Public so tests can drive it with a small budget; alarm() uses the default.
   async runSyncCycle(maxTaskPages: number = MAX_PAGES_PER_CYCLE): Promise<boolean> {
-    let anyMidCycle = false;
+    let anyOutstanding = false;
 
     // 1. Roster — upserts/deletes `lists`; a removed list purges its tasks too.
     const roster = await this.#syncResource("lists", LISTS_DELTA_URL, ROSTER_MAX_PAGES);
-    anyMidCycle ||= roster.midCycle;
+    anyOutstanding ||= roster.midCycle;
 
     // Load the per-list sync policy once per cycle (a cheap KV read alongside the
     // existing network I/O). Drives both the skip set and self-heal purge below.
@@ -777,31 +783,33 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       if (skip(l.list_id)) this.#purgeSkippedList(l.list_id);
     }
 
-    // 3. Per-list task delta, prioritizing unfinished work, skipping no_sync lists.
+    // 3. Per-list task delta, prioritizing unfinished work, skipping no_sync
+    //    lists. Stop when the per-cycle page budget is spent; the oldest-first
+    //    priority rotation guarantees the unvisited tail is covered on following
+    //    cycles. Running out of budget is NOT "outstanding" work — only a
+    //    resource that returned an outstanding nextLink is (set via r.midCycle).
     let remaining = maxTaskPages;
     for (const listId of this.#listIdsByPriority()) {
       if (skip(listId)) continue;
-      if (remaining <= 0) {
-        anyMidCycle = true;
-        break;
-      }
+      if (remaining <= 0) break;
       const r = await this.#syncResource(`tasks:${listId}`, tasksDeltaUrl(listId), remaining);
       remaining -= r.pagesFetched;
-      anyMidCycle ||= r.midCycle;
+      anyOutstanding ||= r.midCycle;
     }
 
-    // 4. Background My Day Substrate scan — ONLY on calm cycles (no baseline
-    //    still draining), so its subrequests never stack with the task-delta
-    //    page burst. Budgeted to a few folders per cycle with oldest-first
-    //    rotation, keeping each request well under the Workers free-tier
-    //    subrequest ceiling regardless of roster size. Runs last so the gate
-    //    sees the cycle's final mid-cycle state.
-    if (!anyMidCycle) {
+    // 4. Background My Day Substrate scan — only when nothing is still draining
+    //    (no outstanding nextLink), so its subrequests never stack with a
+    //    baseline/page-chain burst. A budget-exhausted-but-caught-up cycle is
+    //    calm and DOES run the scan. Budgeted to a few folders per cycle with
+    //    oldest-first rotation, keeping each request well under the Workers
+    //    free-tier subrequest ceiling regardless of roster size. Runs last so
+    //    the gate sees the cycle's final draining state.
+    if (!anyOutstanding) {
       await this.#runMyDayScanBatch(skip).catch((e) =>
         log.warn("my_day_scan_failed", { error: String(e) }),
       );
     }
-    return anyMidCycle;
+    return anyOutstanding;
   }
 
   // Drop a skipped list's indexed rows + task sync_state (FTS cascades via the
