@@ -145,6 +145,7 @@ describe("projectSubstrateTaskDetails (shared My Day detail projection)", () => 
       CreatedDateTime: "2026-05-20T12:00:00Z",
       LastModifiedDateTime: "2026-05-27T08:30:00Z",
       OrderDateTime: "2026-05-27T14:03:00Z",
+      CommittedOrder: "2026-05-27T15:10:00Z",
     });
     expect(projectSubstrateTaskDetails(t)).toEqual({
       status: "InProgress",
@@ -160,7 +161,22 @@ describe("projectSubstrateTaskDetails (shared My Day detail projection)", () => 
       created_date: "2026-05-20T12:00:00Z",
       last_modified_date: "2026-05-27T08:30:00Z",
       order_datetime: "2026-05-27T14:03:00Z",
+      committed_order: "2026-05-27T15:10:00Z",
     });
+  });
+
+  it("surfaces CommittedOrder as committed_order (the My Day manual-order field)", () => {
+    const t = SubstrateTaskSchema.parse({
+      Id: "x",
+      Subject: "s",
+      CommittedOrder: "2026-05-27T04:11:49Z",
+    });
+    expect(projectSubstrateTaskDetails(t).committed_order).toBe("2026-05-27T04:11:49Z");
+  });
+
+  it("committed_order is null when CommittedOrder is absent", () => {
+    const t = SubstrateTaskSchema.parse({ Id: "x", Subject: "s" });
+    expect(projectSubstrateTaskDetails(t).committed_order).toBeNull();
   });
 
   it("tolerates a bare ISO string for a DateTimeTimeZone field", () => {

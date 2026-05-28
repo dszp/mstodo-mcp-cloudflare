@@ -130,6 +130,7 @@ export interface SubstrateTaskDetails {
   created_date: string | null;
   last_modified_date: string | null;
   order_datetime: string | null;
+  committed_order: string | null;
 }
 
 // Comparator for the To Do manual (drag-to-reorder) sort: OrderDateTime
@@ -188,6 +189,7 @@ export function projectSubstrateTaskDetails(t: SubstrateTask): SubstrateTaskDeta
     created_date: t.CreatedDateTime ?? null,
     last_modified_date: t.LastModifiedDateTime ?? null,
     order_datetime: t.OrderDateTime ?? null,
+    committed_order: t.CommittedOrder ?? null,
   };
 }
 
