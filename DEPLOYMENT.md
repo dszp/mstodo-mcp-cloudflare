@@ -11,6 +11,7 @@ see [README.md](./README.md).
 - [Steps](#steps)
 - [Optional: custom domain](#optional-custom-domain)
 - [Keeping sync cost down](#keeping-sync-cost-down)
+- [My Day support (optional)](#my-day-support-optional)
 - [Troubleshooting](#troubleshooting)
 - [Local development](#local-development)
 - [Reset and teardown](#reset-and-teardown)
@@ -248,6 +249,46 @@ Microsoft To Do's "My Day" has no public Graph API. This Worker can drive it via
 which uses the Office 365 Exchange Online resource rather than Graph. It's **opt-in
 and off by default**; existing deployments are unaffected unless you enable it.
 
+### What enabling My Day unlocks (and what it costs)
+
+Turning on `ENABLE_MY_DAY` is a single decision with a clear, bounded set of extras. Here is
+**everything** it changes, so you can weigh it deliberately:
+
+**What you gain — six additional MCP tools** (all inert / hidden unless My Day is on):
+
+| Tool | What it does |
+| --- | --- |
+| `add_to_my_day` | Put a task on My Day for a day (sets `CommittedDay`; seeds its My Day order to the top). |
+| `remove_from_my_day` | Take a task off My Day. |
+| `list_my_day_tasks` | List a day's My Day tasks, in the app's My Day drag order (cache-backed). |
+| `list_tasks_by_manual_order` | List one list's tasks in the app's manual (drag-to-reorder) order. |
+| `reorder_task` | Change a task's manual position **within its list** (`OrderDateTime`). |
+| `reorder_my_day_task` | Change a task's manual position **within My Day** (`CommittedOrder`). |
+
+Plus a behavior add-on: **`get_task` gains an opt-in `include_my_day`** flag that returns a task's
+`committed_day` / `committed_order` (returns `null` while My Day is off). My Day tool responses
+also surface the Substrate-only detail (`committed_day`, `committed_order`, `order_datetime`).
+
+**What it costs:**
+
+- **One extra delegated permission** on your Entra app — **Office 365 Exchange Online →
+  `Tasks.ReadWrite`** (resource `00000002-0000-0ff1-ce00-000000000000`). This is **task data only**
+  — it does **not** grant access to mail, calendar, contacts, or files. It's the same task data
+  Graph already exposes, reached over a second API plane (Outlook/Exchange Online) because the My
+  Day fields are invisible to Graph.
+- **One re-consent.** The `/authorize` screen widens to cover both resources (Graph + Exchange
+  Online) in a single combined consent; the one rotating refresh token then mints tokens for both
+  audiences on demand. You must re-run `/authorize` once after enabling (see below).
+- **A small background cost** — a budgeted Substrate "scan" (one request per list, capped per
+  cycle) keeps the My Day cache current. The defaults are **free-tier-safe** (see the scan-budget
+  note below); writes you make through this server are reflected instantly via write-through.
+- **Reliance on an undocumented endpoint.** The Substrate API is not a public contract and
+  Microsoft may change it without notice; the rest of the server (all Graph tools) is unaffected
+  if it does, and the My Day tools degrade gracefully (`my_day_unavailable`) rather than crashing.
+
+Leaving `ENABLE_MY_DAY` off keeps the server to the standard Graph `Tasks.ReadWrite` scope and the
+~34 Graph-only tools — nothing above is requested, registered, or scanned.
+
 To turn it on:
 
 1. Add the **Office 365 Exchange Online → `Tasks.ReadWrite`** delegated permission to
@@ -259,8 +300,9 @@ To turn it on:
    fresh authorize, the existing refresh token has Graph consent only and My Day calls
    fail with a re-consent message.
 
-This registers three tools: `add_to_my_day`, `remove_from_my_day`, and
-`list_my_day_tasks`.
+This registers the six My Day / manual-order tools and enables `get_task`'s `include_my_day`
+option — see [What enabling My Day unlocks](#what-enabling-my-day-unlocks-and-what-it-costs) above
+for the full list.
 
 **My Day cache & scan budget — important for free accounts.** `list_my_day_tasks` reads from
 the local SQLite cache (fast, zero Substrate calls on the read path). The cache is refreshed by
