@@ -128,6 +128,11 @@ export interface TaskRow {
   has_attachments: number | null;
   categories_json: string | null;
   recurrence_json: string | null;
+  // Substrate-only — null until a later task's scan or write-through fills them.
+  committed_day: string | null;
+  committed_order: string | null;
+  order_datetime: string | null;
+  postponed_day: string | null;
 }
 
 export interface ListRow {
@@ -219,6 +224,13 @@ export function taskToRow(t: TodoTask, listId: string): TaskRow {
     categories_json:
       t.categories && t.categories.length > 0 ? JSON.stringify(t.categories) : null,
     recurrence_json: t.recurrence ? JSON.stringify(t.recurrence) : null,
+    // Substrate-only fields: Graph delta has no source for them, so a Graph
+    // upsert always writes null here. They're excluded from TASK_COLUMNS, so
+    // the real UPSERT never references them — but TaskRow requires them.
+    committed_day: null,
+    committed_order: null,
+    order_datetime: null,
+    postponed_day: null,
   };
 }
 
@@ -265,5 +277,9 @@ export function rowToSummary(r: TaskRow) {
     categories: r.categories_json
       ? (JSON.parse(r.categories_json) as string[])
       : undefined,
+    committedDay: r.committed_day ?? undefined,
+    committedOrder: r.committed_order ?? undefined,
+    orderDateTime: r.order_datetime ?? undefined,
+    postponedDay: r.postponed_day ?? undefined,
   };
 }

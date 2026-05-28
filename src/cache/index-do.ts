@@ -25,6 +25,7 @@ import {
   type QueryFilter,
   type SyncStatusReport,
 } from "./sql";
+import { applyMigrations } from "./migrations";
 import { loadListsConfig } from "../config/loader";
 import { shouldSkipSync } from "../config/sync-policy";
 
@@ -82,6 +83,9 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     // place for schema setup.
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(SCHEMA_DDL);
+      // Versioned migrations: ALTER existing/new DBs up to the latest schema.
+      // Idempotent across boots (gated by the stored schema_meta version).
+      applyMigrations(this.ctx.storage.sql);
     });
   }
 
