@@ -92,7 +92,10 @@ const MAX_LIMIT = 200;
 // Delta sync budget (free-tier ceiling is 50 subrequests/request). The roster
 // is tiny so it gets its own small cap; task pages share MAX_PAGES_PER_CYCLE.
 // Worst case per cycle ≈ ROSTER_MAX_PAGES + MAX_PAGES_PER_CYCLE + 1 refresh = 41
-// subrequests, under the ceiling with headroom.
+// subrequests. The My Day scan only runs on calm (non-mid-cycle) cycles and is
+// itself capped at MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE (default 6) + 1 substrate
+// mint, so even a calm cycle that fully drained its task pages stays ≈ 48 — still
+// under the ceiling with headroom.
 const ROSTER_MAX_PAGES = 10;
 const MAX_PAGES_PER_CYCLE = 30;
 // While a baseline is still draining, re-arm quickly; otherwise wait the cron
@@ -794,7 +797,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     //    subrequest ceiling regardless of roster size. Runs last so the gate
     //    sees the cycle's final mid-cycle state.
     if (!anyMidCycle) {
-      await this.#runMyDayScanBatch().catch((e) =>
+      await this.#runMyDayScanBatch(skip).catch((e) =>
         log.warn("my_day_scan_failed", { error: String(e) }),
       );
     }
@@ -808,10 +811,12 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   #purgeSkippedList(listId: string): void {
     const hasRows =
       this.sql.exec("SELECT 1 FROM tasks WHERE list_id = ? LIMIT 1", listId).toArray().length > 0;
-    const hasState = !!this.#getSyncState(`tasks:${listId}`);
+    const hasState =
+      !!this.#getSyncState(`tasks:${listId}`) || !!this.#getSyncState(`myday:${listId}`);
     if (!hasRows && !hasState) return;
     this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
     this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
+    this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
   }
 
   // Sync one resource ('lists' or 'tasks:{listId}'): resume from next_link, else
@@ -995,15 +1000,20 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   // batch cleanly. Per-folder errors leave that list's last-scan time untouched
   // so it stays due and is retried on the next calm cycle (no starvation,
   // mirroring the task-delta error path).
-  async #runMyDayScanBatch(): Promise<void> {
+  async #runMyDayScanBatch(skip: (listId: string) => boolean = () => false): Promise<void> {
     if (!myDayEnabled(this.env)) return;
 
     const windowMs = this.#myDayScanWindowMs();
     const max = this.#myDayScanMaxFoldersPerCycle();
-    const entries = this.listLists().map((l) => ({
-      list_id: l.list_id,
-      last: this.#getSyncState(`myday:${l.list_id}`)?.last_synced_at ?? null,
-    }));
+    // Exclude no_sync / built-in skipped lists exactly like the task-delta loop —
+    // scanning them would waste scan slots (their tasks aren't cached, so the
+    // upsert is a no-op) and could starve real lists out of the per-cycle budget.
+    const entries = this.listLists()
+      .filter((l) => !skip(l.list_id))
+      .map((l) => ({
+        list_id: l.list_id,
+        last: this.#getSyncState(`myday:${l.list_id}`)?.last_synced_at ?? null,
+      }));
     const due = selectDueScanLists(entries, windowMs, max);
     if (due.length === 0) return;
 

@@ -262,6 +262,29 @@ To turn it on:
 This registers three tools: `add_to_my_day`, `remove_from_my_day`, and
 `list_my_day_tasks`.
 
+**My Day cache & scan budget — important for free accounts.** `list_my_day_tasks` reads from
+the local SQLite cache (fast, zero Substrate calls on the read path). The cache is refreshed by
+a background scan that issues **one Substrate request per list**. Because Cloudflare's **free
+tier caps a Worker at 50 subrequests per request** — and the delta sync already uses up to ~41
+of those — the scan is **budgeted by default so it can never push you over that ceiling**, no
+matter how many lists you have. Two optional vars control it; the defaults are free-tier-safe,
+so **on the free plan you should leave both as-is:**
+
+- **`MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE`** (default `"6"`) — the most lists the scan touches in
+  one sync cycle. At 6 the scan adds at most ~6 subrequests, and only on "calm" cycles (when no
+  delta baseline is still draining), so a cycle stays well under 50 regardless of roster size. A
+  large roster is just covered a few lists at a time, oldest-first, over several cycles. **On the
+  Workers Paid plan** (1,000-subrequest ceiling) you can raise this — up to your list count — to
+  refresh the whole roster every cycle for snappier off-device freshness.
+- **`MY_DAY_SCAN_EVERY_N_CYCLES`** (default `"4"`) — how stale a list's cached My Day data may
+  get before the scan re-reads it, in sync cycles (`× DELTA_SYNC_INTERVAL_MIN` ≈ hourly at the
+  defaults). Raise it to scan less often (cheaper, staler); lower for fresher data at higher cost.
+
+Note: changes you make **through this server** (`add_to_my_day` / `remove_from_my_day`) update
+the cache instantly via write-through — the scan only catches My Day changes made in **other** To
+Do clients. Right after deploy (or a re-baseline), `list_my_day_tasks` may return `count: 0` with
+`stale: true` until the first scan completes (within a cycle or two).
+
 **Timezone.** `My Day` membership is a local calendar date. When you call a My Day tool
 without an explicit `date`, "today" is computed in the Worker's configured **`TIMEZONE`**
 (an IANA name like `America/New_York`), **not UTC** — so set `TIMEZONE` to your own zone,

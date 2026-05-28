@@ -65,12 +65,16 @@
     // to avoid doubling per-cycle requests. Default 4 ≈ hourly at the 15-min
     // base. Tune UP if usage is low; DOWN for fresher off-device My Day membership.
     "MY_DAY_SCAN_EVERY_N_CYCLES": "4",
-    // Max lists the My Day scan touches per cycle (one Substrate GET each),
-    // oldest-first with rotation across cycles. Small by default so the scan
-    // stays well under the Workers free-tier 50-subrequest/request ceiling even
-    // on a large roster; the full roster is still covered over a few cycles.
-    // Raise it on the Workers Paid plan (1000 ceiling) to scan more — or the
-    // whole roster — per cycle for fresher off-device My Day membership.
+    // Max lists the background My Day scan touches per cycle — one Substrate GET
+    // each, oldest-first, rotating across cycles. WHY IT MATTERS: Cloudflare's
+    // free tier caps a Worker at 50 subrequests/request and delta sync already
+    // uses up to ~41, so the scan must stay small or a cycle would blow the
+    // ceiling. At the default 6 (and running only on calm cycles) you stay safely
+    // under 50 no matter how many lists you have — a big roster is just covered a
+    // few lists at a time over several cycles.
+    //   FREE PLAN: leave this at "6".
+    //   PAID PLAN (1000-subrequest ceiling): raise it — up to your list count —
+    //   to refresh the whole roster every cycle for fresher off-device My Day.
     "MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE": "6"
   },
 

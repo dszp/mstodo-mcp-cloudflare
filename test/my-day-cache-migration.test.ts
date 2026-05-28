@@ -258,6 +258,19 @@ describe("getMyDayScanState", () => {
       expect(state).toEqual({ last_scan_at_ms: 7000, status: "idle", last_error: null });
     });
   });
+
+  it("reports null last_scan_at_ms + 'partial' when a list has only ever errored", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM sync_state WHERE resource LIKE 'myday:%'");
+      // last_synced_at NULL (never a successful scan), status error → the agent
+      // treats null last_scan_at_ms as stale=true, the conservative signal.
+      ctx.storage.sql.exec(
+        "INSERT INTO sync_state (resource, last_synced_at, status, last_error) VALUES ('myday:A', NULL, 'error', 'boom')",
+      );
+      const state = await instance.getMyDayScanState();
+      expect(state).toEqual({ last_scan_at_ms: null, status: "partial", last_error: "boom" });
+    });
+  });
 });
 
 describe("selectDueScanLists", () => {
