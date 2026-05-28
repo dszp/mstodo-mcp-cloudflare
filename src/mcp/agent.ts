@@ -3220,6 +3220,21 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             CommittedDay: day,
             PostponedDay: null,
           });
+          // Write-through into the cache so list_my_day_tasks reflects this add
+          // immediately, without waiting for the next background scan. Mirrors
+          // whatever Substrate echoed back. committed_order is only written if
+          // Substrate actually returned one (don't clobber a scan-set value with
+          // null when this tool didn't set it — setting CommittedOrder belongs to
+          // the reorder tooling, not here).
+          const myDayPatch: Parameters<TodoIndex["updateMyDayFields"]>[1] = {
+            committed_day: task.CommittedDay ? task.CommittedDay.slice(0, 10) : day,
+            postponed_day: task.PostponedDay ? task.PostponedDay.slice(0, 10) : null,
+            order_datetime: task.OrderDateTime ?? null,
+          };
+          if (task.CommittedOrder !== undefined) {
+            myDayPatch.committed_order = task.CommittedOrder ?? null;
+          }
+          await this.#index().updateMyDayFields(task_id, myDayPatch);
           const committed_day = committedDatePart(task.CommittedDay);
           return {
             content: [
@@ -3268,6 +3283,15 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             });
           }
           const task = await sub.patchTask(list_id, task_id, { CommittedDay: null });
+          // Write-through: drop My Day membership from the cache immediately.
+          // order_datetime stays (source-list manual order is independent of My
+          // Day). Honor whatever PostponedDay Substrate echoed (the app sets
+          // PostponedDay=today on removal; mirror it if present, else null).
+          await this.#index().updateMyDayFields(task_id, {
+            committed_day: null,
+            committed_order: null,
+            postponed_day: task.PostponedDay ? task.PostponedDay.slice(0, 10) : null,
+          });
           const committed_day = committedDatePart(task.CommittedDay);
           return {
             content: [
