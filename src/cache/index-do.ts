@@ -9,8 +9,11 @@ import {
   SCOPES,
   SUBSTRATE_SCOPES,
   TokenExchangeError,
+  loadIdentity,
+  myDayEnabled,
   type StoredTokens,
 } from "../auth/microsoft";
+import { SubstrateClient, SubstrateError } from "../graph/substrate-client";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import { followToTerminal, type DeltaRow } from "../graph/delta";
 import { encodeCursor, decodeCursor } from "../util/cursor";
@@ -37,6 +40,19 @@ import { shouldSkipSync } from "../config/sync-policy";
 // Token refresh (Task 4) + resumable alarm-driven delta sync (Task 5) are in
 // place; the full query()/search() filter surface + keyset pagination land in
 // Task 6.
+
+// Age-based scan gate. True iff we've never scanned, or the last scan completed
+// at least `windowMs` ago. Persistent state (the sync_state "my_day_scan" row)
+// drives this, so a DO eviction doesn't trigger an immediate re-scan — only true
+// staleness does.
+export function isScanDue(
+  lastScanMs: number | null,
+  windowMs: number,
+  nowMs: number = Date.now(),
+): boolean {
+  if (lastScanMs === null) return true;
+  return nowMs - lastScanMs >= windowMs;
+}
 
 // Precomputed UPSERT statement (all columns; update every non-key column on
 // task_id conflict). The AFTER INSERT/UPDATE triggers keep tasks_fts in sync.
@@ -721,6 +737,16 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       if (skip(l.list_id)) this.#purgeSkippedList(l.list_id);
     }
 
+    // Background My Day Substrate scan, age-gated against the configured window.
+    // Reads the persisted last-scan time so DO evictions don't trigger immediate
+    // re-scans; only genuine staleness does.
+    const { last_scan_at_ms } = this.getMyDayScanState();
+    if (isScanDue(last_scan_at_ms, this.#myDayScanWindowMs())) {
+      await this.#runMyDaySubstrateScan().catch((e) =>
+        log.warn("my_day_scan_failed", { error: String(e) }),
+      );
+    }
+
     // 3. Per-list task delta, prioritizing unfinished work, skipping no_sync lists.
     let remaining = maxTaskPages;
     for (const listId of this.#listIdsByPriority()) {
@@ -914,8 +940,92 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       .map((k) => k.list_id);
   }
 
+  // Background My Day Substrate scan. One sequential listFolderTasks per roster
+  // list (EXO MailboxConcurrency forbids parallel), upserting the four
+  // Substrate-only fields onto existing tasks rows. Tasks not yet in the cache
+  // are ignored (updateMyDayFields is a no-op on a missing task_id; the next
+  // Graph delta creates the row, the next scan fills the fields). Caller gates
+  // by isScanDue() so this runs at most once per window. Errors isolate per
+  // folder. A my_day_unavailable / SubstrateError 403 (denied/latched scope)
+  // aborts the scan cleanly without disturbing the rest of runSyncCycle.
+  async #runMyDaySubstrateScan(): Promise<void> {
+    if (!myDayEnabled(this.env)) return;
+    const ident = await loadIdentity(this.env);
+    const sub = new SubstrateClient(
+      {
+        getSubstrateAccessToken: () => this.getSubstrateAccessToken(),
+        forceSubstrateRefresh: () => this.forceSubstrateRefresh(),
+      },
+      ident?.anchorMailbox ?? null,
+    );
+
+    const lists = this.listLists();
+    let folders_scanned = 0;
+    let folders_errored = 0;
+    let last_error: string | null = null;
+
+    for (const l of lists) {
+      try {
+        const folderTasks = await sub.listFolderTasks(l.list_id);
+        folders_scanned += 1;
+        for (const t of folderTasks) {
+          if (!t.Id) continue;
+          this.updateMyDayFields(t.Id, {
+            committed_day: t.CommittedDay ? t.CommittedDay.slice(0, 10) : null,
+            committed_order: t.CommittedOrder ?? null,
+            order_datetime: t.OrderDateTime ?? null,
+            postponed_day: t.PostponedDay ? t.PostponedDay.slice(0, 10) : null,
+          });
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message.includes("my_day_unavailable")) {
+          this.#recordMyDayScan({ status: "unavailable", last_error: e.message });
+          return;
+        }
+        if (e instanceof SubstrateError && e.status === 403) {
+          this.markMyDayUnavailable();
+          this.#recordMyDayScan({ status: "unavailable", last_error: e.detail ?? "403" });
+          return;
+        }
+        folders_errored += 1;
+        last_error = e instanceof Error ? e.message : String(e);
+        log.warn("my_day_scan_folder_failed", { list_id: l.list_id, error: last_error });
+      }
+    }
+
+    this.#recordMyDayScan({
+      status: folders_errored === 0 ? "idle" : "partial",
+      last_error,
+    });
+    log.info("my_day_scan_complete", { folders_scanned, folders_errored, lists: lists.length });
+  }
+
+  #recordMyDayScan(args: { status: string; last_error: string | null }): void {
+    this.sql.exec(
+      `INSERT INTO sync_state (resource, last_synced_at, status, last_error)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(resource) DO UPDATE SET
+         last_synced_at = excluded.last_synced_at,
+         status = excluded.status,
+         last_error = excluded.last_error`,
+      "my_day_scan",
+      Date.now(),
+      args.status,
+      args.last_error,
+    );
+  }
+
   #intervalMs(): number {
     const min = Number(this.env.DELTA_SYNC_INTERVAL_MIN);
     return (Number.isFinite(min) && min > 0 ? min : 15) * 60_000;
+  }
+
+  #myDayScanEveryNCycles(): number {
+    const n = Number(this.env.MY_DAY_SCAN_EVERY_N_CYCLES);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 4;
+  }
+
+  #myDayScanWindowMs(): number {
+    return this.#intervalMs() * this.#myDayScanEveryNCycles();
   }
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import type { TodoIndex } from "../src/cache/index-do";
+import { isScanDue } from "../src/cache/index-do";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -224,5 +225,21 @@ describe("getMyDayScanState", () => {
       const state = await instance.getMyDayScanState();
       expect(state).toEqual({ last_scan_at_ms: null, status: null, last_error: null });
     });
+  });
+});
+
+describe("isScanDue", () => {
+  it("is true when there is no record of a prior scan", () => {
+    expect(isScanDue(null, 60 * 60_000, 100)).toBe(true);
+  });
+  it("is true when the last scan is at least one window old", () => {
+    const window = 60 * 60_000;
+    expect(isScanDue(0, window, window)).toBe(true);
+    expect(isScanDue(0, window, window + 1)).toBe(true);
+  });
+  it("is false within the window", () => {
+    const window = 60 * 60_000;
+    expect(isScanDue(100, window, 100 + window - 1)).toBe(false);
+    expect(isScanDue(100, window, 100)).toBe(false);
   });
 });

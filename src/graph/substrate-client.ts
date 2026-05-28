@@ -87,6 +87,9 @@ export const SubstrateTaskSchema = z
     // field reparentTask passes through to preserve ordering. Higher = nearer
     // the top of the list in the To Do UI's manual sort.
     OrderDateTime: z.string().nullable().optional(),
+    // My Day drag-to-reorder order. Distinct from OrderDateTime (list manual
+    // order). Cached as committed_order; the read path sorts My Day by it.
+    CommittedOrder: z.string().nullable().optional(),
     // Detail fields the My Day tools project. Status/Importance are free strings
     // (To Do sends e.g. "NotStarted"/"Completed", "Low"/"Normal"/"High") — we
     // don't pin the enum so an unseen value still rides through.

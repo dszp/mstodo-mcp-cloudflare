@@ -58,7 +58,13 @@
     // Cross-server attachment download (mint_download_link + the public /download
     // endpoint). ON by default; set to "false" to disable both and shrink the
     // attack surface for deployments that don't need the server-to-server pull.
-    "ENABLE_DOWNLOAD_LINKS": "true"
+    "ENABLE_DOWNLOAD_LINKS": "true",
+    // Background My Day Substrate scan window: the scan runs at most once per
+    // (MY_DAY_SCAN_EVERY_N_CYCLES × DELTA_SYNC_INTERVAL_MIN) minutes. Substrate
+    // has no delta, so the scan is a full per-folder enumeration — keep this >1
+    // to avoid doubling per-cycle requests. Default 4 ≈ hourly at the 15-min
+    // base. Tune UP if usage is low; DOWN for fresher off-device My Day membership.
+    "MY_DAY_SCAN_EVERY_N_CYCLES": "4"
   },
 
   "observability": { "enabled": true }
