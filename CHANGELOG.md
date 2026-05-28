@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`update_task` can backdate a task's completion** via a new optional `completed_date` (ISO 8601).
+  Marks the task completed as of that date instead of "now" — for a task you finished earlier but
+  forgot to check off, or to correct a completion date stamped on a prior complete-now. It implies
+  `status: completed` (Graph only retains a `completedDateTime` while completed) unless `status` is
+  passed explicitly. Because Graph honors `completedDateTime` only on the `notStarted → completed`
+  transition, the tool looks the task up first and, if it's already completed, resets it to
+  `notStarted` before re-completing so the date actually sticks. **Recurring tasks are refused**
+  (`recurring_completion_unsupported`) — completing one advances it to the next occurrence, so it
+  can't hold a fixed completion date. Completion is stored at **date granularity** (any time-of-day
+  is dropped to midnight UTC). The normal complete-now path (`status: completed`, no date) is
+  unchanged.
+
 ## [0.7.0] – 2026-05-27
 
 ### Added

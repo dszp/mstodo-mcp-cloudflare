@@ -700,6 +700,19 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .nullable()
             .optional()
             .describe("New start date/time (ISO 8601, UTC). Pass null to clear."),
+          completed_date: z
+            .string()
+            .nullable()
+            .optional()
+            .describe(
+              "Backdate a task's completion. ISO 8601 date (e.g. '2026-05-25'); To Do stores completion at " +
+                "DATE granularity, so any time-of-day is dropped (midnight UTC). Marks the task completed as of " +
+                "that date — works whether the task is not-yet-done OR already completed (the server forces the " +
+                "completion to re-stamp). For a normal complete-now, omit this and just set status:'completed'. " +
+                "Implies status:'completed' unless you pass status explicitly. NOT supported on recurring tasks " +
+                "(completing one advances it to the next occurrence) — returns recurring_completion_unsupported. " +
+                "Pass null to clear the completion date.",
+            ),
           importance: z
             .enum(["low", "normal", "high"])
             .optional()
@@ -732,6 +745,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         due,
         reminder,
         start,
+        completed_date,
         importance,
         status,
         isReminderOn,
@@ -756,15 +770,63 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           if (start !== undefined)
             graphBody.startDateTime =
               start !== null ? { dateTime: start, timeZone: "UTC" } : null;
+          if (completed_date !== undefined) {
+            graphBody.completedDateTime =
+              completed_date !== null ? { dateTime: completed_date, timeZone: "UTC" } : null;
+            // Graph only retains completedDateTime while status is 'completed'
+            // (per the todoTask update docs). Imply it for a backdate so the
+            // date sticks, unless the caller set status explicitly.
+            if (completed_date !== null && status === undefined) graphBody.status = "completed";
+          }
           if (importance !== undefined) graphBody.importance = importance;
           if (status !== undefined) graphBody.status = status;
           if (isReminderOn !== undefined) graphBody.isReminderOn = isReminderOn;
           if (categories !== undefined) graphBody.categories = categories;
           if (recurrence !== undefined) graphBody.recurrence = recurrence;
 
+          // Backdating a completion needs a real notStarted->completed
+          // transition: Graph ignores completedDateTime on a re-PATCH of an
+          // already-completed task, and a recurring task can't hold one at all
+          // (completing advances it to the next occurrence). So when a concrete
+          // completed_date is given we look the task up first, refuse recurring,
+          // and reset an already-completed task to notStarted so the PATCH below
+          // transitions it afresh and the date sticks.
+          let mainIfMatch = if_match;
+          if (completed_date !== undefined && completed_date !== null) {
+            let current;
+            try {
+              current = await graph.getJson(url, TodoTaskSchema);
+            } catch (e) {
+              if (
+                e instanceof GraphError &&
+                (e.status === 404 ||
+                  (e.status === 400 && getGraphInnerErrorCode(e.detail) === "ErrorInvalidIdMalformed"))
+              ) {
+                return errResponse("task_not_found", { list_id, task_id });
+              }
+              throw e;
+            }
+            if (current.recurrence != null) {
+              return errResponse("recurring_completion_unsupported", {
+                list_id,
+                task_id,
+                hint: "Completing a recurring task advances it to the next occurrence, so To Do can't keep a fixed completion date. Remove the recurrence first, or complete it without completed_date.",
+              });
+            }
+            if ((current.status ?? "") === "completed") {
+              // Already completed: reset to notStarted so the PATCH below is a
+              // genuine transition (otherwise completedDateTime is ignored).
+              await graph.patchJson(url, { status: "notStarted" }, TodoTaskSchema, {
+                ifMatch: if_match,
+              });
+              // The reset consumed the caller's ETag; don't reuse a stale one.
+              mainIfMatch = undefined;
+            }
+          }
+
           try {
             const task = await graph.patchJson(url, graphBody, TodoTaskSchema, {
-              ifMatch: if_match,
+              ifMatch: mainIfMatch,
             });
             await this.#indexUpsertTask(task, list_id);
             const response: Record<string, unknown> = {
