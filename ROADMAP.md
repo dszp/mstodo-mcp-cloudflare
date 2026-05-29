@@ -125,9 +125,13 @@ keep it a genuine toggle, for two distinct reasons a user might disable it: (1) 
 stands up a public webhook receiver + renewal cron, so a deployment that doesn't want
 that surface can stay timer-only (this is the argument for a conservative OFF default
 if you weight attack surface over freshness); and (2) Graph subscriptions draw on a
-**shared per-tenant budget** (100 per app+tenant, 1,000 per tenant) — a tenant already
-spending that budget on other integrations must be able to opt our subscription
-creation out, independent of everything else the server does.
+**tenant-wide budget shared across every app in the tenant** — `todoTask` itself has no
+documented per-resource cap (its row in Graph's supported-resources table lists no quota,
+unlike `user`/`group` at 100 per app+tenant / 1,000 per tenant, or the Teams resources),
+but a tenant already spending its subscription budget on other integrations must be able to
+opt our subscription creation out, independent of everything else the server does. (If any
+limit is hit, Graph returns `403` and `#createSubscriptionFor` logs `subscription_create_failed`
+and falls back to timer-only for that list.)
 
 **This is a documented public Graph capability, not first-party-only.** Graph
 exposes change-notification subscriptions on

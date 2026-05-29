@@ -1023,18 +1023,59 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   // immediate ensureSyncing() after token storage for a prompter re-baseline,
   // and whether multi-account keying changes this single-instance assumption.
   async resetIdentity(): Promise<void> {
-    this.#identityGeneration++; // H4: invalidate any in-flight token refresh
+    this.#identityGeneration++; // H4: invalidate any in-flight token refresh (first)
     this.#refreshInFlight = {};
     this.#refreshChain = Promise.resolve();
+    // Best-effort: delete THIS identity's Graph subscriptions before we drop the
+    // records (which would lose their ids). The outgoing owner's token is still
+    // in KV at this point — the caller wipes it AFTER this DO reset — so the
+    // deletes can authenticate. After the generation bump getAccessToken still
+    // serves a fresh token but refuses to refresh a stale one, so teardown
+    // cleans up when it safely can and otherwise leaves the orphans to lapse
+    // (≤2.94d). It never blocks or fails the wipe below.
+    await this.#teardownAllSubscriptions();
     this.#substrateToken = null;
     this.#substrateUnavailable = false;
     this.sql.exec("DELETE FROM tasks"); // tasks_fts cascades via AFTER DELETE trigger
     this.sql.exec("DELETE FROM lists");
     this.sql.exec("DELETE FROM sync_state");
-    // Drop subscription records for the prior identity; the Graph-side
-    // subscriptions are torn down on the next reconcile (orphan path).
     this.sql.exec("DELETE FROM subscriptions");
     await this.ctx.storage.deleteAlarm();
+  }
+
+  // Delete every stored Graph subscription for the current identity (best effort).
+  // Used by resetIdentity on an owner change so we don't strand orphans pointing
+  // at our /webhook that we can no longer address by id. Bounded: per-subscription
+  // deletes swallow their own errors, and the loop stops the moment auth is no
+  // longer usable (so a dead outgoing token isn't hammered N times).
+  async #teardownAllSubscriptions(): Promise<void> {
+    const records = this.getSubscriptions();
+    if (records.length === 0) return;
+    const graph = new GraphClient(this);
+    let deleted = 0;
+    for (const rec of records) {
+      try {
+        await deleteSubscription(graph, rec.subscription_id);
+        deleted += 1;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log.warn("subscription_teardown_failed", {
+          subscription_id: rec.subscription_id,
+          error: msg,
+        });
+        // Auth no longer usable (revoked/expired outgoing token, or the
+        // generation bump blocked a refresh) → stop; the rest lapse on their own.
+        // A 404 (already gone) is not auth, so keep going.
+        if (
+          msg.includes("identity_changed") ||
+          msg.includes("not_authenticated") ||
+          (e instanceof GraphError && (e.status === 401 || e.status === 403))
+        ) {
+          break;
+        }
+      }
+    }
+    if (deleted > 0) log.info("subscription_teardown", { deleted, total: records.length });
   }
 
   // Run one budget-bounded cycle: roster first (drives which lists to sync),

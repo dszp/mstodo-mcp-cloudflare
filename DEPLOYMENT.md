@@ -160,9 +160,11 @@ Edit `wrangler.jsonc` and fill in:
   the next delta cycle. **No new permission/consent** — it rides the existing delegated
   `Tasks.ReadWrite` scope. Delta polling stays as the mandatory backstop (Graph has no
   missed-notification safety net for `todoTask`). Set to `"false"` to stay timer-only — e.g. if you
-  prefer not to expose a public webhook, or the tenant's shared Graph subscription budget (100 per
-  app+tenant) is spoken for. Requires a reachable `SERVICE_BASE_URL`; without one, subscription
-  creation no-ops (logged) and the server falls back to timer-only automatically.
+  prefer not to expose a public webhook, or the tenant-wide Graph subscription budget (shared across
+  all apps in the tenant) is spoken for. (`todoTask` has no documented per-resource cap — one
+  subscription per list, e.g. ~38 here; if any tenant limit is ever hit, Graph returns `403` and
+  that list quietly falls back to timer-only.) Requires a reachable `SERVICE_BASE_URL`; without one,
+  subscription creation no-ops (logged) and the server falls back to timer-only automatically.
 
 `wrangler.jsonc` is **gitignored** (it holds account-specific IDs). The committed
 `wrangler.example.jsonc` is what the test pool and CI read, so `npm test` works

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] – 2026-05-29
+
 ### Added
 - **Graph change-notification subscriptions (ROADMAP §4), gated by `ENABLE_TASK_SUBSCRIPTIONS`
   (default ON).** A public `POST /webhook` receiver plus per-list subscriptions on
@@ -24,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `committed_order`, …) — cost scales with edit frequency, not list size — with the periodic
   budgeted scan retained as backstop. The notification path is strictly read-only toward Microsoft
   (Graph delta GET + Substrate GET), so it can never itself emit a change notification (no loop).
+- **`MAX_SUBSCRIPTION_OPS_PER_CYCLE` var** (default 2, free-tier safe) bounds subscription
+  create/renew/delete Graph calls per cycle, mirroring the My Day scan caps. Raise it on paid
+  deployments (1000-subrequest ceiling) for faster initial coverage and renewal headroom.
+
+### Changed
+- **Owner-change cleanup now deletes the Graph subscriptions before wiping their records.**
+  `resetIdentity()` best-effort `DELETE`s each subscription using the outgoing owner's still-present
+  token (bounded; stops if auth is no longer usable) instead of stranding orphans that linger until
+  they expire (~2.94d). Failures never block the fail-closed identity wipe.
 
 ## [0.9.0] – 2026-05-28
 

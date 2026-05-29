@@ -96,6 +96,24 @@ describe("reconcileSubscriptions", () => {
     expect((await off.getSubscriptions()).length).toBe(0);
   });
 
+  it("resetIdentity deletes the Graph subscriptions before wiping records", async () => {
+    await signIn();
+    const stub = indexStub("recon-reset");
+    const now = Date.now();
+    await stub.putSubscription({
+      subscription_id: "S1", list_id: "L1", client_state: "cs", expiration_ms: now + 3_600_000, created_at_ms: now,
+    });
+    await stub.putSubscription({
+      subscription_id: "S2", list_id: "L2", client_state: "cs", expiration_ms: now + 3_600_000, created_at_ms: now,
+    });
+    const calls = installGraph();
+    await stub.resetIdentity();
+    const deletes = calls.filter((c) => c.method === "DELETE").map((c) => c.url);
+    expect(deletes.some((u) => u.includes("/subscriptions/S1"))).toBe(true);
+    expect(deletes.some((u) => u.includes("/subscriptions/S2"))).toBe(true);
+    expect(await stub.getSubscriptions()).toEqual([]);
+  });
+
   it("renewSubscriptions PATCHes only records within the renew margin", async () => {
     await signIn();
     const stub = indexStub("recon-4");
