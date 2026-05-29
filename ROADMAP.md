@@ -98,6 +98,21 @@ deferred** until the §1 API exists:
 
 ## 4. Graph change-notification subscriptions to augment delta polling (toggleable)
 
+> **Status: SHIPPED on `feat/task-subscriptions` 2026-05-29 (gate `ENABLE_TASK_SUBSCRIPTIONS`, default ON).**
+> `src/subscriptions/{gate,manager,webhook-handler}.ts` + a `subscriptions` SQLite table (migration v2)
+> + `TodoIndex.onChangeNotification`/`reconcileSubscriptions`/`renewSubscriptions`; `POST /webhook` wired
+> in `index.ts` after `/download`. Reconcile + renew run in `runSyncCycle`'s calm-cycle block,
+> **budgeted** by `MAX_SUBSCRIPTION_OPS_PER_CYCLE`. Verified against current docs (2026-05-29):
+> `todoTask` notifications are **basic-only** (not on the rich/resource-data list) and **global-cloud-only**,
+> max lifetime **4,230 min**, webhook must ack within **3 s**. **§4a Phase 2 landed here too:** a notification
+> triggers a *targeted* single-task Substrate `getTask` to refresh just the changed task's My Day fields
+> (mark-scan-due fallback for a not-yet-cached task; periodic budgeted scan retained as backstop) — a
+> full-list scan-on-notification remains a future option if per-task proves insufficient. The notification
+> path is strictly read-only toward Microsoft, so it cannot emit a notification (no feedback loop).
+> **OPEN, confirm after deploy:** does moving a task *within* My Day order (CommittedOrder-only change) bump
+> Graph's `lastModifiedDateTime` and thus fire the webhook? Only CommittedDay was verified to (§4a). If it
+> doesn't, within-My-Day reordering is caught only by the periodic scan regardless.
+
 Drive *when* delta sync runs from Microsoft Graph push notifications instead of
 only the timer, collapsing typical update lag from "next cycle interval" to
 Graph-to-webhook latency (sub-second) — i.e. near-instant updates like the native

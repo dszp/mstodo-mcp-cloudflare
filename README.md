@@ -93,6 +93,16 @@ built-in full-text search engine). Cross-list `query_tasks`, `search_tasks`, and
 aggregation tools read from this local mirror rather than re-walking Graph on every
 call; a `*/15` cron keeps it synced and an owner-identity gate keeps it private.
 
+By default the mirror also subscribes to **Graph change notifications** (one per list), so an edit
+in any To Do client lands in the cache within ~2 minutes — near-instant, like the native apps —
+instead of waiting for the next timer cycle. This is a *trigger* for delta sync, not a replacement:
+the timer cycle stays as the backstop (Graph has no missed-notification guarantee for tasks). It
+rides the existing `Tasks.ReadWrite` scope (no extra consent), needs a reachable `SERVICE_BASE_URL`
+(Graph posts to `${SERVICE_BASE_URL}/webhook`), and is toggleable with `ENABLE_TASK_SUBSCRIPTIONS`
+(`"false"` ⇒ timer-only, no public webhook). A notification also refreshes just the changed task's
+My Day fields via one targeted Substrate read — the webhook path never writes back to Microsoft, so
+it can't loop.
+
 Small, slowly-changing state — your OAuth tokens, the owner-identity record, and the
 config blobs below — lives in Cloudflare **KV (a key-value store)**. The large,
 frequently-queried task corpus lives in the Durable Object's SQLite, not KV.

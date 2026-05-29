@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Graph change-notification subscriptions (ROADMAP §4), gated by `ENABLE_TASK_SUBSCRIPTIONS`
+  (default ON).** A public `POST /webhook` receiver plus per-list subscriptions on
+  `/me/todo/lists/{id}/tasks` drive *when* delta sync runs from Microsoft Graph push notifications
+  (sub-2-minute freshness) instead of only the timer — near-instant updates like the native To Do
+  apps. Rides the existing delegated `Tasks.ReadWrite` scope (**no new consent**); requires a
+  reachable https `SERVICE_BASE_URL` (Graph validates the notificationUrl at creation). The
+  singleton `TodoIndex` owns subscription create/renew/delete, reconciled against the live list
+  roster inside the sync cycle and **budgeted per cycle** (`MAX_SUBSCRIPTION_OPS_PER_CYCLE`) so a
+  large roster is covered over a few cycles rather than one burst. **Delta polling remains the
+  mandatory backstop** — Graph has no missed-notification safety net for `todoTask`, so the timer
+  cycle stays in place (it can simply run less often).
+- **My Day stays fresh off notifications.** A notification triggers a *targeted* single-task
+  Substrate `getTask` to refresh just the changed task's My Day fields (`committed_day`,
+  `committed_order`, …) — cost scales with edit frequency, not list size — with the periodic
+  budgeted scan retained as backstop. The notification path is strictly read-only toward Microsoft
+  (Graph delta GET + Substrate GET), so it can never itself emit a change notification (no loop).
+
 ## [0.9.0] – 2026-05-28
 
 ### Added

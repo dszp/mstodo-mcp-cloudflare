@@ -151,7 +151,18 @@ Edit `wrangler.jsonc` and fill in:
 - `vars.SERVICE_BASE_URL` — the public origin this Worker is reachable at, used to build
   web upload links. Set it to your `https://mstodo-mcp.<your-subdomain>.workers.dev` (or
   custom domain). It ships as a placeholder; if you don't know the URL yet, deploy once
-  (step 5), then set it and re-deploy. Only needed if you use the web upload feature.
+  (step 5), then set it and re-deploy. Needed for the web upload feature **and** for Graph
+  change-notification subscriptions (below) — Graph validates the `notificationUrl` it derives
+  (`${SERVICE_BASE_URL}/webhook`) at subscription-creation time, so it must be a reachable https URL.
+- `vars.ENABLE_TASK_SUBSCRIPTIONS` — **ON by default.** Graph change-notification subscriptions
+  (ROADMAP §4): the server stands up a public `POST /webhook` and creates one Graph subscription per
+  list so task/My-Day edits land in ~2 minutes (Graph's `todoTask` latency) instead of waiting for
+  the next delta cycle. **No new permission/consent** — it rides the existing delegated
+  `Tasks.ReadWrite` scope. Delta polling stays as the mandatory backstop (Graph has no
+  missed-notification safety net for `todoTask`). Set to `"false"` to stay timer-only — e.g. if you
+  prefer not to expose a public webhook, or the tenant's shared Graph subscription budget (100 per
+  app+tenant) is spoken for. Requires a reachable `SERVICE_BASE_URL`; without one, subscription
+  creation no-ops (logged) and the server falls back to timer-only automatically.
 
 `wrangler.jsonc` is **gitignored** (it holds account-specific IDs). The committed
 `wrangler.example.jsonc` is what the test pool and CI read, so `npm test` works

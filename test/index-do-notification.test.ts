@@ -125,11 +125,17 @@ describe("onChangeNotification", () => {
       const out = await inst.onChangeNotification([
         { subscriptionId: "SUB1", clientState: "good", changeType: "deleted", resourceId: "T1" },
       ]);
-      return { out, alarm: await state.storage.getAlarm() };
+      // Capture inside the DO context — after the block, the armed alarm fires
+      // and a normal cycle's My Day scan would add (unrelated) Substrate GETs.
+      return {
+        out,
+        alarm: await state.storage.getAlarm(),
+        substrateCalls: calls.filter((c) => c.url.includes("substrate.office.com")).length,
+      };
     });
     expect(r.out.accepted).toBe(1);
     expect(r.alarm).not.toBeNull();
-    expect(calls.filter((c) => c.url.includes("substrate.office.com"))).toHaveLength(0);
+    expect(r.substrateCalls).toBe(0);
   });
 
   it("rejects a clientState mismatch and does nothing", async () => {
