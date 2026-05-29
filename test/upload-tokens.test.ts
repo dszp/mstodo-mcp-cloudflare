@@ -30,10 +30,18 @@ describe("upload capability tokens", () => {
   });
 
   it("mints an opaque id that does not encode the scope", async () => {
-    const { token } = await createUploadCapability(env, SCOPE);
+    // Use realistic long, opaque ids (like real Graph ids). The 43-char random
+    // base64url token cannot contain a 50-char id, so the "doesn't leak the
+    // scope" check is deterministic — short ids like "L1"/"T1" could appear as a
+    // coincidental substring of the random id and false-fail ~1-2% of runs.
+    const scope = {
+      list_id: "AAMkListId_0123456789abcdefABCDEF_unique_list_marker",
+      task_id: "AAMkTaskId_0123456789abcdefABCDEF_unique_task_marker",
+    };
+    const { token } = await createUploadCapability(env, scope);
     // The link id is random — it must not leak the list/task it targets.
-    expect(token).not.toContain("L1");
-    expect(token).not.toContain("T1");
+    expect(token).not.toContain(scope.list_id);
+    expect(token).not.toContain(scope.task_id);
   });
 
   it("rejects an unknown id as link_invalid", async () => {
