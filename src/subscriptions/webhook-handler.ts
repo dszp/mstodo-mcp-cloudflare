@@ -71,7 +71,7 @@ export async function handleWebhook(
     ctx.waitUntil(
       ownerIndex(env)
         .onChangeNotification(items)
-        .then((r) => log.info("webhook_processed", r))
+        .then((r) => log.info("webhook_processed", { accepted: r.accepted, rejected: r.rejected }))
         .catch((e) => log.warn("webhook_process_failed", { error: String(e) })),
     );
   }

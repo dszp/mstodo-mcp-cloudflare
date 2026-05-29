@@ -5,6 +5,7 @@ import { OWNER_DO_NAME } from "./cache/sql";
 import AuthHandler from "./auth/handler";
 import { handleUpload } from "./upload/handler";
 import { handleDownload } from "./upload/download-handler";
+import { handleWebhook } from "./subscriptions/webhook-handler";
 import { VERSION } from "./version";
 
 export { MSToDoMCP, TodoIndex };
@@ -44,6 +45,12 @@ export default {
     // capability token minted by mint_download_link.
     const downloadRes = await handleDownload(req, env);
     if (downloadRes) return downloadRes;
+
+    // Public (non-OAuth) Graph change-notification receiver (ROADMAP §4). Same
+    // null-for-other-paths contract; needs ctx for the deferred (post-202) DO
+    // call, so it's the one public handler that takes ctx.
+    const webhookRes = await handleWebhook(req, env, ctx);
+    if (webhookRes) return webhookRes;
 
     return oauthProvider.fetch(req, env, ctx);
   },
