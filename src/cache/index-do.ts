@@ -1094,6 +1094,16 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     //    free-tier subrequest ceiling regardless of roster size. Runs last so
     //    the gate sees the cycle's final draining state.
     if (!anyOutstanding) {
+      // Keep Graph subscriptions tracking the live roster, and renew any nearing
+      // expiry. Budgeted (MAX_SUBSCRIPTION_OPS_PER_CYCLE) + gated; failures are
+      // swallowed so a Graph hiccup never stalls the delta cycle. Runs on calm
+      // cycles only so its Graph calls don't stack on a baseline page-burst.
+      await this.reconcileSubscriptions().catch((e) =>
+        log.warn("subscription_reconcile_failed", { error: String(e) }),
+      );
+      await this.renewSubscriptions().catch((e) =>
+        log.warn("subscription_renew_batch_failed", { error: String(e) }),
+      );
       await this.#runMyDayScanBatch(skip).catch((e) =>
         log.warn("my_day_scan_failed", { error: String(e) }),
       );
