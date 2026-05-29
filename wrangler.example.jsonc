@@ -59,6 +59,13 @@
     // endpoint). ON by default; set to "false" to disable both and shrink the
     // attack surface for deployments that don't need the server-to-server pull.
     "ENABLE_DOWNLOAD_LINKS": "true",
+    // Graph change-notification subscriptions (ROADMAP §4): a public /webhook
+    // receiver + per-list subscribe/renew for ~2-min updates instead of waiting
+    // for the next delta cycle. ON by default; set "false" to stay timer-only
+    // (no public webhook surface, no per-tenant subscription budget use). Rides
+    // the existing delegated Tasks.ReadWrite scope (no new consent); needs a
+    // reachable https SERVICE_BASE_URL. Delta polling remains the backstop.
+    "ENABLE_TASK_SUBSCRIPTIONS": "true",
     // Background My Day Substrate scan window: the scan runs at most once per
     // (MY_DAY_SCAN_EVERY_N_CYCLES × DELTA_SYNC_INTERVAL_MIN) minutes. Substrate
     // has no delta, so the scan is a full per-folder enumeration — keep this >1
