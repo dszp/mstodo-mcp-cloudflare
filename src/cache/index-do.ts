@@ -32,6 +32,19 @@ import {
 import { applyMigrations } from "./migrations";
 import { loadListsConfig } from "../config/loader";
 import { shouldSkipSync } from "../config/sync-policy";
+import {
+  taskSubscriptionsEnabled,
+  webhookUrl,
+  SUBSCRIPTION_RENEW_MARGIN_MS,
+  MAX_SUBSCRIPTION_OPS_PER_CYCLE,
+} from "../subscriptions/gate";
+import {
+  createSubscription,
+  renewSubscription,
+  deleteSubscription,
+  newClientState,
+  desiredExpiration,
+} from "../subscriptions/manager";
 
 // Phase 5 — TodoIndex: singleton Durable Object, the single source of truth for
 // Microsoft To Do state. SQLite `tasks` (+ `tasks_fts` FTS5 mirror) + `lists`
@@ -480,6 +493,142 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
 
   deleteSubscriptionRecord(subscriptionId: string): void {
     this.sql.exec("DELETE FROM subscriptions WHERE subscription_id = ?", subscriptionId);
+  }
+
+  // -- Subscription reconciliation (ROADMAP §4) -----------------------------
+  // Bring Graph's subscriptions in line with the live, non-skipped roster, one
+  // bounded batch per cycle (free-tier safety). Tolerates per-op Graph failures
+  // (logged, retried next cycle). `opts` overrides are for tests only.
+  async reconcileSubscriptions(opts: { enabled?: boolean; now?: number } = {}): Promise<void> {
+    const enabled = opts.enabled ?? taskSubscriptionsEnabled(this.env);
+    const now = opts.now ?? Date.now();
+    const url = webhookUrl(this.env);
+
+    const records = this.getSubscriptions();
+
+    // Gate OFF (or no reachable webhook URL): tear our subscriptions down,
+    // budgeted, and create none.
+    if (!enabled || !url) {
+      const graph = new GraphClient(this);
+      let budget = MAX_SUBSCRIPTION_OPS_PER_CYCLE;
+      for (const rec of records) {
+        if (budget <= 0) break;
+        budget -= 1;
+        await this.#tearDownSubscription(graph, rec.subscription_id);
+      }
+      return;
+    }
+
+    // Which lists SHOULD have a subscription: the non-skipped roster.
+    const cfg = await loadListsConfig(this.env);
+    const rosterRows = this.listLists();
+    const wanted = new Set(
+      rosterRows
+        .filter((l) => !shouldSkipSync({ list_id: l.list_id, wellknown: l.wellknown }, cfg))
+        .map((l) => l.list_id),
+    );
+    const haveByList = new Map(records.map((r) => [r.list_id, r]));
+
+    const graph = new GraphClient(this);
+    let budget = MAX_SUBSCRIPTION_OPS_PER_CYCLE;
+
+    // 1. Delete records whose list is gone or now skipped.
+    for (const rec of records) {
+      if (budget <= 0) return;
+      if (!wanted.has(rec.list_id)) {
+        budget -= 1;
+        await this.#tearDownSubscription(graph, rec.subscription_id);
+      }
+    }
+
+    // 2. Create for wanted lists with no record. The per-cycle cap rotates
+    //    coverage over a few cycles for a large roster (free-tier safety).
+    for (const listId of wanted) {
+      if (budget <= 0) return;
+      if (haveByList.has(listId)) continue;
+      budget -= 1;
+      await this.#createSubscriptionFor(graph, listId, url, now);
+    }
+  }
+
+  // Renew records nearing expiry, budgeted. Called from the cycle alongside
+  // reconcile.
+  async renewSubscriptions(opts: { now?: number } = {}): Promise<void> {
+    if (!taskSubscriptionsEnabled(this.env)) return;
+    const now = opts.now ?? Date.now();
+    const graph = new GraphClient(this);
+    let budget = MAX_SUBSCRIPTION_OPS_PER_CYCLE;
+    const due = this.getSubscriptions()
+      .filter((r) => r.expiration_ms - now < SUBSCRIPTION_RENEW_MARGIN_MS)
+      .sort((a, b) => a.expiration_ms - b.expiration_ms);
+    for (const rec of due) {
+      if (budget <= 0) break;
+      budget -= 1;
+      try {
+        const next = desiredExpiration(now);
+        const { expirationDateTime } = await renewSubscription(graph, rec.subscription_id, next);
+        this.putSubscription({ ...rec, expiration_ms: Date.parse(expirationDateTime) });
+      } catch (e) {
+        // 404 → subscription already expired/gone on Graph's side; drop the
+        // record so reconcile recreates it. Other errors: leave for next cycle.
+        if (e instanceof GraphError && e.status === 404) {
+          this.deleteSubscriptionRecord(rec.subscription_id);
+        }
+        log.warn("subscription_renew_failed", {
+          subscription_id: rec.subscription_id,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  }
+
+  async #createSubscriptionFor(
+    graph: GraphClient,
+    listId: string,
+    notificationUrl: string,
+    now: number,
+  ): Promise<void> {
+    try {
+      const clientState = newClientState();
+      const { id, expirationDateTime } = await createSubscription(graph, {
+        listId,
+        notificationUrl,
+        clientState,
+        expirationDateTime: desiredExpiration(now),
+      });
+      this.putSubscription({
+        subscription_id: id,
+        list_id: listId,
+        client_state: clientState,
+        expiration_ms: Date.parse(expirationDateTime),
+        created_at_ms: now,
+      });
+      log.info("subscription_created", { list_id: listId, subscription_id: id });
+    } catch (e) {
+      // 403 = per-tenant subscription budget exhausted; 400/validation = webhook
+      // unreachable (e.g. local dev). Log and move on — the timer-driven cycle
+      // still keeps the cache fresh; reconcile retries next cycle.
+      log.warn("subscription_create_failed", {
+        list_id: listId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  async #tearDownSubscription(graph: GraphClient, subscriptionId: string): Promise<void> {
+    try {
+      await deleteSubscription(graph, subscriptionId);
+    } catch (e) {
+      // 404 → already gone on Graph's side; still drop our record.
+      if (!(e instanceof GraphError && e.status === 404)) {
+        log.warn("subscription_delete_failed", {
+          subscription_id: subscriptionId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return; // leave the record so we retry the delete next cycle
+      }
+    }
+    this.deleteSubscriptionRecord(subscriptionId);
   }
 
   // True once at least one full baseline of this list's tasks reached a
