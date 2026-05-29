@@ -66,6 +66,12 @@
     // the existing delegated Tasks.ReadWrite scope (no new consent); needs a
     // reachable https SERVICE_BASE_URL. Delta polling remains the backstop.
     "ENABLE_TASK_SUBSCRIPTIONS": "true",
+    // Max subscription create/renew/delete Graph ops per sync cycle (mirrors the
+    // My Day scan caps). FREE PLAN: leave at "2" — the calm-cycle subrequest
+    // envelope (delta + My Day scan + subscription ops) must stay under 50. PAID
+    // PLAN: raise it (up to your list count) for faster initial coverage and
+    // renewal headroom. Steady state is ~0 ops, so this only bounds the ramp.
+    "MAX_SUBSCRIPTION_OPS_PER_CYCLE": "2",
     // Background My Day Substrate scan window: the scan runs at most once per
     // (MY_DAY_SCAN_EVERY_N_CYCLES × DELTA_SYNC_INTERVAL_MIN) minutes. Substrate
     // has no delta, so the scan is a full per-folder enumeration — keep this >1

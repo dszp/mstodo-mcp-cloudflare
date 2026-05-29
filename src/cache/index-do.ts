@@ -36,7 +36,7 @@ import {
   taskSubscriptionsEnabled,
   webhookUrl,
   SUBSCRIPTION_RENEW_MARGIN_MS,
-  MAX_SUBSCRIPTION_OPS_PER_CYCLE,
+  maxSubscriptionOpsPerCycle,
 } from "../subscriptions/gate";
 import {
   createSubscription,
@@ -510,7 +510,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     // budgeted, and create none.
     if (!enabled || !url) {
       const graph = new GraphClient(this);
-      let budget = MAX_SUBSCRIPTION_OPS_PER_CYCLE;
+      let budget = maxSubscriptionOpsPerCycle(this.env);
       for (const rec of records) {
         if (budget <= 0) break;
         budget -= 1;
@@ -530,7 +530,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     const haveByList = new Map(records.map((r) => [r.list_id, r]));
 
     const graph = new GraphClient(this);
-    let budget = MAX_SUBSCRIPTION_OPS_PER_CYCLE;
+    let budget = maxSubscriptionOpsPerCycle(this.env);
 
     // 1. Delete records whose list is gone or now skipped.
     for (const rec of records) {
@@ -557,7 +557,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     if (!taskSubscriptionsEnabled(this.env)) return;
     const now = opts.now ?? Date.now();
     const graph = new GraphClient(this);
-    let budget = MAX_SUBSCRIPTION_OPS_PER_CYCLE;
+    let budget = maxSubscriptionOpsPerCycle(this.env);
     const due = this.getSubscriptions()
       .filter((r) => r.expiration_ms - now < SUBSCRIPTION_RENEW_MARGIN_MS)
       .sort((a, b) => a.expiration_ms - b.expiration_ms);

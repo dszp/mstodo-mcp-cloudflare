@@ -52,4 +52,13 @@ export const SUBSCRIPTION_RENEW_MARGIN_MS = 12 * 60 * 60_000; // 12 hours
 // reconcile() and renewSubscriptions() each enforce this cap independently; in a
 // worst-case ramp cycle both could spend it, so size it as "per maintenance
 // pass" headroom, not a hard combined guarantee.
-export const MAX_SUBSCRIPTION_OPS_PER_CYCLE = 2;
+//
+// Tunable via the MAX_SUBSCRIPTION_OPS_PER_CYCLE var (mirrors the My Day scan
+// caps). FREE PLAN: leave at 2. PAID PLAN (1000-subrequest ceiling): raise it —
+// up to your list count — for faster initial coverage and renewal headroom.
+export const DEFAULT_MAX_SUBSCRIPTION_OPS_PER_CYCLE = 2;
+
+export function maxSubscriptionOpsPerCycle(env: Env): number {
+  const n = Number(env.MAX_SUBSCRIPTION_OPS_PER_CYCLE);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_SUBSCRIPTION_OPS_PER_CYCLE;
+}
