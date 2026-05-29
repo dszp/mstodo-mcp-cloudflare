@@ -43,6 +43,25 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 2,
+    apply: (sql) => {
+      // ROADMAP §4 — one row per active Graph change-notification subscription.
+      // subscription_id is Graph's; list_id is the todoTaskList it covers;
+      // client_state is the per-subscription secret echoed back in every
+      // notification (authenticity check); expiration_ms drives renewal.
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS subscriptions (
+          subscription_id TEXT PRIMARY KEY,
+          list_id         TEXT NOT NULL,
+          client_state    TEXT NOT NULL,
+          expiration_ms   INTEGER NOT NULL,
+          created_at_ms   INTEGER NOT NULL
+        )
+      `);
+      sql.exec("CREATE INDEX IF NOT EXISTS subscriptions_list ON subscriptions(list_id)");
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

@@ -143,6 +143,14 @@ export interface ListRow {
   is_shared: number | null;
 }
 
+export interface SubscriptionRow {
+  subscription_id: string;
+  list_id: string;
+  client_state: string;
+  expiration_ms: number;
+  created_at_ms: number;
+}
+
 // QueryFilter / SyncStatusReport are consumed in Tasks 5/6; defined here so the
 // row layer and the query layer share one source of truth.
 export interface QueryFilter {

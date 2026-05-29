@@ -25,6 +25,7 @@ import {
   listToRow,
   type TaskRow,
   type ListRow,
+  type SubscriptionRow,
   type QueryFilter,
   type SyncStatusReport,
 } from "./sql";
@@ -447,6 +448,40 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return rows.length > 0 ? rows[0] : null;
   }
 
+  // -- Subscription store (ROADMAP §4) --------------------------------------
+  getSubscriptions(): SubscriptionRow[] {
+    return this.sql
+      .exec("SELECT * FROM subscriptions")
+      .toArray() as unknown as SubscriptionRow[];
+  }
+
+  findSubscription(subscriptionId: string): SubscriptionRow | null {
+    const rows = this.sql
+      .exec("SELECT * FROM subscriptions WHERE subscription_id = ?", subscriptionId)
+      .toArray() as unknown as SubscriptionRow[];
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  putSubscription(rec: SubscriptionRow): void {
+    this.sql.exec(
+      `INSERT INTO subscriptions
+         (subscription_id, list_id, client_state, expiration_ms, created_at_ms)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(subscription_id) DO UPDATE SET
+         list_id=excluded.list_id, client_state=excluded.client_state,
+         expiration_ms=excluded.expiration_ms, created_at_ms=excluded.created_at_ms`,
+      rec.subscription_id,
+      rec.list_id,
+      rec.client_state,
+      rec.expiration_ms,
+      rec.created_at_ms,
+    );
+  }
+
+  deleteSubscriptionRecord(subscriptionId: string): void {
+    this.sql.exec("DELETE FROM subscriptions WHERE subscription_id = ?", subscriptionId);
+  }
+
   // True once at least one full baseline of this list's tasks reached a
   // deltaLink — i.e. the DO holds the authoritative tail and reads can be served
   // from it. A mid-cycle (next_link set, delta_link still null) baseline is NOT
@@ -761,6 +796,9 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     this.sql.exec("DELETE FROM tasks"); // tasks_fts cascades via AFTER DELETE trigger
     this.sql.exec("DELETE FROM lists");
     this.sql.exec("DELETE FROM sync_state");
+    // Drop subscription records for the prior identity; the Graph-side
+    // subscriptions are torn down on the next reconcile (orphan path).
+    this.sql.exec("DELETE FROM subscriptions");
     await this.ctx.storage.deleteAlarm();
   }
 
