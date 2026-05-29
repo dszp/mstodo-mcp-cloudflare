@@ -894,6 +894,92 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     if (pending === null) await this.ctx.storage.setAlarm(Date.now() + 1);
   }
 
+  // Read-only notification entrypoint (ROADMAP §4). The webhook defers here.
+  // For each item: validate clientState against the stored subscription record,
+  // resolve the list, and arm the alarm once (the incremental Graph delta then
+  // refreshes the changed task's Graph fields + creates/removes its row). For
+  // My Day, refresh JUST the changed task via a targeted Substrate getTask
+  // (cost ∝ edits, not list size). Issues NO mutating Graph/Substrate calls
+  // (getTask is a GET), so it can never emit a change notification → no loop.
+  async onChangeNotification(
+    items: Array<{
+      subscriptionId?: string;
+      clientState?: string;
+      changeType?: string;
+      resourceId?: string;
+    }>,
+  ): Promise<{ accepted: number; rejected: number }> {
+    let accepted = 0;
+    let rejected = 0;
+    const work: Array<{ listId: string; taskId?: string; changeType?: string }> = [];
+    for (const item of items) {
+      const rec = item.subscriptionId ? this.findSubscription(item.subscriptionId) : null;
+      if (!rec || rec.client_state !== item.clientState) {
+        rejected += 1;
+        continue;
+      }
+      accepted += 1;
+      work.push({ listId: rec.list_id, taskId: item.resourceId, changeType: item.changeType });
+    }
+
+    // Arm the alarm once for the Graph delta refresh (idempotent; coalesces).
+    if (accepted > 0) await this.ctx.storage.setAlarm(Date.now() + 1);
+
+    // Targeted My Day refresh of each changed task. Sequential (EXO forbids
+    // parallel Substrate calls). Skipped entirely when My Day is off.
+    if (myDayEnabled(this.env)) {
+      let sub: SubstrateClient | null = null;
+      for (const w of work) {
+        if (!w.taskId || w.changeType === "deleted") continue;
+        try {
+          if (!sub) {
+            const ident = await loadIdentity(this.env);
+            sub = new SubstrateClient(
+              {
+                getSubstrateAccessToken: () => this.getSubstrateAccessToken(),
+                forceSubstrateRefresh: () => this.forceSubstrateRefresh(),
+              },
+              ident?.anchorMailbox ?? null,
+            );
+          }
+          // Row must exist for updateMyDayFields to land (it no-ops otherwise).
+          // A brand-new task's notification can beat the delta that creates the
+          // row → fall back to mark-scan-due so the periodic scan fills it.
+          if (this.getMyDayFields(w.taskId) === null) {
+            this.#setSyncState(`myday:${w.listId}`, { last_synced_at: null });
+            continue;
+          }
+          const t = await sub.getTask(w.listId, w.taskId);
+          this.updateMyDayFields(w.taskId, {
+            committed_day: t.CommittedDay ? t.CommittedDay.slice(0, 10) : null,
+            committed_order: t.CommittedOrder ?? null,
+            order_datetime: t.OrderDateTime ?? null,
+            postponed_day: t.PostponedDay ? t.PostponedDay.slice(0, 10) : null,
+          });
+        } catch (e) {
+          if (e instanceof Error && e.message.includes("my_day_unavailable")) {
+            log.warn("notif_my_day_unavailable", { error: e.message });
+            break; // latched — stop trying this batch
+          }
+          if (e instanceof SubstrateError && e.status === 403) {
+            this.markMyDayUnavailable();
+            log.warn("notif_my_day_unavailable", { error: e.detail ?? "403" });
+            break;
+          }
+          // Transient (404 not-yet-propagated, throttle, etc.): mark scan-due so
+          // the next budgeted scan reconciles this list.
+          this.#setSyncState(`myday:${w.listId}`, { last_synced_at: null });
+          log.warn("notif_my_day_refresh_failed", {
+            list_id: w.listId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+    }
+
+    return { accepted, rejected };
+  }
+
   // One sync cycle per alarm, then re-arm: soon if anything is still mid-cycle
   // (baseline draining), else at the configured interval.
   async alarm(): Promise<void> {
