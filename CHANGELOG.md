@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Hardened `stripHtml` (task-body indexing) against a polynomial-ReDoS worst case:
+  the `/<[^>]*>/g` tag strip was O(n²) on pathological input like `"<<<<…"` with no
+  closing `>`. Replaced with a linear, backtracking-free `indexOf` scan (identical
+  semantics) and added `test/html.test.ts`. (CodeQL `js/polynomial-redos`.)
+- Pinned the CI workflow's `GITHUB_TOKEN` to least privilege (`permissions:
+  contents: read`), shrinking the blast radius of a build-time supply-chain
+  compromise. (CodeQL `actions/missing-workflow-permissions`.)
+
 ## [0.11.0] – 2026-05-30
 
 ### Added

@@ -109,9 +109,12 @@ deferred** until the §1 API exists:
 > (mark-scan-due fallback for a not-yet-cached task; periodic budgeted scan retained as backstop) — a
 > full-list scan-on-notification remains a future option if per-task proves insufficient. The notification
 > path is strictly read-only toward Microsoft, so it cannot emit a notification (no feedback loop).
-> **OPEN, confirm after deploy:** does moving a task *within* My Day order (CommittedOrder-only change) bump
-> Graph's `lastModifiedDateTime` and thus fire the webhook? Only CommittedDay was verified to (§4a). If it
-> doesn't, within-My-Day reordering is caught only by the periodic scan regardless.
+> **RESOLVED (2026-05-30, live):** moving a task *within* My Day order (CommittedOrder-only change) **does**
+> bump Graph's `lastModifiedDateTime` and fire the webhook — verified in both directions (drag up + drag down)
+> against the deployed Worker, each producing a distinct `webhook_processed` `accepted:1` (with an
+> importance-toggle positive control proving the list's subscription was live). So within-My-Day reordering is
+> covered by subscriptions (near-instant), not left to the periodic scan. This was the last behavioral unknown
+> in §4.
 
 Drive *when* delta sync runs from Microsoft Graph push notifications instead of
 only the timer, collapsing typical update lag from "next cycle interval" to
