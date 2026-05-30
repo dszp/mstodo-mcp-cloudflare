@@ -125,17 +125,22 @@ describe("onChangeNotification", () => {
       const out = await inst.onChangeNotification([
         { subscriptionId: "SUB1", clientState: "good", changeType: "deleted", resourceId: "T1" },
       ]);
-      // Capture inside the DO context — after the block, the armed alarm fires
-      // and a normal cycle's My Day scan would add (unrelated) Substrate GETs.
+      // Count only TARGETED single-task getTask calls (.../tasks/{id}), which is
+      // the call this path would make for a non-deleted task. The My Day scan's
+      // listFolderTasks hits the collection (.../tasks, no trailing /{id}) — so a
+      // foreign DO instance's armed alarm firing into the shared global fetch spy
+      // mid-block can't pollute this assertion (it was a real cross-test flake).
       return {
         out,
         alarm: await state.storage.getAlarm(),
-        substrateCalls: calls.filter((c) => c.url.includes("substrate.office.com")).length,
+        getTaskCalls: calls.filter(
+          (c) => c.url.includes("substrate.office.com") && c.url.includes("/tasks/"),
+        ).length,
       };
     });
     expect(r.out.accepted).toBe(1);
     expect(r.alarm).not.toBeNull();
-    expect(r.substrateCalls).toBe(0);
+    expect(r.getTaskCalls).toBe(0);
   });
 
   it("rejects a clientState mismatch and does nothing", async () => {
