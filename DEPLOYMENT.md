@@ -357,7 +357,16 @@ newest-first over several cycles (open tasks only; completed tasks fill in lazil
 **independent of `ENABLE_TASK_SUBSCRIPTIONS`** — the change signal is the delta cycle, so the cache
 stays fresh on the timer; subscriptions just lower latency. Steady state is ~one GET per changed
 task. **On the Workers Paid plan** raise the cap for a faster initial backfill. Right after
-enabling, the new tools return partial results until the backfill drains.
+enabling, the new tools return partial results until the backfill drains. Watch the
+`checklist_scan_batch` events in Workers observability to see the backlog shrink to zero.
+
+What the cache covers, **by design**: **open tasks in non-skipped lists only.** Tasks with no
+checklist items are still visited once (then marked done, so the scan converges); any task that
+later changes rides `$delta` and is re-fetched (~one GET per changed task). **Completed tasks are
+intentionally excluded** from the cross-task checklist cache — checklist follow-ups are an
+open-task concern, so `search_checklist_items` / `query_tasks has_open_checklist_item` never surface
+a completed task's items (`get_task` still returns any single task's checklist live). Lists in the
+`no_sync` / Flagged-Emails skip set are never cached.
 
 **Graceful auto-disable.** The `ENABLE_MY_DAY` flag is operator intent; it doesn't prove
 the Exchange Online permission was actually granted/consented. If it wasn't, the tools

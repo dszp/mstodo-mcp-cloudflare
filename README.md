@@ -82,7 +82,9 @@ The server exposes a Microsoft To Do tool surface over MCP. Highlights:
   does FTS over checklist text, or — with no query — lists pending items **oldest-first** (what
   you've been waiting on longest), grouped by task. Pairs with the `query_tasks`
   `has_open_checklist_item` filter. Off by default (it adds a one-time per-task backfill); the cache
-  then stays fresh on the normal delta cycle.
+  then stays fresh on the normal delta cycle. Covers **open tasks** only — completed tasks are
+  intentionally excluded from cross-task checklist queries (`get_task` still shows any task's items
+  live), and skipped lists (`no_sync`/Flagged Emails) aren't cached.
 - **My Day & manual order (opt-in, Substrate)** — gated behind `ENABLE_MY_DAY=true` (these use the
   undocumented Substrate endpoint the To Do web app uses, because My Day and the manual
   drag-to-reorder position are invisible to Graph): `list_my_day_tasks`, `add_to_my_day`,

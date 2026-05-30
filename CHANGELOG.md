@@ -15,10 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follow-up is still open, oldest first). Backed by the same cheap "backfill once, then incremental
   upkeep" model as My Day: checklist edits bump the parent task's `lastModifiedDateTime`, so they
   ride the existing `$delta` feed (verified live) — a changed task is marked dirty and re-fetched by
-  a **budgeted** per-task scan (`CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE`, newest-changed first, open
-  tasks only) on calm sync cycles. Independent of `ENABLE_TASK_SUBSCRIPTIONS` (the change signal is
-  delta itself; subscriptions only lower latency). Steady-state cost is ~one Graph GET per changed
-  task.
+  a **budgeted** per-task scan (`CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE`, newest-changed first) on calm
+  sync cycles. Independent of `ENABLE_TASK_SUBSCRIPTIONS` (the change signal is delta itself;
+  subscriptions only lower latency). Steady-state cost is ~one Graph GET per changed task. **Scope
+  by design:** open tasks in non-skipped lists only — completed tasks are intentionally excluded
+  from cross-task checklist queries (`get_task` still returns any single task's items live), and
+  `no_sync`/Flagged-Emails lists are never cached.
   - New MCP tool **`search_checklist_items`**: FTS5 search over checklist text (ranked), or — with
     no query — pending items oldest-first (the follow-up view); `pending_only` (default true) and
     `lists` filters; results grouped by parent task.

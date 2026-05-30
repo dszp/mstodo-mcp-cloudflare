@@ -267,6 +267,29 @@ every cycle. **Other limitations:** `listFolderTasks` doesn't paginate (folders 
 Substrate's default page size only refresh their first page from the scan; write-through still
 covers user-touched tasks).
 
+### 4b. SQLite cache of checklist items (cross-task subtask/step queries) — ✅ DONE (gated, default OFF)
+
+> **Status: shipped, gated by `ENABLE_CHECKLIST_CACHE` (default OFF — opt-in).** Mirrors each
+> task's checklist items (a.k.a. subtasks / "steps") into a queryable `checklist_items` table +
+> a `checklist_fts` FTS5 index (migration **v3**), so checklist text and pending/done state are
+> filterable **across** tasks — the "waiting on X" follow-up workflow. Same architecture as §4a:
+> a `tasks.checklist_synced_at` marker (NULL = "needs fetch"), nulled by the delta-apply path
+> whenever a task changes (checklist edits bump `lastModifiedDateTime` → ride `$delta` — verified
+> live), drained by a **budgeted** per-task scan (`CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE`,
+> newest-changed first, calm cycles only) plus write-through on the three `*_checklist_item` tools.
+> Independent of §4 subscriptions (the change signal is delta itself).
+>
+> **Scope, by design:** the scan backfills **open tasks only** in non-skipped lists (the
+> `shouldSkipSync` set — `no_sync` + Flagged Emails). **Completed tasks are intentionally excluded**
+> from the cross-task checklist cache (follow-ups are an open-task concern; `get_task` still returns
+> any single task's items live). Skipped lists are never cached.
+>
+> **New surface:** `query_tasks` `has_open_checklist_item` filter; `search_checklist_items` tool
+> (FTS over item text, or — no query — pending items oldest-first, grouped by task); and
+> `search_tasks` `include_checklist` (default ON) which widens task FTS to checklist text via a
+> tiered ranking (title/body matches first, checklist-only matches appended). Tool/param **names**
+> stay `checklist` (API + existing-tool consistency); descriptions carry the subtask/step synonyms.
+
 ## 5. Email-to-task webhook ingress
 
 Migrate the existing email-to-task flow off n8n: a webhook (or Cloudflare Email
