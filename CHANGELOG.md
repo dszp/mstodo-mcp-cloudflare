@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] – 2026-05-30
+
 ### Added
 - **Checklist-item cache, gated by `ENABLE_CHECKLIST_CACHE` (default OFF — opt-in).** Mirrors each
   task's checklist items into a queryable SQLite table (`checklist_items` + a `checklist_fts` FTS5
