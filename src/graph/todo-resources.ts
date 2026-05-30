@@ -25,6 +25,25 @@ const AttachmentCollectionSchema = z
   .object({ value: z.array(AttachmentSchema) })
   .passthrough();
 
+const ChecklistCollectionSchema = z
+  .object({ value: z.array(ChecklistItemSchema) })
+  .passthrough();
+
+// Enumerate a task's checklist items COLLECTION (Graph delta carries none, so the
+// checklist cache backfill/refresh fetches them here). Shares the URL shape with
+// the list_checklist_items MCP tool.
+export async function listChecklistItems(
+  graph: GraphClient,
+  listId: string,
+  taskId: string,
+): Promise<ChecklistItem[]> {
+  const res = await graph.getJson(
+    `${taskUrl(listId, taskId)}/checklistItems`,
+    ChecklistCollectionSchema,
+  );
+  return res.value;
+}
+
 export function createChecklistItem(
   graph: GraphClient,
   listId: string,

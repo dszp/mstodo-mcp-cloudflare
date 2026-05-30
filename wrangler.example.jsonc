@@ -88,7 +88,19 @@
     //   FREE PLAN: leave this at "6".
     //   PAID PLAN (1000-subrequest ceiling): raise it — up to your list count —
     //   to refresh the whole roster every cycle for fresher off-device My Day.
-    "MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE": "6"
+    "MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE": "6",
+    // Checklist-item cache (ROADMAP): mirrors task checklist items into a
+    // queryable SQLite table so checklist text/state is filterable across tasks
+    // (query_tasks has_open_checklist_item / search_checklist_items / the
+    // oldest-pending follow-up view). OPT-IN — defaults OFF; only "true" enables
+    // it (a one-time per-task Graph backfill). Independent of subscriptions: the
+    // change signal is $delta, so the cache stays fresh on the timer.
+    "ENABLE_CHECKLIST_CACHE": "false",
+    // Max tasks whose checklist is (re)fetched per calm cycle — one Graph GET
+    // each, newest-changed first, draining the NULL-marker backlog over cycles.
+    //   FREE PLAN: leave at "8" (stays under the 50-subrequest ceiling alongside
+    //   delta + the other scans). PAID PLAN: raise it for faster backfill.
+    "CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE": "8"
   },
 
   "observability": { "enabled": true }

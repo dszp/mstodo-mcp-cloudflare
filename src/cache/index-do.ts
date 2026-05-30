@@ -1,5 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { TodoTaskListSchema, type TodoTask, type TodoTaskList } from "../graph/types";
+import {
+  TodoTaskListSchema,
+  type ChecklistItem,
+  type TodoTask,
+  type TodoTaskList,
+} from "../graph/types";
 import {
   loadTokens,
   refreshTokensForScope,
@@ -21,10 +26,14 @@ import { log } from "../log";
 import {
   SCHEMA_DDL,
   TASK_COLUMNS,
+  CHECKLIST_COLUMNS,
   taskToRow,
   listToRow,
+  checklistItemToRow,
   type TaskRow,
   type ListRow,
+  type ChecklistItemRow,
+  type ChecklistSearchRow,
   type SubscriptionRow,
   type QueryFilter,
   type SyncStatusReport,
@@ -38,6 +47,8 @@ import {
   SUBSCRIPTION_RENEW_MARGIN_MS,
   maxSubscriptionOpsPerCycle,
 } from "../subscriptions/gate";
+import { checklistCacheEnabled, checklistScanMaxTasksPerCycle } from "../checklist/gate";
+import { listChecklistItems } from "../graph/todo-resources";
 import {
   createSubscription,
   renewSubscription,
@@ -311,6 +322,9 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
 
   deleteTask(taskId: string): void {
     this.sql.exec("DELETE FROM tasks WHERE task_id = ?", taskId);
+    // Cascade: no FK, so drop the task's checklist rows explicitly (FTS follows
+    // via the AFTER DELETE trigger). Cheap no-op when the cache is unused.
+    this.sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
   }
 
   // Best-effort flag bump from a sub-resource mutation result (e.g. a checklist
@@ -372,6 +386,114 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       committed_order: null,
       postponed_day: null,
     });
+  }
+
+  // -- Checklist cache (migration v3) ---------------------------------------
+  // Authoritative replace of a task's cached checklist from a fresh Graph fetch
+  // (the backfill scan + targeted near-live refresh). DELETE-then-insert so
+  // removed items disappear; stamps checklist_synced_at = now (clears the
+  // "needs fetch" marker) and syncs has_checklist. No-op-safe on a task whose
+  // row isn't indexed yet — the items still land and the next delta creates the
+  // task row. Synchronous (atomic) like the other write-throughs.
+  replaceChecklistItems(taskId: string, listId: string, items: ChecklistItem[]): void {
+    this.sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
+    for (const item of items) {
+      const row = checklistItemToRow(item, taskId, listId);
+      this.sql.exec(
+        `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
+           VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})`,
+        ...CHECKLIST_COLUMNS.map((c) => row[c]),
+      );
+    }
+    this.sql.exec(
+      "UPDATE tasks SET checklist_synced_at = ?, has_checklist = ? WHERE task_id = ?",
+      Date.now(),
+      items.length > 0 ? 1 : 0,
+      taskId,
+    );
+  }
+
+  // Mark a task's checklist stale so the next budgeted scan re-fetches it. The
+  // incremental engine: the delta-apply path nulls this whenever a task changes
+  // (checklist edits bump the task's lastModifiedDateTime → ride $delta).
+  markChecklistDirty(taskId: string): void {
+    this.sql.exec("UPDATE tasks SET checklist_synced_at = NULL WHERE task_id = ?", taskId);
+  }
+
+  // Drop a task's cached checklist rows (task deletion already cascades via
+  // deleteTask; exposed for explicit clears).
+  clearChecklistItems(taskId: string): void {
+    this.sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
+  }
+
+  // Write-through for a single checklist mutation (create/update MCP tools):
+  // upsert one item for instant cross-task visibility without a re-list. Bumps
+  // has_checklist=1 but deliberately leaves checklist_synced_at UNTOUCHED — the
+  // cached set may be incomplete (task not yet backfilled), so the marker still
+  // governs whether a full fetch is owed. Latency optimization, not correctness:
+  // the self-induced edit also rides delta → markChecklistDirty → authoritative
+  // re-fetch next scan.
+  upsertChecklistItem(taskId: string, listId: string, item: ChecklistItem): void {
+    const row = checklistItemToRow(item, taskId, listId);
+    this.sql.exec(
+      `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
+         VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})
+       ON CONFLICT(item_id) DO UPDATE SET
+         display_name=excluded.display_name, is_checked=excluded.is_checked,
+         created_at=excluded.created_at, checked_at=excluded.checked_at`,
+      ...CHECKLIST_COLUMNS.map((c) => row[c]),
+    );
+    this.sql.exec("UPDATE tasks SET has_checklist = 1 WHERE task_id = ?", taskId);
+  }
+
+  // Write-through for delete_checklist_item: drop one row. has_checklist is left
+  // alone (can't tell if it was the last item without an authoritative set; the
+  // next delta-driven re-fetch reconciles it). taskId is accepted for symmetry
+  // and to scope the delete defensively.
+  deleteChecklistItem(taskId: string, itemId: string): void {
+    this.sql.exec(
+      "DELETE FROM checklist_items WHERE item_id = ? AND task_id = ?",
+      itemId,
+      taskId,
+    );
+  }
+
+  // A task's cached checklist rows, open items first then by creation order — the
+  // "what am I waiting on" reading. Powers cross-task checklist enrichment.
+  getChecklistItems(taskId: string): ChecklistItemRow[] {
+    return this.sql
+      .exec(
+        `SELECT * FROM checklist_items WHERE task_id = ?
+          ORDER BY is_checked ASC, created_at ASC NULLS LAST, item_id ASC`,
+        taskId,
+      )
+      .toArray() as unknown as ChecklistItemRow[];
+  }
+
+  // The backfill/refresh work set: OPEN tasks whose checklist marker is NULL
+  // ("needs fetch"), excluding skipped lists, newest-changed first (recently
+  // touched tasks are the likeliest to be queried), capped per cycle. Completed
+  // tasks are deliberately left out — they lazy-fill only if a query touches them.
+  selectDueChecklistTasks(
+    max: number,
+    skipListIds: string[],
+  ): Array<{ task_id: string; list_id: string }> {
+    const skipClause =
+      skipListIds.length > 0
+        ? `AND list_id NOT IN (${skipListIds.map(() => "?").join(", ")})`
+        : "";
+    return this.sql
+      .exec(
+        `SELECT task_id, list_id FROM tasks
+          WHERE checklist_synced_at IS NULL
+            AND status <> 'completed'
+            ${skipClause}
+          ORDER BY modified_at DESC
+          LIMIT ?`,
+        ...skipListIds,
+        max,
+      )
+      .toArray() as unknown as Array<{ task_id: string; list_id: string }>;
   }
 
   findListForTask(
@@ -686,6 +808,11 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
         f.has_checklist ? "has_checklist = 1" : "(has_checklist = 0 OR has_checklist IS NULL)",
       );
     }
+    if (f.has_open_checklist_item !== undefined) {
+      const exists =
+        "EXISTS (SELECT 1 FROM checklist_items ci WHERE ci.task_id = tasks.task_id AND ci.is_checked = 0)";
+      where.push(f.has_open_checklist_item ? exists : `NOT ${exists}`);
+    }
 
     // Keyset cursor: rows strictly after the last returned row in the ordering.
     // NULLs sort last (DESC), so the predicate branches on the cursor's
@@ -741,6 +868,50 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     const sql = `SELECT t.* FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
                   WHERE ${where.join(" AND ")} ORDER BY rank LIMIT ?`;
     const rows = this.sql.exec(sql, ...params, limit).toArray() as unknown as TaskRow[];
+    return { rows };
+  }
+
+  // Cross-task checklist search — the feature's new capability. Two modes,
+  // selected by whether `query` is given:
+  //   • with query  → FTS5 over checklist item text, ordered by relevance (rank);
+  //   • without     → every (pending) item, ordered oldest-first by created_at —
+  //                   the "what am I waiting on longest" follow-up view.
+  // pending_only (default true) restricts to unchecked items. Each row carries
+  // the parent task's title/status (JOIN tasks) so the agent can group + render
+  // without a second round trip. Throws on malformed FTS syntax (the tool maps it).
+  searchChecklistItems(opts: {
+    query?: string;
+    pending_only?: boolean;
+    lists?: string[];
+    limit?: number;
+  }): { rows: ChecklistSearchRow[] } {
+    const hasQuery = !!opts.query && opts.query.trim().length > 0;
+    const pendingOnly = opts.pending_only ?? true;
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+
+    const from = hasQuery
+      ? `checklist_fts f
+           JOIN checklist_items ci ON ci.rowid = f.rowid
+           JOIN tasks t ON t.task_id = ci.task_id`
+      : `checklist_items ci JOIN tasks t ON t.task_id = ci.task_id`;
+    if (hasQuery) {
+      where.push("checklist_fts MATCH ?");
+      params.push(opts.query as string);
+    }
+    if (pendingOnly) where.push("ci.is_checked = 0");
+    if (opts.lists && opts.lists.length > 0) {
+      where.push(`ci.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
+      params.push(...opts.lists);
+    }
+
+    const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+    const order = hasQuery ? "rank" : "ci.created_at ASC NULLS LAST, ci.item_id ASC";
+    const sql = `SELECT ci.*, t.title AS task_title, t.status AS task_status
+                   FROM ${from}
+                  WHERE ${where.join(" AND ")}
+                  ORDER BY ${order} LIMIT ?`;
+    const rows = this.sql.exec(sql, ...params, limit).toArray() as unknown as ChecklistSearchRow[];
     return { rows };
   }
 
@@ -1148,6 +1319,11 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       await this.#runMyDayScanBatch(skip).catch((e) =>
         log.warn("my_day_scan_failed", { error: String(e) }),
       );
+      // Drain the checklist backfill/refresh set (gated + budgeted). Same calm-
+      // cycle placement so its Graph GETs don't stack on a baseline page-burst.
+      await this.#runChecklistScanBatch(skip).catch((e) =>
+        log.warn("checklist_scan_failed", { error: String(e) }),
+      );
     }
     return anyOutstanding;
   }
@@ -1163,6 +1339,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       !!this.#getSyncState(`tasks:${listId}`) || !!this.#getSyncState(`myday:${listId}`);
     if (!hasRows && !hasState) return;
     this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+    this.sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
     this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
     this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
   }
@@ -1250,21 +1427,32 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       return;
     }
     const listId = resource.slice("tasks:".length);
+    const checklist = checklistCacheEnabled(this.env);
     for (const row of rows) {
-      if (row.kind === "removed") this.deleteTask(row.id);
-      else this.upsertTask(row.task, listId);
+      if (row.kind === "removed") {
+        this.deleteTask(row.id); // cascades checklist_items
+      } else {
+        this.upsertTask(row.task, listId);
+        // Incremental engine: a task that rode delta CHANGED (checklist edits bump
+        // its lastModifiedDateTime), so its cached checklist may be stale — mark it
+        // for re-fetch by the next budgeted scan. Delta carries no expansions, so
+        // we can't diff the checklist here; the marker + scan does it cheaply.
+        if (checklist) this.markChecklistDirty(row.task.id);
+      }
     }
   }
 
   #purgeResource(resource: string): void {
     if (resource === "lists") {
       this.sql.exec("DELETE FROM tasks");
+      this.sql.exec("DELETE FROM checklist_items");
       this.sql.exec("DELETE FROM lists");
       this.sql.exec("DELETE FROM sync_state WHERE resource LIKE 'tasks:%'");
       return;
     }
     const listId = resource.slice("tasks:".length);
     this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+    this.sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
   }
 
   #getSyncState(resource: string): SyncStateRow | null {
@@ -1424,6 +1612,49 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       due: due.length,
       roster: entries.length,
     });
+  }
+
+  // Budgeted background checklist backfill/refresh scan. Graph has no
+  // hasChecklist boolean and delta carries no expansions, so each task's
+  // checklist is a per-task GET; running the whole NULL-marker set in one cycle
+  // could blow the Workers free-tier subrequest ceiling. Instead we drain at most
+  // CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE tasks per calm cycle (newest-changed
+  // first). The marker is self-tracking: a drained task gets checklist_synced_at
+  // stamped and drops out; the delta-apply path re-nulls it when the task changes
+  // again (the incremental engine). Over ⌈backlog / cap⌉ calm cycles a cold cache
+  // backfills; steady state is ~one GET per changed task.
+  //
+  // Per-task errors leave the marker NULL so the task stays due and retries next
+  // cycle (mirrors the My Day / task-delta error paths) — never mutating the task
+  // row, so an unreachable checklist can't corrupt cached task state. A persistent
+  // error keeps a task at the head of the rotation; the dominant terminal case
+  // (task deleted upstream → 404) is resolved by the next delta removal.
+  async #runChecklistScanBatch(skip: (listId: string) => boolean = () => false): Promise<void> {
+    if (!checklistCacheEnabled(this.env)) return;
+
+    const max = checklistScanMaxTasksPerCycle(this.env);
+    const skipIds = this.listLists()
+      .filter((l) => skip(l.list_id))
+      .map((l) => l.list_id);
+    const due = this.selectDueChecklistTasks(max, skipIds);
+    if (due.length === 0) return;
+
+    const graph = new GraphClient(this);
+    let scanned = 0;
+    let errored = 0;
+    for (const { task_id, list_id } of due) {
+      try {
+        const items = await listChecklistItems(graph, list_id, task_id);
+        this.replaceChecklistItems(task_id, list_id, items);
+        scanned += 1;
+      } catch (e) {
+        errored += 1;
+        const msg = e instanceof Error ? e.message : String(e);
+        // Leave the marker NULL (retried next cycle); do NOT touch the task row.
+        log.warn("checklist_scan_task_failed", { task_id, list_id, error: msg });
+      }
+    }
+    log.info("checklist_scan_batch", { scanned, errored, due: due.length });
   }
 
   #intervalMs(): number {

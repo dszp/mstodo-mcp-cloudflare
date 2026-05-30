@@ -62,6 +62,66 @@ const MIGRATIONS: Migration[] = [
       sql.exec("CREATE INDEX IF NOT EXISTS subscriptions_list ON subscriptions(list_id)");
     },
   },
+  {
+    version: 3,
+    apply: (sql) => {
+      // ROADMAP — checklist-item cache. One row per checklist item, joinable to
+      // tasks by task_id, so checklist text/state is queryable ACROSS tasks
+      // (today the cache holds only a single has_checklist 0/1 per task, itself
+      // null on every delta upsert). is_checked is the open/closed flag; the
+      // "waiting on X" follow-up use case sorts by the oldest open item.
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS checklist_items (
+          item_id      TEXT PRIMARY KEY,
+          task_id      TEXT NOT NULL,
+          list_id      TEXT NOT NULL,
+          display_name TEXT,
+          is_checked   INTEGER NOT NULL DEFAULT 0,
+          created_at   INTEGER,
+          checked_at   INTEGER
+        )
+      `);
+      sql.exec("CREATE INDEX IF NOT EXISTS checklist_items_task ON checklist_items(task_id)");
+      sql.exec(
+        "CREATE INDEX IF NOT EXISTS checklist_items_open ON checklist_items(is_checked, task_id)",
+      );
+
+      // "needs (re)fetch" marker on tasks: NULL means "fetch this task's
+      // checklist." Excluded from TASK_COLUMNS so the delta UPSERT never clobbers
+      // it — same treatment as the Substrate committed_* columns (migration v1).
+      sql.exec("ALTER TABLE tasks ADD COLUMN checklist_synced_at INTEGER");
+
+      // External-content FTS over item text, mirroring tasks_fts (sql.ts:49-68).
+      // Keyed to checklist_items.rowid; kept current by the three triggers below.
+      sql.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS checklist_fts USING fts5(
+          display_name,
+          content='checklist_items', content_rowid='rowid',
+          tokenize = 'unicode61 remove_diacritics 2'
+        )
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS checklist_ai AFTER INSERT ON checklist_items BEGIN
+          INSERT INTO checklist_fts(rowid, display_name) VALUES (new.rowid, new.display_name);
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS checklist_ad AFTER DELETE ON checklist_items BEGIN
+          INSERT INTO checklist_fts(checklist_fts, rowid, display_name)
+            VALUES ('delete', old.rowid, old.display_name);
+        END
+      `);
+      // AFTER UPDATE OF display_name — so a check/uncheck toggle (is_checked only)
+      // doesn't churn the FTS index.
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS checklist_au AFTER UPDATE OF display_name ON checklist_items BEGIN
+          INSERT INTO checklist_fts(checklist_fts, rowid, display_name)
+            VALUES ('delete', old.rowid, old.display_name);
+          INSERT INTO checklist_fts(rowid, display_name) VALUES (new.rowid, new.display_name);
+        END
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

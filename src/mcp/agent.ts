@@ -12,7 +12,15 @@ import {
   projectSubstrateTaskDetails,
   compareOrderDateTimeDesc,
 } from "../graph/substrate-client";
-import { OWNER_DO_NAME, epochToIso, rowToList, rowToSummary, type ListRow, type TaskRow } from "../cache/sql";
+import {
+  OWNER_DO_NAME,
+  epochToIso,
+  rowToList,
+  rowToSummary,
+  type ChecklistSearchRow,
+  type ListRow,
+  type TaskRow,
+} from "../cache/sql";
 import type { TodoIndex } from "../cache/index-do";
 import { mapPool } from "../graph/concurrency";
 import { VERSION } from "../version";
@@ -36,6 +44,7 @@ import {
   TodoTaskListSchema,
   TodoTaskSchema,
   type Attachment,
+  type ChecklistItem,
   type TodoTask,
   type TodoTaskList,
 } from "../graph/types";
@@ -56,6 +65,7 @@ import {
   getFileAttachment,
   listAttachments,
 } from "../graph/todo-resources";
+import { checklistCacheEnabled } from "../checklist/gate";
 
 const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
 
@@ -278,6 +288,66 @@ function indexTasksResponse(args: {
           ...(args.extra ?? {}),
           ...(args.next_cursor !== undefined ? { next_cursor: args.next_cursor } : {}),
           tasks: args.rows.map(rowToSummary),
+        }),
+      },
+    ],
+  };
+}
+
+// search_checklist_items envelope: flat matched rows (already ordered by the DO)
+// grouped by their parent task, first-seen order preserved. `count` is the item
+// count; `tasks` carries each task's matched items with epoch→ISO timestamps.
+function checklistItemsResponse(
+  rows: ChecklistSearchRow[],
+  extra: { query?: string; pending_only: boolean },
+): McpResponse {
+  const byTask = new Map<
+    string,
+    {
+      task_id: string;
+      list_id: string;
+      title: string;
+      status: string;
+      items: Array<{
+        item_id: string;
+        display_name: string | null;
+        is_checked: boolean;
+        created_at?: string;
+        checked_at?: string;
+      }>;
+    }
+  >();
+  for (const r of rows) {
+    let g = byTask.get(r.task_id);
+    if (!g) {
+      g = {
+        task_id: r.task_id,
+        list_id: r.list_id,
+        title: r.task_title,
+        status: r.task_status,
+        items: [],
+      };
+      byTask.set(r.task_id, g);
+    }
+    g.items.push({
+      item_id: r.item_id,
+      display_name: r.display_name,
+      is_checked: !!r.is_checked,
+      created_at: epochToIso(r.created_at),
+      checked_at: epochToIso(r.checked_at),
+    });
+  }
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          ok: true,
+          source: "index",
+          count: rows.length,
+          pending_only: extra.pending_only,
+          ...(extra.query !== undefined ? { query: extra.query } : {}),
+          tasks: [...byTask.values()],
         }),
       },
     ],
@@ -1481,6 +1551,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
               isChecked: is_checked,
             });
             await this.#indexSetFlags(task_id, { has_checklist: true });
+            await this.#indexUpsertChecklistItem(task_id, list_id, item);
             return {
               content: [
                 { type: "text", text: JSON.stringify({ ok: true, list_id, task_id, item }) },
@@ -1529,9 +1600,10 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           if (is_checked !== undefined) body.isChecked = is_checked;
           try {
             const item = await graph.patchJson(url, body, ChecklistItemSchema);
-            // No DO write: checklist item text/checked state isn't an indexed
-            // field; the next delta sync reconciles the task. (has_checklist is
-            // unaffected by an update.)
+            // Write-through to the checklist cache (when enabled): update the
+            // cached item's text/checked state immediately. has_checklist is
+            // unaffected by an update. No-op when the cache is off.
+            await this.#indexUpsertChecklistItem(task_id, list_id, item);
             return {
               content: [
                 { type: "text", text: JSON.stringify({ ok: true, list_id, task_id, item }) },
@@ -1578,9 +1650,10 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/checklistItems/${encodeURIComponent(item_id)}`;
           try {
             await graph.deleteResource(url);
-            // No DO write: a checklist delete may or may not clear has_checklist
-            // (can't tell if it was the last item without a re-list); the next
-            // delta sync reconciles.
+            // Write-through to the checklist cache (when enabled): drop the cached
+            // item row. has_checklist is left as-is (can't tell if it was the last
+            // item without a re-list); the next delta-driven re-fetch reconciles.
+            await this.#indexDeleteChecklistItem(task_id, item_id);
             return {
               content: [
                 {
@@ -2800,6 +2873,10 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .boolean()
             .optional()
             .describe("true = has checklist items; false = none or unknown (delta-sourced rows carry no expansion)."),
+          has_open_checklist_item: z
+            .boolean()
+            .optional()
+            .describe("true = task has ≥1 UNCHECKED checklist item (the 'waiting on something' follow-up filter); false = none open. Requires ENABLE_CHECKLIST_CACHE."),
           limit: z.number().int().min(1).max(200).optional().describe("Max rows per page. Default 50; max 200."),
           cursor: z.string().optional().describe("Opaque keyset token from a prior query_tasks response."),
           types: z
@@ -2828,6 +2905,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         created_after,
         importance,
         has_checklist,
+        has_open_checklist_item,
         limit,
         cursor,
         types,
@@ -2906,6 +2984,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             created_after: dates.created_after,
             importance,
             has_checklist,
+            has_open_checklist_item,
             limit,
             cursor,
           });
@@ -3000,6 +3079,65 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           }
           await this.#warmIfEmpty(result.rows.length);
           return indexTasksResponse({ rows: result.rows, extra: { query } });
+        }),
+    );
+
+    this.server.registerTool(
+      "search_checklist_items",
+      {
+        description:
+          "Cross-task checklist-item search served from the TodoIndex (requires ENABLE_CHECKLIST_CACHE). Two modes: pass `query` for FTS5 over item text (ranked by relevance); omit it to list pending items oldest-first — the 'what am I waiting on longest' follow-up view. `pending_only` (default true) restricts to unchecked items. Optionally restrict by `lists`. Returns items grouped by their parent task.",
+        inputSchema: {
+          query: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("FTS5 query over checklist item text. Omit to list (pending) items oldest-first."),
+          pending_only: z
+            .boolean()
+            .optional()
+            .describe("Only unchecked items. Defaults true (the follow-up use case)."),
+          lists: z
+            .array(z.string().min(1))
+            .min(1)
+            .optional()
+            .describe("Restrict to these lists (aliases, display names, or Graph list IDs). Omit to search all (do not pass an empty array)."),
+          limit: z.number().int().min(1).max(200).optional().describe("Max items. Default 50; max 200."),
+        },
+      },
+      async ({ query, pending_only, lists, limit }): Promise<McpResponse> =>
+        instrument("search_checklist_items", async () => {
+          if (!checklistCacheEnabled(this.env)) {
+            return errResponse("checklist_cache_disabled", {
+              hint: "Set ENABLE_CHECKLIST_CACHE=true to enable cross-task checklist queries.",
+            });
+          }
+          const listIds =
+            lists && lists.length > 0
+              ? await Promise.all(lists.map((l) => this.resolveList(l)))
+              : undefined;
+
+          let result: { rows: ChecklistSearchRow[] };
+          try {
+            result = await this.#index().searchChecklistItems({
+              query,
+              pending_only,
+              lists: listIds,
+              limit,
+            });
+          } catch (e) {
+            // FTS5 raises on malformed query syntax — map to a friendly error.
+            return errResponse("invalid_search_query", {
+              query,
+              message: e instanceof Error ? e.message : String(e),
+              hint: 'FTS5 syntax: bare terms, "phrases", AND/OR/NOT, prefix*.',
+            });
+          }
+          await this.#warmIfEmpty(result.rows.length);
+          return checklistItemsResponse(result.rows, {
+            query,
+            pending_only: pending_only ?? true,
+          });
         }),
     );
 
@@ -4098,6 +4236,30 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       await this.#index().setTaskFlags(taskId, patch);
     } catch (e) {
       log.warn("index_set_flags_failed", { task_id: taskId, error: String(e) });
+    }
+  }
+
+  // Checklist cache write-throughs (latency optimization — the self-induced edit
+  // also rides delta → re-fetch). Gated: when the cache is off we never write
+  // checklist rows (no scan would maintain them). Best-effort like the others.
+  async #indexUpsertChecklistItem(
+    taskId: string,
+    listId: string,
+    item: ChecklistItem,
+  ): Promise<void> {
+    if (!checklistCacheEnabled(this.env)) return;
+    try {
+      await this.#index().upsertChecklistItem(taskId, listId, item);
+    } catch (e) {
+      log.warn("index_upsert_checklist_item_failed", { task_id: taskId, error: String(e) });
+    }
+  }
+  async #indexDeleteChecklistItem(taskId: string, itemId: string): Promise<void> {
+    if (!checklistCacheEnabled(this.env)) return;
+    try {
+      await this.#index().deleteChecklistItem(taskId, itemId);
+    } catch (e) {
+      log.warn("index_delete_checklist_item_failed", { task_id: taskId, error: String(e) });
     }
   }
   async #indexUpsertList(list: TodoTaskList): Promise<void> {

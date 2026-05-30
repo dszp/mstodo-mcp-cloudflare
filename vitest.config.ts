@@ -20,6 +20,7 @@ const poolOptions = {
       MS_CLIENT_SECRET: "test-secret",
       SERVICE_BASE_URL: "https://mstodo-mcp.example.workers.dev",
       ENABLE_TASK_SUBSCRIPTIONS: "true",
+      ENABLE_CHECKLIST_CACHE: "true",
       ENABLE_MY_DAY: "true",
     },
   },

@@ -345,6 +345,20 @@ without an explicit `date`, "today" is computed in the Worker's configured **`TI
 (an IANA name like `America/New_York`), **not UTC** — so set `TIMEZONE` to your own zone,
 or pass an explicit `YYYY-MM-DD` to target a specific day.
 
+**Checklist-item cache — opt-in (`ENABLE_CHECKLIST_CACHE`, default `"false"`).** Set it to
+`"true"` to mirror task checklist items into a queryable table, enabling `search_checklist_items`
+and the `query_tasks` `has_open_checklist_item` filter (use checklist items as a follow-up system:
+add "waiting on X", then find what's still open, oldest first). It's off by default because
+enabling it triggers a **one-time per-task backfill** — Graph has no `hasChecklist` flag and delta
+carries no checklist data, so each task's checklist is fetched once with a Graph GET. Like the My
+Day scan, the backfill is **budgeted**: `CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE` (default `"8"`,
+free-tier-safe) caps how many tasks the scan fetches per calm cycle, draining the backlog
+newest-first over several cycles (open tasks only; completed tasks fill in lazily if queried). It is
+**independent of `ENABLE_TASK_SUBSCRIPTIONS`** — the change signal is the delta cycle, so the cache
+stays fresh on the timer; subscriptions just lower latency. Steady state is ~one GET per changed
+task. **On the Workers Paid plan** raise the cap for a faster initial backfill. Right after
+enabling, the new tools return partial results until the backfill drains.
+
 **Graceful auto-disable.** The `ENABLE_MY_DAY` flag is operator intent; it doesn't prove
 the Exchange Online permission was actually granted/consented. If it wasn't, the tools
 detect this at runtime (Microsoft returns `AADSTS65001` at token mint, or `403` on the

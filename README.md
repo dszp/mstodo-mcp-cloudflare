@@ -64,14 +64,23 @@ The server exposes a Microsoft To Do tool surface over MCP. Highlights:
   set `ENABLE_DOWNLOAD_LINKS="false"` to disable. See
   [Cross-server download](#cross-server-download--download) below.
 - **Cross-list query & search** (answered from the local `TodoIndex` mirror):
-  - `query_tasks` — filter by lists, status, date ranges, importance, has-checklist;
-    `types`/`exclude_types` (include/exclude by list classification); a `completed`
-    convenience (mutually exclusive with `status`); paginated.
+  - `query_tasks` — filter by lists, status, date ranges, importance, has-checklist,
+    `has_open_checklist_item` (tasks with an unchecked item — the "waiting on
+    something" filter); `types`/`exclude_types` (include/exclude by list
+    classification); a `completed` convenience (mutually exclusive with `status`);
+    paginated.
   - `search_tasks` — full-text search over task titles/bodies using **FTS5**
     (SQLite's built-in full-text search engine); same `lists`/`status`/`types`/
     `exclude_types`/`completed` filters. `exclude_types:["excluded"]` drops noise
     (e.g. flagged-email lists) from results without deleting anything.
   - `find_task_list`, `get_pending_across_lists`, `get_recently_completed`.
+- **Checklist follow-ups (opt-in)** — gated behind `ENABLE_CHECKLIST_CACHE=true`. Mirrors task
+  checklist items into a queryable table so you can use checklist items as a lightweight follow-up
+  system (add a "waiting on Acme reply" item, then find what's still open). `search_checklist_items`
+  does FTS over checklist text, or — with no query — lists pending items **oldest-first** (what
+  you've been waiting on longest), grouped by task. Pairs with the `query_tasks`
+  `has_open_checklist_item` filter. Off by default (it adds a one-time per-task backfill); the cache
+  then stays fresh on the normal delta cycle.
 - **My Day & manual order (opt-in, Substrate)** — gated behind `ENABLE_MY_DAY=true` (these use the
   undocumented Substrate endpoint the To Do web app uses, because My Day and the manual
   drag-to-reorder position are invisible to Graph): `list_my_day_tasks`, `add_to_my_day`,
