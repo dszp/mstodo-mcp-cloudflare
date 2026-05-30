@@ -6,7 +6,7 @@
 // types, and the Graph-object ⇄ row mappers; the DO class in index-do.ts owns
 // the connection and the query logic.
 
-import type { TodoTask, TodoTaskList } from "../graph/types";
+import type { ChecklistItem, TodoTask, TodoTaskList } from "../graph/types";
 import { stripHtml } from "../util/html";
 
 // Singleton address for the cross-list index DO. Used everywhere via
@@ -143,6 +143,40 @@ export interface ListRow {
   is_shared: number | null;
 }
 
+// One row per checklist item (migration v3). Joinable to `tasks` by task_id so
+// checklist text/state is queryable ACROSS tasks. created_at/checked_at are the
+// Graph timestamps flattened to epoch ms (created_at drives the
+// oldest-pending-first follow-up sort).
+export interface ChecklistItemRow {
+  item_id: string;
+  task_id: string;
+  list_id: string;
+  display_name: string | null;
+  is_checked: number;
+  created_at: number | null;
+  checked_at: number | null;
+}
+
+// Ordered column list for checklist_items INSERT — keep in lockstep with
+// ChecklistItemRow and checklistItemToRow().
+export const CHECKLIST_COLUMNS = [
+  "item_id",
+  "task_id",
+  "list_id",
+  "display_name",
+  "is_checked",
+  "created_at",
+  "checked_at",
+] as const;
+
+export interface SubscriptionRow {
+  subscription_id: string;
+  list_id: string;
+  client_state: string;
+  expiration_ms: number;
+  created_at_ms: number;
+}
+
 // QueryFilter / SyncStatusReport are consumed in Tasks 5/6; defined here so the
 // row layer and the query layer share one source of truth.
 export interface QueryFilter {
@@ -155,8 +189,18 @@ export interface QueryFilter {
   created_after?: number;
   importance?: string;
   has_checklist?: boolean;
+  // true = task has ≥1 UNCHECKED checklist item; false = none open. Requires the
+  // checklist cache (migration v3); rows are otherwise absent so false matches all.
+  has_open_checklist_item?: boolean;
   limit?: number;
   cursor?: string;
+}
+
+// One matched checklist item joined with its parent task's title/status — the
+// row shape searchChecklistItems returns (the agent groups by task_id).
+export interface ChecklistSearchRow extends ChecklistItemRow {
+  task_title: string;
+  task_status: string;
 }
 
 export interface SyncStatusReport {
@@ -231,6 +275,24 @@ export function taskToRow(t: TodoTask, listId: string): TaskRow {
     committed_order: null,
     order_datetime: null,
     postponed_day: null,
+  };
+}
+
+// Graph checklistItem → checklist_items row. isChecked defaults to false (the
+// NOT NULL is_checked column); createdDateTime/checkedDateTime flatten to epoch.
+export function checklistItemToRow(
+  item: ChecklistItem,
+  taskId: string,
+  listId: string,
+): ChecklistItemRow {
+  return {
+    item_id: item.id,
+    task_id: taskId,
+    list_id: listId,
+    display_name: item.displayName ?? null,
+    is_checked: item.isChecked ? 1 : 0,
+    created_at: isoToEpoch(item.createdDateTime),
+    checked_at: isoToEpoch(item.checkedDateTime),
   };
 }
 

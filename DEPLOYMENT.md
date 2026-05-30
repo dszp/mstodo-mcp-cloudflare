@@ -151,7 +151,20 @@ Edit `wrangler.jsonc` and fill in:
 - `vars.SERVICE_BASE_URL` — the public origin this Worker is reachable at, used to build
   web upload links. Set it to your `https://mstodo-mcp.<your-subdomain>.workers.dev` (or
   custom domain). It ships as a placeholder; if you don't know the URL yet, deploy once
-  (step 5), then set it and re-deploy. Only needed if you use the web upload feature.
+  (step 5), then set it and re-deploy. Needed for the web upload feature **and** for Graph
+  change-notification subscriptions (below) — Graph validates the `notificationUrl` it derives
+  (`${SERVICE_BASE_URL}/webhook`) at subscription-creation time, so it must be a reachable https URL.
+- `vars.ENABLE_TASK_SUBSCRIPTIONS` — **ON by default.** Graph change-notification subscriptions
+  (ROADMAP §4): the server stands up a public `POST /webhook` and creates one Graph subscription per
+  list so task/My-Day edits land in ~2 minutes (Graph's `todoTask` latency) instead of waiting for
+  the next delta cycle. **No new permission/consent** — it rides the existing delegated
+  `Tasks.ReadWrite` scope. Delta polling stays as the mandatory backstop (Graph has no
+  missed-notification safety net for `todoTask`). Set to `"false"` to stay timer-only — e.g. if you
+  prefer not to expose a public webhook, or the tenant-wide Graph subscription budget (shared across
+  all apps in the tenant) is spoken for. (`todoTask` has no documented per-resource cap — one
+  subscription per list, e.g. ~38 here; if any tenant limit is ever hit, Graph returns `403` and
+  that list quietly falls back to timer-only.) Requires a reachable `SERVICE_BASE_URL`; without one,
+  subscription creation no-ops (logged) and the server falls back to timer-only automatically.
 
 `wrangler.jsonc` is **gitignored** (it holds account-specific IDs). The committed
 `wrangler.example.jsonc` is what the test pool and CI read, so `npm test` works
@@ -331,6 +344,29 @@ Do clients. Right after deploy (or a re-baseline), `list_my_day_tasks` may retur
 without an explicit `date`, "today" is computed in the Worker's configured **`TIMEZONE`**
 (an IANA name like `America/New_York`), **not UTC** — so set `TIMEZONE` to your own zone,
 or pass an explicit `YYYY-MM-DD` to target a specific day.
+
+**Checklist-item cache — opt-in (`ENABLE_CHECKLIST_CACHE`, default `"false"`).** Set it to
+`"true"` to mirror task checklist items into a queryable table, enabling `search_checklist_items`
+and the `query_tasks` `has_open_checklist_item` filter (use checklist items as a follow-up system:
+add "waiting on X", then find what's still open, oldest first). It's off by default because
+enabling it triggers a **one-time per-task backfill** — Graph has no `hasChecklist` flag and delta
+carries no checklist data, so each task's checklist is fetched once with a Graph GET. Like the My
+Day scan, the backfill is **budgeted**: `CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE` (default `"8"`,
+free-tier-safe) caps how many tasks the scan fetches per calm cycle, draining the backlog
+newest-first over several cycles (open tasks only; completed tasks fill in lazily if queried). It is
+**independent of `ENABLE_TASK_SUBSCRIPTIONS`** — the change signal is the delta cycle, so the cache
+stays fresh on the timer; subscriptions just lower latency. Steady state is ~one GET per changed
+task. **On the Workers Paid plan** raise the cap for a faster initial backfill. Right after
+enabling, the new tools return partial results until the backfill drains. Watch the
+`checklist_scan_batch` events in Workers observability to see the backlog shrink to zero.
+
+What the cache covers, **by design**: **open tasks in non-skipped lists only.** Tasks with no
+checklist items are still visited once (then marked done, so the scan converges); any task that
+later changes rides `$delta` and is re-fetched (~one GET per changed task). **Completed tasks are
+intentionally excluded** from the cross-task checklist cache — checklist follow-ups are an
+open-task concern, so `search_checklist_items` / `query_tasks has_open_checklist_item` never surface
+a completed task's items (`get_task` still returns any single task's checklist live). Lists in the
+`no_sync` / Flagged-Emails skip set are never cached.
 
 **Graceful auto-disable.** The `ENABLE_MY_DAY` flag is operator intent; it doesn't prove
 the Exchange Online permission was actually granted/consented. If it wasn't, the tools

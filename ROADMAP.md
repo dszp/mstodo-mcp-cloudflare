@@ -98,13 +98,40 @@ deferred** until the §1 API exists:
 
 ## 4. Graph change-notification subscriptions to augment delta polling (toggleable)
 
+> **Status: SHIPPED on `feat/task-subscriptions` 2026-05-29 (gate `ENABLE_TASK_SUBSCRIPTIONS`, default ON).**
+> `src/subscriptions/{gate,manager,webhook-handler}.ts` + a `subscriptions` SQLite table (migration v2)
+> + `TodoIndex.onChangeNotification`/`reconcileSubscriptions`/`renewSubscriptions`; `POST /webhook` wired
+> in `index.ts` after `/download`. Reconcile + renew run in `runSyncCycle`'s calm-cycle block,
+> **budgeted** by `MAX_SUBSCRIPTION_OPS_PER_CYCLE`. Verified against current docs (2026-05-29):
+> `todoTask` notifications are **basic-only** (not on the rich/resource-data list) and **global-cloud-only**,
+> max lifetime **4,230 min**, webhook must ack within **3 s**. **§4a Phase 2 landed here too:** a notification
+> triggers a *targeted* single-task Substrate `getTask` to refresh just the changed task's My Day fields
+> (mark-scan-due fallback for a not-yet-cached task; periodic budgeted scan retained as backstop) — a
+> full-list scan-on-notification remains a future option if per-task proves insufficient. The notification
+> path is strictly read-only toward Microsoft, so it cannot emit a notification (no feedback loop).
+> **OPEN, confirm after deploy:** does moving a task *within* My Day order (CommittedOrder-only change) bump
+> Graph's `lastModifiedDateTime` and thus fire the webhook? Only CommittedDay was verified to (§4a). If it
+> doesn't, within-My-Day reordering is caught only by the periodic scan regardless.
+
 Drive *when* delta sync runs from Microsoft Graph push notifications instead of
 only the timer, collapsing typical update lag from "next cycle interval" to
 Graph-to-webhook latency (sub-second) — i.e. near-instant updates like the native
 To Do apps, while delta polling stays in place as the backstop. **Gated behind a
-new `ENABLE_TASK_SUBSCRIPTIONS` var** (off by default, same pattern as
-`ENABLE_MY_DAY` / `ENABLE_DOWNLOAD_LINKS`) because it adds a public webhook
-receiver and a renewal cron — opt-in surface, not always-on.
+new `ENABLE_TASK_SUBSCRIPTIONS` preference.** It rides the existing delegated
+`Tasks.ReadWrite` scope (see below) — **no additional permission or admin consent** —
+so the gate is a user preference, not a permission wall. **Lean the default ON** once
+`SERVICE_BASE_URL` is reachable: near-instant freshness at no extra consent cost. But
+keep it a genuine toggle, for two distinct reasons a user might disable it: (1) it
+stands up a public webhook receiver + renewal cron, so a deployment that doesn't want
+that surface can stay timer-only (this is the argument for a conservative OFF default
+if you weight attack surface over freshness); and (2) Graph subscriptions draw on a
+**tenant-wide budget shared across every app in the tenant** — `todoTask` itself has no
+documented per-resource cap (its row in Graph's supported-resources table lists no quota,
+unlike `user`/`group` at 100 per app+tenant / 1,000 per tenant, or the Teams resources),
+but a tenant already spending its subscription budget on other integrations must be able to
+opt our subscription creation out, independent of everything else the server does. (If any
+limit is hit, Graph returns `403` and `#createSubscriptionFor` logs `subscription_create_failed`
+and falls back to timer-only for that list.)
 
 **This is a documented public Graph capability, not first-party-only.** Graph
 exposes change-notification subscriptions on
@@ -145,8 +172,10 @@ src/
   `*/15` cron (or a dedicated daily one) calling `manager.ts`.
 - **Subscribe/unsubscribe hook in the lists-delta sync.** When the `$delta` on
   `/me/todo/lists` reports a list created/deleted, create/tear down its subscription
-  so coverage tracks the live list roster (~38 lists today; quotas are non-binding —
-  100 subscriptions per app+tenant, 1,000 per tenant).
+  so coverage tracks the live list roster (~38 lists today — comfortably inside Graph's
+  100-per-app+tenant / 1,000-per-tenant caps for this deployment, but those caps are
+  **shared across every app in the tenant**, which is why `ENABLE_TASK_SUBSCRIPTIONS`
+  must let a user disable our subscription creation rather than assume the budget is ours).
 
 **Delta polling stays mandatory — there is no missed-notification safety net for
 `todoTask`.** Graph lifecycle/`missed` events currently cover only Outlook message,
@@ -188,6 +217,48 @@ manager, the renewal cron, and the subscribe-on-list-create hook; plus the
 > **Still remaining (Phase 2):** drive scan invalidation from §4 change notifications so the
 > cache tightens toward near-live without polling Substrate at all.
 
+**Verify before building Phase 2 — does a My-Day-only change even reach Graph? ✅ ANSWERED 2026-05-28: YES (first branch).** Phase 2 assumes
+a §4 task notification fires when My Day membership changes in the app. But My Day lives in
+`CommittedDay`, a Substrate/Exchange field Graph cannot see, set by a Substrate PATCH. Whether
+that PATCH bumps the task's *Graph-visible* change tracking (`lastModifiedDateTime` / the delta
+token watermark) is a backend property of Microsoft's, not derivable from our code — and it
+forks the design:
+
+- **Bumps it** → the task enters the list's `$delta` feed (with no `CommittedDay` field) and a
+  subscription fires. After the (basic-only) notification we re-delta, see the task changed, and
+  can trigger a targeted Substrate GET of just that task to refresh its My Day fields. Phase 2 can
+  drive My Day freshness off subscriptions.
+- **Doesn't bump it** → My-Day-only app changes are invisible to Graph's change tracking entirely.
+  Subscriptions still cover real edits (title/due/status/completion), but pure drag-to-My-Day in
+  the app is caught *only* by the periodic background scan — which then stays mandatory for My Day
+  no matter how good subscriptions get. (Self-induced changes are unaffected either way:
+  `add_to_my_day` already write-throughs.)
+
+**The test (runnable now with existing tools, no instrumentation):** (1) pick a task not on My
+Day, `get_task` it live and record `lastModifiedDateTime` = T0; (2) move just that task to My Day
+in the app, no other edits; (3) `get_task` live again. If `lastModifiedDateTime` is unchanged →
+*conclusive* second branch (Graph never recorded the change). If it advanced to T1 → Graph saw
+it; confirm it actually propagates **incrementally** (not just in a baseline) by letting the next
+normal sync cycle run — **do not `resync`, which re-baselines and would include the task
+regardless** — then `list_tasks` the list and check the cached `lastModifiedDateTime`. The cache's
+`modified_at` is written only by the delta path, so if it advances T0→T1 off an incremental cycle,
+the task came through `$delta` and a subscription would have fired. A raw-delta-page dump or a
+per-task delta log line would only be needed to *watch* it live; the cache check settles the
+question without it.
+
+**Result (run 2026-05-28, subject "Attachment Test" on the default Tasks list).** First branch
+confirmed. T0 `lastModifiedDateTime` = `2026-05-27T07:03:02.412Z`; after a Substrate-plane
+`CommittedDay` set (via `add_to_my_day` — plane-identical to the app's gesture), live `get_task`
+read T1 = `2026-05-28T23:42:14.536Z` (Graph and Substrate agreed to the microsecond). The next
+normal incremental cycle (Tasks list synced ~23:47 UTC, ~5 min after the change, no `resync`, no
+baseline, `row_count` steady) advanced the *cached* `lastModifiedDateTime` to T1 — and `modified_at`
+is written only by the delta path, so the task provably rode the incremental `$delta` feed.
+**Conclusion: a My-Day-only change reaches Graph's incremental delta, so a §4 subscription fires on
+it.** Phase 2 can drive My Day freshness off subscriptions; the periodic Substrate scan can relax
+to a slow safety-net rather than the primary freshness path. The basic-only caveat stands — the
+notification triggers a re-delta, and a Substrate GET still reads the new `CommittedDay` (delta
+carries the changed task but not the Substrate-only field).
+
 **Free-tier safety vs. freshness (the per-cycle budget knob).** `MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE`
 (default 6) bounds the scan's per-request cost: a large roster is covered over ⌈roster ÷ cap⌉ calm
 cycles rather than one burst, so free-tier deployments never approach the 50-subrequest ceiling.
@@ -195,6 +266,29 @@ Workers Paid deployments can raise the cap (up to the roster size) to refresh th
 every cycle. **Other limitations:** `listFolderTasks` doesn't paginate (folders larger than
 Substrate's default page size only refresh their first page from the scan; write-through still
 covers user-touched tasks).
+
+### 4b. SQLite cache of checklist items (cross-task subtask/step queries) — ✅ DONE (gated, default OFF)
+
+> **Status: shipped, gated by `ENABLE_CHECKLIST_CACHE` (default OFF — opt-in).** Mirrors each
+> task's checklist items (a.k.a. subtasks / "steps") into a queryable `checklist_items` table +
+> a `checklist_fts` FTS5 index (migration **v3**), so checklist text and pending/done state are
+> filterable **across** tasks — the "waiting on X" follow-up workflow. Same architecture as §4a:
+> a `tasks.checklist_synced_at` marker (NULL = "needs fetch"), nulled by the delta-apply path
+> whenever a task changes (checklist edits bump `lastModifiedDateTime` → ride `$delta` — verified
+> live), drained by a **budgeted** per-task scan (`CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE`,
+> newest-changed first, calm cycles only) plus write-through on the three `*_checklist_item` tools.
+> Independent of §4 subscriptions (the change signal is delta itself).
+>
+> **Scope, by design:** the scan backfills **open tasks only** in non-skipped lists (the
+> `shouldSkipSync` set — `no_sync` + Flagged Emails). **Completed tasks are intentionally excluded**
+> from the cross-task checklist cache (follow-ups are an open-task concern; `get_task` still returns
+> any single task's items live). Skipped lists are never cached.
+>
+> **New surface:** `query_tasks` `has_open_checklist_item` filter; `search_checklist_items` tool
+> (FTS over item text, or — no query — pending items oldest-first, grouped by task); and
+> `search_tasks` `include_checklist` (default ON) which widens task FTS to checklist text via a
+> tiered ranking (title/body matches first, checklist-only matches appended). Tool/param **names**
+> stay `checklist` (API + existing-tool consistency); descriptions carry the subtask/step synonyms.
 
 ## 5. Email-to-task webhook ingress
 

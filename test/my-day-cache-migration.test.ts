@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import type { TodoIndex } from "../src/cache/index-do";
 import { isScanDue, selectDueScanLists } from "../src/cache/index-do";
+import { LATEST_SCHEMA_VERSION } from "../src/cache/migrations";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -33,12 +34,12 @@ describe("schema migration v1 — Substrate field columns", () => {
     });
   });
 
-  it("stamps schema_meta version = 1 and is idempotent across boots", async () => {
+  it("stamps schema_meta at the latest version and is idempotent across boots", async () => {
     await runInDurableObject(stub(), async (_: TodoIndex, ctx) => {
       const { version } = ctx.storage.sql
         .exec<{ version: number }>("SELECT version FROM schema_meta WHERE id = 1")
         .one();
-      expect(version).toBe(1);
+      expect(version).toBe(LATEST_SCHEMA_VERSION);
       // The ALTER would error if the migration ran twice — proof the column
       // already exists, i.e. the migration applied exactly once.
       expect(() =>

@@ -1,5 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { TodoTaskListSchema, type TodoTask, type TodoTaskList } from "../graph/types";
+import {
+  TodoTaskListSchema,
+  type ChecklistItem,
+  type TodoTask,
+  type TodoTaskList,
+} from "../graph/types";
 import {
   loadTokens,
   refreshTokensForScope,
@@ -21,16 +26,36 @@ import { log } from "../log";
 import {
   SCHEMA_DDL,
   TASK_COLUMNS,
+  CHECKLIST_COLUMNS,
   taskToRow,
   listToRow,
+  checklistItemToRow,
   type TaskRow,
   type ListRow,
+  type ChecklistItemRow,
+  type ChecklistSearchRow,
+  type SubscriptionRow,
   type QueryFilter,
   type SyncStatusReport,
 } from "./sql";
 import { applyMigrations } from "./migrations";
 import { loadListsConfig } from "../config/loader";
 import { shouldSkipSync } from "../config/sync-policy";
+import {
+  taskSubscriptionsEnabled,
+  webhookUrl,
+  SUBSCRIPTION_RENEW_MARGIN_MS,
+  maxSubscriptionOpsPerCycle,
+} from "../subscriptions/gate";
+import { checklistCacheEnabled, checklistScanMaxTasksPerCycle } from "../checklist/gate";
+import { listChecklistItems } from "../graph/todo-resources";
+import {
+  createSubscription,
+  renewSubscription,
+  deleteSubscription,
+  newClientState,
+  desiredExpiration,
+} from "../subscriptions/manager";
 
 // Phase 5 — TodoIndex: singleton Durable Object, the single source of truth for
 // Microsoft To Do state. SQLite `tasks` (+ `tasks_fts` FTS5 mirror) + `lists`
@@ -297,6 +322,9 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
 
   deleteTask(taskId: string): void {
     this.sql.exec("DELETE FROM tasks WHERE task_id = ?", taskId);
+    // Cascade: no FK, so drop the task's checklist rows explicitly (FTS follows
+    // via the AFTER DELETE trigger). Cheap no-op when the cache is unused.
+    this.sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
   }
 
   // Best-effort flag bump from a sub-resource mutation result (e.g. a checklist
@@ -358,6 +386,114 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       committed_order: null,
       postponed_day: null,
     });
+  }
+
+  // -- Checklist cache (migration v3) ---------------------------------------
+  // Authoritative replace of a task's cached checklist from a fresh Graph fetch
+  // (the backfill scan + targeted near-live refresh). DELETE-then-insert so
+  // removed items disappear; stamps checklist_synced_at = now (clears the
+  // "needs fetch" marker) and syncs has_checklist. No-op-safe on a task whose
+  // row isn't indexed yet — the items still land and the next delta creates the
+  // task row. Synchronous (atomic) like the other write-throughs.
+  replaceChecklistItems(taskId: string, listId: string, items: ChecklistItem[]): void {
+    this.sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
+    for (const item of items) {
+      const row = checklistItemToRow(item, taskId, listId);
+      this.sql.exec(
+        `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
+           VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})`,
+        ...CHECKLIST_COLUMNS.map((c) => row[c]),
+      );
+    }
+    this.sql.exec(
+      "UPDATE tasks SET checklist_synced_at = ?, has_checklist = ? WHERE task_id = ?",
+      Date.now(),
+      items.length > 0 ? 1 : 0,
+      taskId,
+    );
+  }
+
+  // Mark a task's checklist stale so the next budgeted scan re-fetches it. The
+  // incremental engine: the delta-apply path nulls this whenever a task changes
+  // (checklist edits bump the task's lastModifiedDateTime → ride $delta).
+  markChecklistDirty(taskId: string): void {
+    this.sql.exec("UPDATE tasks SET checklist_synced_at = NULL WHERE task_id = ?", taskId);
+  }
+
+  // Drop a task's cached checklist rows (task deletion already cascades via
+  // deleteTask; exposed for explicit clears).
+  clearChecklistItems(taskId: string): void {
+    this.sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
+  }
+
+  // Write-through for a single checklist mutation (create/update MCP tools):
+  // upsert one item for instant cross-task visibility without a re-list. Bumps
+  // has_checklist=1 but deliberately leaves checklist_synced_at UNTOUCHED — the
+  // cached set may be incomplete (task not yet backfilled), so the marker still
+  // governs whether a full fetch is owed. Latency optimization, not correctness:
+  // the self-induced edit also rides delta → markChecklistDirty → authoritative
+  // re-fetch next scan.
+  upsertChecklistItem(taskId: string, listId: string, item: ChecklistItem): void {
+    const row = checklistItemToRow(item, taskId, listId);
+    this.sql.exec(
+      `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
+         VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})
+       ON CONFLICT(item_id) DO UPDATE SET
+         display_name=excluded.display_name, is_checked=excluded.is_checked,
+         created_at=excluded.created_at, checked_at=excluded.checked_at`,
+      ...CHECKLIST_COLUMNS.map((c) => row[c]),
+    );
+    this.sql.exec("UPDATE tasks SET has_checklist = 1 WHERE task_id = ?", taskId);
+  }
+
+  // Write-through for delete_checklist_item: drop one row. has_checklist is left
+  // alone (can't tell if it was the last item without an authoritative set; the
+  // next delta-driven re-fetch reconciles it). taskId is accepted for symmetry
+  // and to scope the delete defensively.
+  deleteChecklistItem(taskId: string, itemId: string): void {
+    this.sql.exec(
+      "DELETE FROM checklist_items WHERE item_id = ? AND task_id = ?",
+      itemId,
+      taskId,
+    );
+  }
+
+  // A task's cached checklist rows, open items first then by creation order — the
+  // "what am I waiting on" reading. Powers cross-task checklist enrichment.
+  getChecklistItems(taskId: string): ChecklistItemRow[] {
+    return this.sql
+      .exec(
+        `SELECT * FROM checklist_items WHERE task_id = ?
+          ORDER BY is_checked ASC, created_at ASC NULLS LAST, item_id ASC`,
+        taskId,
+      )
+      .toArray() as unknown as ChecklistItemRow[];
+  }
+
+  // The backfill/refresh work set: OPEN tasks whose checklist marker is NULL
+  // ("needs fetch"), excluding skipped lists, newest-changed first (recently
+  // touched tasks are the likeliest to be queried), capped per cycle. Completed
+  // tasks are deliberately left out — they lazy-fill only if a query touches them.
+  selectDueChecklistTasks(
+    max: number,
+    skipListIds: string[],
+  ): Array<{ task_id: string; list_id: string }> {
+    const skipClause =
+      skipListIds.length > 0
+        ? `AND list_id NOT IN (${skipListIds.map(() => "?").join(", ")})`
+        : "";
+    return this.sql
+      .exec(
+        `SELECT task_id, list_id FROM tasks
+          WHERE checklist_synced_at IS NULL
+            AND status <> 'completed'
+            ${skipClause}
+          ORDER BY modified_at DESC
+          LIMIT ?`,
+        ...skipListIds,
+        max,
+      )
+      .toArray() as unknown as Array<{ task_id: string; list_id: string }>;
   }
 
   findListForTask(
@@ -447,6 +583,176 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return rows.length > 0 ? rows[0] : null;
   }
 
+  // -- Subscription store (ROADMAP §4) --------------------------------------
+  getSubscriptions(): SubscriptionRow[] {
+    return this.sql
+      .exec("SELECT * FROM subscriptions")
+      .toArray() as unknown as SubscriptionRow[];
+  }
+
+  findSubscription(subscriptionId: string): SubscriptionRow | null {
+    const rows = this.sql
+      .exec("SELECT * FROM subscriptions WHERE subscription_id = ?", subscriptionId)
+      .toArray() as unknown as SubscriptionRow[];
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  putSubscription(rec: SubscriptionRow): void {
+    this.sql.exec(
+      `INSERT INTO subscriptions
+         (subscription_id, list_id, client_state, expiration_ms, created_at_ms)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(subscription_id) DO UPDATE SET
+         list_id=excluded.list_id, client_state=excluded.client_state,
+         expiration_ms=excluded.expiration_ms, created_at_ms=excluded.created_at_ms`,
+      rec.subscription_id,
+      rec.list_id,
+      rec.client_state,
+      rec.expiration_ms,
+      rec.created_at_ms,
+    );
+  }
+
+  deleteSubscriptionRecord(subscriptionId: string): void {
+    this.sql.exec("DELETE FROM subscriptions WHERE subscription_id = ?", subscriptionId);
+  }
+
+  // -- Subscription reconciliation (ROADMAP §4) -----------------------------
+  // Bring Graph's subscriptions in line with the live, non-skipped roster, one
+  // bounded batch per cycle (free-tier safety). Tolerates per-op Graph failures
+  // (logged, retried next cycle). `opts` overrides are for tests only.
+  async reconcileSubscriptions(opts: { enabled?: boolean; now?: number } = {}): Promise<void> {
+    const enabled = opts.enabled ?? taskSubscriptionsEnabled(this.env);
+    const now = opts.now ?? Date.now();
+    const url = webhookUrl(this.env);
+
+    const records = this.getSubscriptions();
+
+    // Gate OFF (or no reachable webhook URL): tear our subscriptions down,
+    // budgeted, and create none.
+    if (!enabled || !url) {
+      const graph = new GraphClient(this);
+      let budget = maxSubscriptionOpsPerCycle(this.env);
+      for (const rec of records) {
+        if (budget <= 0) break;
+        budget -= 1;
+        await this.#tearDownSubscription(graph, rec.subscription_id);
+      }
+      return;
+    }
+
+    // Which lists SHOULD have a subscription: the non-skipped roster.
+    const cfg = await loadListsConfig(this.env);
+    const rosterRows = this.listLists();
+    const wanted = new Set(
+      rosterRows
+        .filter((l) => !shouldSkipSync({ list_id: l.list_id, wellknown: l.wellknown }, cfg))
+        .map((l) => l.list_id),
+    );
+    const haveByList = new Map(records.map((r) => [r.list_id, r]));
+
+    const graph = new GraphClient(this);
+    let budget = maxSubscriptionOpsPerCycle(this.env);
+
+    // 1. Delete records whose list is gone or now skipped.
+    for (const rec of records) {
+      if (budget <= 0) return;
+      if (!wanted.has(rec.list_id)) {
+        budget -= 1;
+        await this.#tearDownSubscription(graph, rec.subscription_id);
+      }
+    }
+
+    // 2. Create for wanted lists with no record. The per-cycle cap rotates
+    //    coverage over a few cycles for a large roster (free-tier safety).
+    for (const listId of wanted) {
+      if (budget <= 0) return;
+      if (haveByList.has(listId)) continue;
+      budget -= 1;
+      await this.#createSubscriptionFor(graph, listId, url, now);
+    }
+  }
+
+  // Renew records nearing expiry, budgeted. Called from the cycle alongside
+  // reconcile.
+  async renewSubscriptions(opts: { now?: number } = {}): Promise<void> {
+    if (!taskSubscriptionsEnabled(this.env)) return;
+    const now = opts.now ?? Date.now();
+    const graph = new GraphClient(this);
+    let budget = maxSubscriptionOpsPerCycle(this.env);
+    const due = this.getSubscriptions()
+      .filter((r) => r.expiration_ms - now < SUBSCRIPTION_RENEW_MARGIN_MS)
+      .sort((a, b) => a.expiration_ms - b.expiration_ms);
+    for (const rec of due) {
+      if (budget <= 0) break;
+      budget -= 1;
+      try {
+        const next = desiredExpiration(now);
+        const { expirationDateTime } = await renewSubscription(graph, rec.subscription_id, next);
+        this.putSubscription({ ...rec, expiration_ms: Date.parse(expirationDateTime) });
+      } catch (e) {
+        // 404 → subscription already expired/gone on Graph's side; drop the
+        // record so reconcile recreates it. Other errors: leave for next cycle.
+        if (e instanceof GraphError && e.status === 404) {
+          this.deleteSubscriptionRecord(rec.subscription_id);
+        }
+        log.warn("subscription_renew_failed", {
+          subscription_id: rec.subscription_id,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  }
+
+  async #createSubscriptionFor(
+    graph: GraphClient,
+    listId: string,
+    notificationUrl: string,
+    now: number,
+  ): Promise<void> {
+    try {
+      const clientState = newClientState();
+      const { id, expirationDateTime } = await createSubscription(graph, {
+        listId,
+        notificationUrl,
+        clientState,
+        expirationDateTime: desiredExpiration(now),
+      });
+      this.putSubscription({
+        subscription_id: id,
+        list_id: listId,
+        client_state: clientState,
+        expiration_ms: Date.parse(expirationDateTime),
+        created_at_ms: now,
+      });
+      log.info("subscription_created", { list_id: listId, subscription_id: id });
+    } catch (e) {
+      // 403 = per-tenant subscription budget exhausted; 400/validation = webhook
+      // unreachable (e.g. local dev). Log and move on — the timer-driven cycle
+      // still keeps the cache fresh; reconcile retries next cycle.
+      log.warn("subscription_create_failed", {
+        list_id: listId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  async #tearDownSubscription(graph: GraphClient, subscriptionId: string): Promise<void> {
+    try {
+      await deleteSubscription(graph, subscriptionId);
+    } catch (e) {
+      // 404 → already gone on Graph's side; still drop our record.
+      if (!(e instanceof GraphError && e.status === 404)) {
+        log.warn("subscription_delete_failed", {
+          subscription_id: subscriptionId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return; // leave the record so we retry the delete next cycle
+      }
+    }
+    this.deleteSubscriptionRecord(subscriptionId);
+  }
+
   // True once at least one full baseline of this list's tasks reached a
   // deltaLink — i.e. the DO holds the authoritative tail and reads can be served
   // from it. A mid-cycle (next_link set, delta_link still null) baseline is NOT
@@ -502,6 +808,11 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
         f.has_checklist ? "has_checklist = 1" : "(has_checklist = 0 OR has_checklist IS NULL)",
       );
     }
+    if (f.has_open_checklist_item !== undefined) {
+      const exists =
+        "EXISTS (SELECT 1 FROM checklist_items ci WHERE ci.task_id = tasks.task_id AND ci.is_checked = 0)";
+      where.push(f.has_open_checklist_item ? exists : `NOT ${exists}`);
+    }
 
     // Keyset cursor: rows strictly after the last returned row in the ordering.
     // NULLs sort last (DESC), so the predicate branches on the cursor's
@@ -537,26 +848,114 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return { rows, next_cursor };
   }
 
+  // FTS task search. `include_checklist` widens recall to tasks whose CHECKLIST
+  // items match (text lives in a separate FTS table). BM25 `rank` is computed per
+  // FTS corpus, so scores across the two tables aren't comparable — rather than
+  // fake a merged ranking, results are TIERED: title/body matches first in their
+  // exact relevance order, then checklist-only matches appended (ranked among
+  // themselves), deduped by task_id. A task matching both stays in the title/body
+  // tier. No-op-safe when the checklist cache is empty (the checklist tier adds
+  // nothing). The list/status filters apply to both tiers.
   search(opts: {
     query: string;
     lists?: string[];
     status?: string[];
     limit?: number;
+    include_checklist?: boolean;
   }): { rows: TaskRow[] } {
-    const where: string[] = ["tasks_fts MATCH ?"];
-    const params: (string | number)[] = [opts.query];
+    const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+
+    // Shared task-level filters (lists/status) used by both tiers.
+    const tFilters: string[] = [];
+    const tParams: (string | number)[] = [];
     if (opts.lists && opts.lists.length > 0) {
-      where.push(`t.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
-      params.push(...opts.lists);
+      tFilters.push(`t.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
+      tParams.push(...opts.lists);
     }
     if (opts.status && opts.status.length > 0) {
-      where.push(`t.status IN (${opts.status.map(() => "?").join(", ")})`);
-      params.push(...opts.status);
+      tFilters.push(`t.status IN (${opts.status.map(() => "?").join(", ")})`);
+      tParams.push(...opts.status);
     }
+    const tWhere = tFilters.length ? ` AND ${tFilters.join(" AND ")}` : "";
+
+    // Tier 0 — title/body matches, in BM25 relevance order.
+    const titleRows = this.sql
+      .exec(
+        `SELECT t.* FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
+          WHERE tasks_fts MATCH ?${tWhere} ORDER BY rank LIMIT ?`,
+        opts.query,
+        ...tParams,
+        limit,
+      )
+      .toArray() as unknown as TaskRow[];
+
+    if (!opts.include_checklist) return { rows: titleRows };
+
+    // Tier 1 — tasks matching via checklist text, appended (deduped by task_id;
+    // one matched item may repeat a task, and a task may already be in tier 0).
+    const clRows = this.sql
+      .exec(
+        `SELECT t.* FROM checklist_fts cf
+           JOIN checklist_items ci ON ci.rowid = cf.rowid
+           JOIN tasks t ON t.task_id = ci.task_id
+          WHERE checklist_fts MATCH ?${tWhere} ORDER BY rank LIMIT ?`,
+        opts.query,
+        ...tParams,
+        limit,
+      )
+      .toArray() as unknown as TaskRow[];
+
+    const seen = new Set(titleRows.map((r) => r.task_id));
+    const merged = [...titleRows];
+    for (const r of clRows) {
+      if (seen.has(r.task_id)) continue;
+      seen.add(r.task_id);
+      merged.push(r);
+    }
+    return { rows: merged.slice(0, limit) };
+  }
+
+  // Cross-task checklist search — the feature's new capability. Two modes,
+  // selected by whether `query` is given:
+  //   • with query  → FTS5 over checklist item text, ordered by relevance (rank);
+  //   • without     → every (pending) item, ordered oldest-first by created_at —
+  //                   the "what am I waiting on longest" follow-up view.
+  // pending_only (default true) restricts to unchecked items. Each row carries
+  // the parent task's title/status (JOIN tasks) so the agent can group + render
+  // without a second round trip. Throws on malformed FTS syntax (the tool maps it).
+  searchChecklistItems(opts: {
+    query?: string;
+    pending_only?: boolean;
+    lists?: string[];
+    limit?: number;
+  }): { rows: ChecklistSearchRow[] } {
+    const hasQuery = !!opts.query && opts.query.trim().length > 0;
+    const pendingOnly = opts.pending_only ?? true;
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+
+    const from = hasQuery
+      ? `checklist_fts f
+           JOIN checklist_items ci ON ci.rowid = f.rowid
+           JOIN tasks t ON t.task_id = ci.task_id`
+      : `checklist_items ci JOIN tasks t ON t.task_id = ci.task_id`;
+    if (hasQuery) {
+      where.push("checklist_fts MATCH ?");
+      params.push(opts.query as string);
+    }
+    if (pendingOnly) where.push("ci.is_checked = 0");
+    if (opts.lists && opts.lists.length > 0) {
+      where.push(`ci.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
+      params.push(...opts.lists);
+    }
+
     const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
-    const sql = `SELECT t.* FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
-                  WHERE ${where.join(" AND ")} ORDER BY rank LIMIT ?`;
-    const rows = this.sql.exec(sql, ...params, limit).toArray() as unknown as TaskRow[];
+    const order = hasQuery ? "rank" : "ci.created_at ASC NULLS LAST, ci.item_id ASC";
+    const sql = `SELECT ci.*, t.title AS task_title, t.status AS task_status
+                   FROM ${from}
+                  WHERE ${where.join(" AND ")}
+                  ORDER BY ${order} LIMIT ?`;
+    const rows = this.sql.exec(sql, ...params, limit).toArray() as unknown as ChecklistSearchRow[];
     return { rows };
   }
 
@@ -710,6 +1109,92 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     if (pending === null) await this.ctx.storage.setAlarm(Date.now() + 1);
   }
 
+  // Read-only notification entrypoint (ROADMAP §4). The webhook defers here.
+  // For each item: validate clientState against the stored subscription record,
+  // resolve the list, and arm the alarm once (the incremental Graph delta then
+  // refreshes the changed task's Graph fields + creates/removes its row). For
+  // My Day, refresh JUST the changed task via a targeted Substrate getTask
+  // (cost ∝ edits, not list size). Issues NO mutating Graph/Substrate calls
+  // (getTask is a GET), so it can never emit a change notification → no loop.
+  async onChangeNotification(
+    items: Array<{
+      subscriptionId?: string;
+      clientState?: string;
+      changeType?: string;
+      resourceId?: string;
+    }>,
+  ): Promise<{ accepted: number; rejected: number }> {
+    let accepted = 0;
+    let rejected = 0;
+    const work: Array<{ listId: string; taskId?: string; changeType?: string }> = [];
+    for (const item of items) {
+      const rec = item.subscriptionId ? this.findSubscription(item.subscriptionId) : null;
+      if (!rec || rec.client_state !== item.clientState) {
+        rejected += 1;
+        continue;
+      }
+      accepted += 1;
+      work.push({ listId: rec.list_id, taskId: item.resourceId, changeType: item.changeType });
+    }
+
+    // Arm the alarm once for the Graph delta refresh (idempotent; coalesces).
+    if (accepted > 0) await this.ctx.storage.setAlarm(Date.now() + 1);
+
+    // Targeted My Day refresh of each changed task. Sequential (EXO forbids
+    // parallel Substrate calls). Skipped entirely when My Day is off.
+    if (myDayEnabled(this.env)) {
+      let sub: SubstrateClient | null = null;
+      for (const w of work) {
+        if (!w.taskId || w.changeType === "deleted") continue;
+        try {
+          if (!sub) {
+            const ident = await loadIdentity(this.env);
+            sub = new SubstrateClient(
+              {
+                getSubstrateAccessToken: () => this.getSubstrateAccessToken(),
+                forceSubstrateRefresh: () => this.forceSubstrateRefresh(),
+              },
+              ident?.anchorMailbox ?? null,
+            );
+          }
+          // Row must exist for updateMyDayFields to land (it no-ops otherwise).
+          // A brand-new task's notification can beat the delta that creates the
+          // row → fall back to mark-scan-due so the periodic scan fills it.
+          if (this.getMyDayFields(w.taskId) === null) {
+            this.#setSyncState(`myday:${w.listId}`, { last_synced_at: null });
+            continue;
+          }
+          const t = await sub.getTask(w.listId, w.taskId);
+          this.updateMyDayFields(w.taskId, {
+            committed_day: t.CommittedDay ? t.CommittedDay.slice(0, 10) : null,
+            committed_order: t.CommittedOrder ?? null,
+            order_datetime: t.OrderDateTime ?? null,
+            postponed_day: t.PostponedDay ? t.PostponedDay.slice(0, 10) : null,
+          });
+        } catch (e) {
+          if (e instanceof Error && e.message.includes("my_day_unavailable")) {
+            log.warn("notif_my_day_unavailable", { error: e.message });
+            break; // latched — stop trying this batch
+          }
+          if (e instanceof SubstrateError && e.status === 403) {
+            this.markMyDayUnavailable();
+            log.warn("notif_my_day_unavailable", { error: e.detail ?? "403" });
+            break;
+          }
+          // Transient (404 not-yet-propagated, throttle, etc.): mark scan-due so
+          // the next budgeted scan reconciles this list.
+          this.#setSyncState(`myday:${w.listId}`, { last_synced_at: null });
+          log.warn("notif_my_day_refresh_failed", {
+            list_id: w.listId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+    }
+
+    return { accepted, rejected };
+  }
+
   // One sync cycle per alarm, then re-arm: soon if anything is still mid-cycle
   // (baseline draining), else at the configured interval.
   async alarm(): Promise<void> {
@@ -753,15 +1238,59 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   // immediate ensureSyncing() after token storage for a prompter re-baseline,
   // and whether multi-account keying changes this single-instance assumption.
   async resetIdentity(): Promise<void> {
-    this.#identityGeneration++; // H4: invalidate any in-flight token refresh
+    this.#identityGeneration++; // H4: invalidate any in-flight token refresh (first)
     this.#refreshInFlight = {};
     this.#refreshChain = Promise.resolve();
+    // Best-effort: delete THIS identity's Graph subscriptions before we drop the
+    // records (which would lose their ids). The outgoing owner's token is still
+    // in KV at this point — the caller wipes it AFTER this DO reset — so the
+    // deletes can authenticate. After the generation bump getAccessToken still
+    // serves a fresh token but refuses to refresh a stale one, so teardown
+    // cleans up when it safely can and otherwise leaves the orphans to lapse
+    // (≤2.94d). It never blocks or fails the wipe below.
+    await this.#teardownAllSubscriptions();
     this.#substrateToken = null;
     this.#substrateUnavailable = false;
     this.sql.exec("DELETE FROM tasks"); // tasks_fts cascades via AFTER DELETE trigger
     this.sql.exec("DELETE FROM lists");
     this.sql.exec("DELETE FROM sync_state");
+    this.sql.exec("DELETE FROM subscriptions");
     await this.ctx.storage.deleteAlarm();
+  }
+
+  // Delete every stored Graph subscription for the current identity (best effort).
+  // Used by resetIdentity on an owner change so we don't strand orphans pointing
+  // at our /webhook that we can no longer address by id. Bounded: per-subscription
+  // deletes swallow their own errors, and the loop stops the moment auth is no
+  // longer usable (so a dead outgoing token isn't hammered N times).
+  async #teardownAllSubscriptions(): Promise<void> {
+    const records = this.getSubscriptions();
+    if (records.length === 0) return;
+    const graph = new GraphClient(this);
+    let deleted = 0;
+    for (const rec of records) {
+      try {
+        await deleteSubscription(graph, rec.subscription_id);
+        deleted += 1;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log.warn("subscription_teardown_failed", {
+          subscription_id: rec.subscription_id,
+          error: msg,
+        });
+        // Auth no longer usable (revoked/expired outgoing token, or the
+        // generation bump blocked a refresh) → stop; the rest lapse on their own.
+        // A 404 (already gone) is not auth, so keep going.
+        if (
+          msg.includes("identity_changed") ||
+          msg.includes("not_authenticated") ||
+          (e instanceof GraphError && (e.status === 401 || e.status === 403))
+        ) {
+          break;
+        }
+      }
+    }
+    if (deleted > 0) log.info("subscription_teardown", { deleted, total: records.length });
   }
 
   // Run one budget-bounded cycle: roster first (drives which lists to sync),
@@ -821,8 +1350,23 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     //    free-tier subrequest ceiling regardless of roster size. Runs last so
     //    the gate sees the cycle's final draining state.
     if (!anyOutstanding) {
+      // Keep Graph subscriptions tracking the live roster, and renew any nearing
+      // expiry. Budgeted (MAX_SUBSCRIPTION_OPS_PER_CYCLE) + gated; failures are
+      // swallowed so a Graph hiccup never stalls the delta cycle. Runs on calm
+      // cycles only so its Graph calls don't stack on a baseline page-burst.
+      await this.reconcileSubscriptions().catch((e) =>
+        log.warn("subscription_reconcile_failed", { error: String(e) }),
+      );
+      await this.renewSubscriptions().catch((e) =>
+        log.warn("subscription_renew_batch_failed", { error: String(e) }),
+      );
       await this.#runMyDayScanBatch(skip).catch((e) =>
         log.warn("my_day_scan_failed", { error: String(e) }),
+      );
+      // Drain the checklist backfill/refresh set (gated + budgeted). Same calm-
+      // cycle placement so its Graph GETs don't stack on a baseline page-burst.
+      await this.#runChecklistScanBatch(skip).catch((e) =>
+        log.warn("checklist_scan_failed", { error: String(e) }),
       );
     }
     return anyOutstanding;
@@ -839,6 +1383,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       !!this.#getSyncState(`tasks:${listId}`) || !!this.#getSyncState(`myday:${listId}`);
     if (!hasRows && !hasState) return;
     this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+    this.sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
     this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
     this.sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
   }
@@ -926,21 +1471,32 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       return;
     }
     const listId = resource.slice("tasks:".length);
+    const checklist = checklistCacheEnabled(this.env);
     for (const row of rows) {
-      if (row.kind === "removed") this.deleteTask(row.id);
-      else this.upsertTask(row.task, listId);
+      if (row.kind === "removed") {
+        this.deleteTask(row.id); // cascades checklist_items
+      } else {
+        this.upsertTask(row.task, listId);
+        // Incremental engine: a task that rode delta CHANGED (checklist edits bump
+        // its lastModifiedDateTime), so its cached checklist may be stale — mark it
+        // for re-fetch by the next budgeted scan. Delta carries no expansions, so
+        // we can't diff the checklist here; the marker + scan does it cheaply.
+        if (checklist) this.markChecklistDirty(row.task.id);
+      }
     }
   }
 
   #purgeResource(resource: string): void {
     if (resource === "lists") {
       this.sql.exec("DELETE FROM tasks");
+      this.sql.exec("DELETE FROM checklist_items");
       this.sql.exec("DELETE FROM lists");
       this.sql.exec("DELETE FROM sync_state WHERE resource LIKE 'tasks:%'");
       return;
     }
     const listId = resource.slice("tasks:".length);
     this.sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+    this.sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
   }
 
   #getSyncState(resource: string): SyncStateRow | null {
@@ -1100,6 +1656,49 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       due: due.length,
       roster: entries.length,
     });
+  }
+
+  // Budgeted background checklist backfill/refresh scan. Graph has no
+  // hasChecklist boolean and delta carries no expansions, so each task's
+  // checklist is a per-task GET; running the whole NULL-marker set in one cycle
+  // could blow the Workers free-tier subrequest ceiling. Instead we drain at most
+  // CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE tasks per calm cycle (newest-changed
+  // first). The marker is self-tracking: a drained task gets checklist_synced_at
+  // stamped and drops out; the delta-apply path re-nulls it when the task changes
+  // again (the incremental engine). Over ⌈backlog / cap⌉ calm cycles a cold cache
+  // backfills; steady state is ~one GET per changed task.
+  //
+  // Per-task errors leave the marker NULL so the task stays due and retries next
+  // cycle (mirrors the My Day / task-delta error paths) — never mutating the task
+  // row, so an unreachable checklist can't corrupt cached task state. A persistent
+  // error keeps a task at the head of the rotation; the dominant terminal case
+  // (task deleted upstream → 404) is resolved by the next delta removal.
+  async #runChecklistScanBatch(skip: (listId: string) => boolean = () => false): Promise<void> {
+    if (!checklistCacheEnabled(this.env)) return;
+
+    const max = checklistScanMaxTasksPerCycle(this.env);
+    const skipIds = this.listLists()
+      .filter((l) => skip(l.list_id))
+      .map((l) => l.list_id);
+    const due = this.selectDueChecklistTasks(max, skipIds);
+    if (due.length === 0) return;
+
+    const graph = new GraphClient(this);
+    let scanned = 0;
+    let errored = 0;
+    for (const { task_id, list_id } of due) {
+      try {
+        const items = await listChecklistItems(graph, list_id, task_id);
+        this.replaceChecklistItems(task_id, list_id, items);
+        scanned += 1;
+      } catch (e) {
+        errored += 1;
+        const msg = e instanceof Error ? e.message : String(e);
+        // Leave the marker NULL (retried next cycle); do NOT touch the task row.
+        log.warn("checklist_scan_task_failed", { task_id, list_id, error: msg });
+      }
+    }
+    log.info("checklist_scan_batch", { scanned, errored, due: due.length });
   }
 
   #intervalMs(): number {

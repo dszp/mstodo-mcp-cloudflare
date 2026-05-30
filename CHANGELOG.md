@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] – 2026-05-30
+
+### Added
+- **Checklist-item cache, gated by `ENABLE_CHECKLIST_CACHE` (default OFF — opt-in).** Mirrors each
+  task's checklist items into a queryable SQLite table (`checklist_items` + a `checklist_fts` FTS5
+  index, migration **v3**) so checklist text and pending/done state become filterable **across
+  tasks** — the "waiting on X" follow-up workflow (add a checklist item, then find the tasks whose
+  follow-up is still open, oldest first). Backed by the same cheap "backfill once, then incremental
+  upkeep" model as My Day: checklist edits bump the parent task's `lastModifiedDateTime`, so they
+  ride the existing `$delta` feed (verified live) — a changed task is marked dirty and re-fetched by
+  a **budgeted** per-task scan (`CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE`, newest-changed first) on calm
+  sync cycles. Independent of `ENABLE_TASK_SUBSCRIPTIONS` (the change signal is delta itself;
+  subscriptions only lower latency). Steady-state cost is ~one Graph GET per changed task. **Scope
+  by design:** open tasks in non-skipped lists only — completed tasks are intentionally excluded
+  from cross-task checklist queries (`get_task` still returns any single task's items live), and
+  `no_sync`/Flagged-Emails lists are never cached.
+  - New MCP tool **`search_checklist_items`**: FTS5 search over checklist text (ranked), or — with
+    no query — pending items oldest-first (the follow-up view); `pending_only` (default true) and
+    `lists` filters; results grouped by parent task.
+  - **`query_tasks`** gains a **`has_open_checklist_item`** filter (tasks with ≥1 unchecked item),
+    composable with the existing status/date/importance/classification filters.
+  - **`search_tasks`** gains **`include_checklist`** (default **true**): full-text search now also
+    matches text inside checklist items (subtasks / steps), so a task surfaces even when the term
+    only appears in a checklist item — closing a silent recall gap. Results are tiered (title/body
+    matches first by relevance, then checklist-only matches appended); no-op when the cache is off;
+    set `false` for a title/body-only search.
+  - The `create_/update_/delete_checklist_item` tools now **write through** to the cache for instant
+    visibility (previously the cache only carried a per-task `has_checklist` flag); task deletion
+    cascades to its checklist rows.
+
+## [0.10.0] – 2026-05-29
+
+### Added
+- **Graph change-notification subscriptions (ROADMAP §4), gated by `ENABLE_TASK_SUBSCRIPTIONS`
+  (default ON).** A public `POST /webhook` receiver plus per-list subscriptions on
+  `/me/todo/lists/{id}/tasks` drive *when* delta sync runs from Microsoft Graph push notifications
+  (sub-2-minute freshness) instead of only the timer — near-instant updates like the native To Do
+  apps. Rides the existing delegated `Tasks.ReadWrite` scope (**no new consent**); requires a
+  reachable https `SERVICE_BASE_URL` (Graph validates the notificationUrl at creation). The
+  singleton `TodoIndex` owns subscription create/renew/delete, reconciled against the live list
+  roster inside the sync cycle and **budgeted per cycle** (`MAX_SUBSCRIPTION_OPS_PER_CYCLE`) so a
+  large roster is covered over a few cycles rather than one burst. **Delta polling remains the
+  mandatory backstop** — Graph has no missed-notification safety net for `todoTask`, so the timer
+  cycle stays in place (it can simply run less often).
+- **My Day stays fresh off notifications.** A notification triggers a *targeted* single-task
+  Substrate `getTask` to refresh just the changed task's My Day fields (`committed_day`,
+  `committed_order`, …) — cost scales with edit frequency, not list size — with the periodic
+  budgeted scan retained as backstop. The notification path is strictly read-only toward Microsoft
+  (Graph delta GET + Substrate GET), so it can never itself emit a change notification (no loop).
+- **`MAX_SUBSCRIPTION_OPS_PER_CYCLE` var** (default 2, free-tier safe) bounds subscription
+  create/renew/delete Graph calls per cycle, mirroring the My Day scan caps. Raise it on paid
+  deployments (1000-subrequest ceiling) for faster initial coverage and renewal headroom.
+
+### Changed
+- **Owner-change cleanup now deletes the Graph subscriptions before wiping their records.**
+  `resetIdentity()` best-effort `DELETE`s each subscription using the outgoing owner's still-present
+  token (bounded; stops if auth is no longer usable) instead of stranding orphans that linger until
+  they expire (~2.94d). Failures never block the fail-closed identity wipe.
+
 ## [0.9.0] – 2026-05-28
 
 ### Added

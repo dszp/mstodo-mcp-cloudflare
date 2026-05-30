@@ -64,14 +64,27 @@ The server exposes a Microsoft To Do tool surface over MCP. Highlights:
   set `ENABLE_DOWNLOAD_LINKS="false"` to disable. See
   [Cross-server download](#cross-server-download--download) below.
 - **Cross-list query & search** (answered from the local `TodoIndex` mirror):
-  - `query_tasks` — filter by lists, status, date ranges, importance, has-checklist;
-    `types`/`exclude_types` (include/exclude by list classification); a `completed`
-    convenience (mutually exclusive with `status`); paginated.
+  - `query_tasks` — filter by lists, status, date ranges, importance, has-checklist,
+    `has_open_checklist_item` (tasks with an unchecked item — the "waiting on
+    something" filter); `types`/`exclude_types` (include/exclude by list
+    classification); a `completed` convenience (mutually exclusive with `status`);
+    paginated.
   - `search_tasks` — full-text search over task titles/bodies using **FTS5**
     (SQLite's built-in full-text search engine); same `lists`/`status`/`types`/
     `exclude_types`/`completed` filters. `exclude_types:["excluded"]` drops noise
-    (e.g. flagged-email lists) from results without deleting anything.
+    (e.g. flagged-email lists) from results without deleting anything. When the
+    checklist cache is on it also matches checklist-item (subtask / step) text by
+    default (`include_checklist`, tiered after title/body matches).
   - `find_task_list`, `get_pending_across_lists`, `get_recently_completed`.
+- **Checklist follow-ups (opt-in)** — gated behind `ENABLE_CHECKLIST_CACHE=true`. Mirrors task
+  checklist items into a queryable table so you can use checklist items as a lightweight follow-up
+  system (add a "waiting on Acme reply" item, then find what's still open). `search_checklist_items`
+  does FTS over checklist text, or — with no query — lists pending items **oldest-first** (what
+  you've been waiting on longest), grouped by task. Pairs with the `query_tasks`
+  `has_open_checklist_item` filter. Off by default (it adds a one-time per-task backfill); the cache
+  then stays fresh on the normal delta cycle. Covers **open tasks** only — completed tasks are
+  intentionally excluded from cross-task checklist queries (`get_task` still shows any task's items
+  live), and skipped lists (`no_sync`/Flagged Emails) aren't cached.
 - **My Day & manual order (opt-in, Substrate)** — gated behind `ENABLE_MY_DAY=true` (these use the
   undocumented Substrate endpoint the To Do web app uses, because My Day and the manual
   drag-to-reorder position are invisible to Graph): `list_my_day_tasks`, `add_to_my_day`,
@@ -92,6 +105,16 @@ embedded SQLite database, alongside an **FTS5** full-text index (FTS5 is SQLite'
 built-in full-text search engine). Cross-list `query_tasks`, `search_tasks`, and
 aggregation tools read from this local mirror rather than re-walking Graph on every
 call; a `*/15` cron keeps it synced and an owner-identity gate keeps it private.
+
+By default the mirror also subscribes to **Graph change notifications** (one per list), so an edit
+in any To Do client lands in the cache within ~2 minutes — near-instant, like the native apps —
+instead of waiting for the next timer cycle. This is a *trigger* for delta sync, not a replacement:
+the timer cycle stays as the backstop (Graph has no missed-notification guarantee for tasks). It
+rides the existing `Tasks.ReadWrite` scope (no extra consent), needs a reachable `SERVICE_BASE_URL`
+(Graph posts to `${SERVICE_BASE_URL}/webhook`), and is toggleable with `ENABLE_TASK_SUBSCRIPTIONS`
+(`"false"` ⇒ timer-only, no public webhook). A notification also refreshes just the changed task's
+My Day fields via one targeted Substrate read — the webhook path never writes back to Microsoft, so
+it can't loop.
 
 Small, slowly-changing state — your OAuth tokens, the owner-identity record, and the
 config blobs below — lives in Cloudflare **KV (a key-value store)**. The large,
