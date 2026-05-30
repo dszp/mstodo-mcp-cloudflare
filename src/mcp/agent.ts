@@ -1474,7 +1474,8 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     this.server.registerTool(
       "list_checklist_items",
       {
-        description: "Return all checklist items for a Microsoft To Do task.",
+        description:
+          "Return all checklist items (subtasks / 'steps' in the To Do app) for a Microsoft To Do task.",
         inputSchema: {
           list: z.string().min(1).optional().describe("List alias (from get_list_config), display name, or Graph list ID."),
           task_id: z.string().min(1).describe("Microsoft Graph task id."),
@@ -1525,7 +1526,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "create_checklist_item",
       {
         description:
-          "Create a new checklist item on a Microsoft To Do task. Invalidates the list's task cache.",
+          "Create a new checklist item (subtask / 'step') on a Microsoft To Do task. Invalidates the list's task cache.",
         inputSchema: {
           list: z.string().min(1).optional().describe("List alias (from get_list_config), display name, or Graph list ID."),
           task_id: z.string().min(1).describe("Microsoft Graph task id."),
@@ -1576,7 +1577,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "update_checklist_item",
       {
         description:
-          "Update the text or checked state of a checklist item. Invalidates the list's task cache.",
+          "Update the text or checked state of a checklist item (subtask / 'step'). Invalidates the list's task cache.",
         inputSchema: {
           list: z.string().min(1).optional().describe("List alias (from get_list_config), display name, or Graph list ID."),
           task_id: z.string().min(1).describe("Microsoft Graph task id."),
@@ -1628,7 +1629,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "delete_checklist_item",
       {
         description:
-          "Delete a checklist item from a task. Invalidates the list's task cache.",
+          "Delete a checklist item (subtask / 'step') from a task. Invalidates the list's task cache.",
         inputSchema: {
           list: z.string().min(1).optional().describe("List alias (from get_list_config), display name, or Graph list ID."),
           task_id: z.string().min(1).describe("Microsoft Graph task id."),
@@ -2876,7 +2877,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           has_open_checklist_item: z
             .boolean()
             .optional()
-            .describe("true = task has ≥1 UNCHECKED checklist item (the 'waiting on something' follow-up filter); false = none open. Requires ENABLE_CHECKLIST_CACHE."),
+            .describe("true = task has ≥1 UNCHECKED checklist item / subtask / step (the 'waiting on something' follow-up filter); false = none open. Requires ENABLE_CHECKLIST_CACHE."),
           limit: z.number().int().min(1).max(200).optional().describe("Max rows per page. Default 50; max 200."),
           cursor: z.string().optional().describe("Opaque keyset token from a prior query_tasks response."),
           types: z
@@ -2997,9 +2998,13 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "search_tasks",
       {
         description:
-          "Full-text search over task titles and bodies (FTS5), across lists, served from the TodoIndex. Supports bare terms, \"quoted phrases\", column scoping (title:foo), boolean AND/OR/NOT, and prefix* matching. Optionally restrict by lists and status. Returns summaries ordered by relevance.",
+          "Full-text search over task titles and bodies (FTS5), across lists, served from the TodoIndex. By default also matches text inside checklist items (a.k.a. subtasks / steps) when the checklist cache is enabled — set include_checklist:false for a title/body-only search. Supports bare terms, \"quoted phrases\", column scoping (title:foo), boolean AND/OR/NOT, and prefix* matching. Optionally restrict by lists and status. Returns task summaries; title/body matches come first (by relevance), then tasks that matched only via a checklist item.",
         inputSchema: {
           query: z.string().min(1).describe("FTS5 query string."),
+          include_checklist: z
+            .boolean()
+            .optional()
+            .describe("Also match checklist item (subtask / step) text, appending tasks that matched only there. Defaults true; no-op when ENABLE_CHECKLIST_CACHE is off. Set false for title/body only."),
           lists: z
             .array(z.string().min(1))
             .min(1)
@@ -3026,7 +3031,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .describe("Convenience: true = completed only; false = open tasks. Mutually exclusive with status."),
         },
       },
-      async ({ query, lists, status, limit, types, exclude_types, completed }): Promise<McpResponse> =>
+      async ({ query, lists, status, limit, types, exclude_types, completed, include_checklist }): Promise<McpResponse> =>
         instrument("search_tasks", async () => {
           const statusResolved = resolveStatusFilter(status, completed);
           if (!statusResolved.ok) {
@@ -3067,7 +3072,15 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           }
           let result: { rows: TaskRow[] };
           try {
-            result = await this.#index().search({ query, lists: listIds, status: statusArr, limit });
+            result = await this.#index().search({
+              query,
+              lists: listIds,
+              status: statusArr,
+              limit,
+              // Default ON: include checklist (subtask/step) text unless the
+              // caller opts out. No-op when the checklist cache is disabled.
+              include_checklist: include_checklist ?? true,
+            });
           } catch (e) {
             // FTS5 raises on malformed query syntax (unbalanced quotes, bad
             // operators). Map to a friendly error instead of unexpected_error.
@@ -3086,7 +3099,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "search_checklist_items",
       {
         description:
-          "Cross-task checklist-item search served from the TodoIndex (requires ENABLE_CHECKLIST_CACHE). Two modes: pass `query` for FTS5 over item text (ranked by relevance); omit it to list pending items oldest-first — the 'what am I waiting on longest' follow-up view. `pending_only` (default true) restricts to unchecked items. Optionally restrict by `lists`. Returns items grouped by their parent task.",
+          "Cross-task search over checklist items — a.k.a. subtasks, or 'steps' in the To Do app — served from the TodoIndex (requires ENABLE_CHECKLIST_CACHE). Use it to treat checklist items as follow-ups: find which tasks have an open item, or search their text. Two modes: pass `query` for FTS5 over item text (ranked by relevance); omit it to list pending items oldest-first — the 'what am I waiting on longest' view. `pending_only` (default true) restricts to unchecked items. Optionally restrict by `lists`. Returns items grouped by their parent task.",
         inputSchema: {
           query: z
             .string()

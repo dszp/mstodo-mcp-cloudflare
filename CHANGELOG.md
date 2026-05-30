@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `lists` filters; results grouped by parent task.
   - **`query_tasks`** gains a **`has_open_checklist_item`** filter (tasks with ≥1 unchecked item),
     composable with the existing status/date/importance/classification filters.
+  - **`search_tasks`** gains **`include_checklist`** (default **true**): full-text search now also
+    matches text inside checklist items (subtasks / steps), so a task surfaces even when the term
+    only appears in a checklist item — closing a silent recall gap. Results are tiered (title/body
+    matches first by relevance, then checklist-only matches appended); no-op when the cache is off;
+    set `false` for a title/body-only search.
   - The `create_/update_/delete_checklist_item` tools now **write through** to the cache for instant
     visibility (previously the cache only carried a per-task `has_checklist` flag); task deletion
     cascades to its checklist rows.

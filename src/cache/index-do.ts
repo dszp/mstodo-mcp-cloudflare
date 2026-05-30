@@ -848,27 +848,71 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return { rows, next_cursor };
   }
 
+  // FTS task search. `include_checklist` widens recall to tasks whose CHECKLIST
+  // items match (text lives in a separate FTS table). BM25 `rank` is computed per
+  // FTS corpus, so scores across the two tables aren't comparable — rather than
+  // fake a merged ranking, results are TIERED: title/body matches first in their
+  // exact relevance order, then checklist-only matches appended (ranked among
+  // themselves), deduped by task_id. A task matching both stays in the title/body
+  // tier. No-op-safe when the checklist cache is empty (the checklist tier adds
+  // nothing). The list/status filters apply to both tiers.
   search(opts: {
     query: string;
     lists?: string[];
     status?: string[];
     limit?: number;
+    include_checklist?: boolean;
   }): { rows: TaskRow[] } {
-    const where: string[] = ["tasks_fts MATCH ?"];
-    const params: (string | number)[] = [opts.query];
+    const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+
+    // Shared task-level filters (lists/status) used by both tiers.
+    const tFilters: string[] = [];
+    const tParams: (string | number)[] = [];
     if (opts.lists && opts.lists.length > 0) {
-      where.push(`t.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
-      params.push(...opts.lists);
+      tFilters.push(`t.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
+      tParams.push(...opts.lists);
     }
     if (opts.status && opts.status.length > 0) {
-      where.push(`t.status IN (${opts.status.map(() => "?").join(", ")})`);
-      params.push(...opts.status);
+      tFilters.push(`t.status IN (${opts.status.map(() => "?").join(", ")})`);
+      tParams.push(...opts.status);
     }
-    const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
-    const sql = `SELECT t.* FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
-                  WHERE ${where.join(" AND ")} ORDER BY rank LIMIT ?`;
-    const rows = this.sql.exec(sql, ...params, limit).toArray() as unknown as TaskRow[];
-    return { rows };
+    const tWhere = tFilters.length ? ` AND ${tFilters.join(" AND ")}` : "";
+
+    // Tier 0 — title/body matches, in BM25 relevance order.
+    const titleRows = this.sql
+      .exec(
+        `SELECT t.* FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
+          WHERE tasks_fts MATCH ?${tWhere} ORDER BY rank LIMIT ?`,
+        opts.query,
+        ...tParams,
+        limit,
+      )
+      .toArray() as unknown as TaskRow[];
+
+    if (!opts.include_checklist) return { rows: titleRows };
+
+    // Tier 1 — tasks matching via checklist text, appended (deduped by task_id;
+    // one matched item may repeat a task, and a task may already be in tier 0).
+    const clRows = this.sql
+      .exec(
+        `SELECT t.* FROM checklist_fts cf
+           JOIN checklist_items ci ON ci.rowid = cf.rowid
+           JOIN tasks t ON t.task_id = ci.task_id
+          WHERE checklist_fts MATCH ?${tWhere} ORDER BY rank LIMIT ?`,
+        opts.query,
+        ...tParams,
+        limit,
+      )
+      .toArray() as unknown as TaskRow[];
+
+    const seen = new Set(titleRows.map((r) => r.task_id));
+    const merged = [...titleRows];
+    for (const r of clRows) {
+      if (seen.has(r.task_id)) continue;
+      seen.add(r.task_id);
+      merged.push(r);
+    }
+    return { rows: merged.slice(0, limit) };
   }
 
   // Cross-task checklist search — the feature's new capability. Two modes,

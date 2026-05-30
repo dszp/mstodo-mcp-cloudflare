@@ -72,7 +72,9 @@ The server exposes a Microsoft To Do tool surface over MCP. Highlights:
   - `search_tasks` — full-text search over task titles/bodies using **FTS5**
     (SQLite's built-in full-text search engine); same `lists`/`status`/`types`/
     `exclude_types`/`completed` filters. `exclude_types:["excluded"]` drops noise
-    (e.g. flagged-email lists) from results without deleting anything.
+    (e.g. flagged-email lists) from results without deleting anything. When the
+    checklist cache is on it also matches checklist-item (subtask / step) text by
+    default (`include_checklist`, tiered after title/body matches).
   - `find_task_list`, `get_pending_across_lists`, `get_recently_completed`.
 - **Checklist follow-ups (opt-in)** — gated behind `ENABLE_CHECKLIST_CACHE=true`. Mirrors task
   checklist items into a queryable table so you can use checklist items as a lightweight follow-up

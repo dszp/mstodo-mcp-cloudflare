@@ -365,6 +365,68 @@ describe("searchChecklistItems", () => {
   });
 });
 
+describe("search include_checklist (tiered: title/body first, checklist-only appended)", () => {
+  const seed = async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM tasks");
+      ctx.storage.sql.exec("DELETE FROM checklist_items");
+      const t = (id: string, title: string, listId = "L") =>
+        ctx.storage.sql.exec(
+          "INSERT INTO tasks (task_id, list_id, status, title, modified_at) VALUES (?, ?, 'notStarted', ?, 1000)",
+          id,
+          listId,
+          title,
+        );
+      t("tt", "acme report"); // title match only
+      t("tc", "weekly sync"); // matches via checklist text only
+      t("tboth", "acme deal"); // matches both title and checklist
+      t("tnone", "groceries"); // no match
+      await instance.replaceChecklistItems("tc", "L", [
+        { id: "se-c1", displayName: "call acme back", isChecked: false },
+      ]);
+      await instance.replaceChecklistItems("tboth", "L", [
+        { id: "se-b1", displayName: "acme follow-up", isChecked: false },
+      ]);
+    });
+  };
+
+  it("false: title/body only (a checklist-only match is NOT returned)", async () => {
+    await seed();
+    await runInDurableObject(stub(), async (instance: TodoIndex) => {
+      const { rows } = await instance.search({ query: "acme", include_checklist: false });
+      expect(rows.map((r) => r.task_id).sort()).toEqual(["tboth", "tt"]);
+    });
+  });
+
+  it("true: appends the checklist-only match after the title/body matches, deduped", async () => {
+    await seed();
+    await runInDurableObject(stub(), async (instance: TodoIndex) => {
+      const { rows } = await instance.search({ query: "acme", include_checklist: true });
+      const ids = rows.map((r) => r.task_id);
+      expect(ids).toHaveLength(3); // tboth counted once despite matching both tiers
+      expect(ids.slice(0, 2).sort()).toEqual(["tboth", "tt"]); // tier 0 first
+      expect(ids[2]).toBe("tc"); // checklist-only match appended last
+    });
+  });
+
+  it("true: list filter also constrains the checklist matches", async () => {
+    await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
+      ctx.storage.sql.exec("DELETE FROM tasks");
+      ctx.storage.sql.exec("DELETE FROM checklist_items");
+      ctx.storage.sql.exec(
+        "INSERT INTO tasks (task_id, list_id, status, title, modified_at) VALUES ('only', 'OTHER', 'notStarted', 'weekly', 1000)",
+      );
+      await instance.replaceChecklistItems("only", "OTHER", [
+        { id: "se-o1", displayName: "acme thing", isChecked: false },
+      ]);
+      const inOther = await instance.search({ query: "acme", include_checklist: true, lists: ["OTHER"] });
+      expect(inOther.rows.map((r) => r.task_id)).toEqual(["only"]);
+      const inL = await instance.search({ query: "acme", include_checklist: true, lists: ["L"] });
+      expect(inL.rows).toHaveLength(0);
+    });
+  });
+});
+
 describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tests)", () => {
   const LISTS_DELTA = "https://graph.microsoft.com/v1.0/me/todo/lists/delta";
   const realFetch = globalThis.fetch;
