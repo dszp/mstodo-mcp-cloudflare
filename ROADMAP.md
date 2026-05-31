@@ -293,6 +293,26 @@ covers user-touched tasks).
 > tiered ranking (title/body matches first, checklist-only matches appended). Tool/param **names**
 > stay `checklist` (API + existing-tool consistency); descriptions carry the subtask/step synonyms.
 
+### 4c. Checklist-item manual ordering (reorder + live order read) — ✅ DONE (0.12.0)
+
+> **Status: shipped in 0.12.0.** Checklist items have a user-controllable drag order, backed by
+> the Substrate-only subtask `OrderDateTime` — the same manual-order mechanism `reorder_task` uses
+> for tasks (Graph exposes no checklist order at all). `reorder_checklist_item` moves a step by
+> `top`/`bottom`/`before`/`after`/`index`/`set` (reusing the `src/mcp/reorder.ts` math) and returns
+> `ordered_items`; `list_checklist_items` enriches order best-effort (adds `ordered` + per-item
+> `orderDateTime`); `get_task` gains opt-in `include_checklist_order`. Opt-in (`ENABLE_MY_DAY` + EXO).
+>
+> **Read/write asymmetry, both verified live (drove the implementation):** order is **read INLINE**
+> as a `Subtasks[]` array on the folder-scoped task GET (`GET /taskfolders/{folder}/tasks/{id}?$select=*`)
+> — Substrate has **no** standalone subtasks collection (`GET /tasks/{id}/subtasks` 400s
+> "Endpoint not supported") — but the **write is folder-free** per-item (`PATCH /tasks/{id}/subtasks/{subtaskId}`).
+>
+> **Why order is NOT cached (unlike §4a/§4b):** a step's `OrderDateTime` is **null until it is first
+> dragged**, so an un-reordered checklist has no stored order and displays in `createdDateTime` order
+> — which Graph already provides for free. Caching would mostly store nulls and add a per-scan
+> Substrate call; reading order live on the two single-task surfaces (the cross-task search surfaces
+> are order-agnostic) is strictly cheaper. No schema migration.
+
 ## 5. Email-to-task webhook ingress
 
 Migrate the existing email-to-task flow off n8n: a webhook (or Cloudflare Email
