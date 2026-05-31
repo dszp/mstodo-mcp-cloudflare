@@ -620,7 +620,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "get_task",
       {
         description:
-          "Return one Microsoft To Do task by id with inline expansions (checklistItems, linkedResources, attachments) and the full body. `list` is optional — when omitted it is resolved from the index via task_id (pass it explicitly to skip the lookup or when the index hasn't seen the task yet). Returns task_not_found if the id is invalid, or list_required if the list can't be inferred. Pass include_my_day: true to also return the task's My Day fields (committed_day, committed_order) from the SQLite cache — off by default.",
+          "Return one Microsoft To Do task by id with inline expansions (checklistItems, linkedResources, attachments) and the full body. `list` is optional — when omitted it is resolved from the index via task_id (pass it explicitly to skip the lookup or when the index hasn't seen the task yet). Returns task_not_found if the id is invalid, or list_required if the list can't be inferred. Pass include_my_day: true to also return the task's My Day fields (committed_day, committed_order) from the SQLite cache — off by default. Pass include_checklist_order: true to return the inline checklistItems in live manual (drag) order with each item's orderDateTime (one Substrate round-trip; off by default).",
         inputSchema: {
           list: z
             .string()
@@ -637,9 +637,15 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .describe(
               "When true, also return the task's My Day fields (committed_day, committed_order) read from the SQLite cache (no extra Substrate round-trip). Off by default. my_day is null when the task isn't cached or My Day is disabled; an object with null fields means cached but not on My Day.",
             ),
+          include_checklist_order: z
+            .boolean()
+            .optional()
+            .describe(
+              "When true, return the inline checklistItems in live MANUAL (drag) order with each item's orderDateTime, fetched from Substrate in the same call. Off by default (creation order, no extra round-trip). No effect when My Day / the EXO scope is unavailable (falls back to creation order).",
+            ),
         },
       },
-      async ({ list, task_id, include_my_day }): Promise<McpResponse> =>
+      async ({ list, task_id, include_my_day, include_checklist_order }): Promise<McpResponse> =>
         this.withGraph("get_task", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
           if (!list_id) {
@@ -661,6 +667,18 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
 
           try {
             const task = await graph.getJson(url.toString(), TodoTaskSchema);
+            // include_checklist_order: enrich the inline steps with live manual
+            // order (same Substrate source as list_checklist_items). Best-effort —
+            // unavailable leaves Graph creation order. Sort + annotate in place so
+            // detailedTask's checklistItems passthrough carries orderDateTime.
+            if (include_checklist_order && Array.isArray(task.checklistItems)) {
+              const order = await this.#tryChecklistOrder(list_id, task_id);
+              if (order) {
+                task.checklistItems = [...task.checklistItems]
+                  .map((it) => ({ ...it, orderDateTime: order.get(it.id) ?? null }))
+                  .sort((a, b) => compareOrderDateTimeDesc(a.orderDateTime, b.orderDateTime));
+              }
+            }
             // include_my_day: cache read (committed_day/committed_order are
             // Substrate-only and invisible to Graph). null = not cached or My Day
             // off (unknown); {null,null} = cached but not on My Day. Omitted when
@@ -1493,6 +1511,14 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/checklistItems`;
           try {
             const result = await graph.getJson(url, ChecklistCollectionSchema);
+            // Best-effort live manual order (Substrate). When unavailable, fall
+            // back to Graph creation order — never an error.
+            const order = await this.#tryChecklistOrder(list_id, task_id);
+            const items = order
+              ? [...result.value]
+                  .map((it) => ({ ...it, orderDateTime: order.get(it.id) ?? null }))
+                  .sort((a, b) => compareOrderDateTimeDesc(a.orderDateTime, b.orderDateTime))
+              : result.value;
             return {
               content: [
                 {
@@ -1501,8 +1527,9 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
                     ok: true,
                     list_id,
                     task_id,
-                    count: result.value.length,
-                    items: result.value,
+                    ordered: order !== null,
+                    count: items.length,
+                    items,
                   }),
                 },
               ],
@@ -3810,6 +3837,145 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     );
 
     this.server.registerTool(
+      "reorder_checklist_item",
+      {
+        description:
+          "Change a checklist item's (subtask / 'step') MANUAL drag-to-reorder position within its task by setting the Substrate OrderDateTime (undocumented endpoint). `position`: 'top'/'bottom' (start/end of the step list), 'before'/'after' (relative to `reference_item_id`), 'index' (1-based slot via `index`, 1 = top), or 'set' (explicit `order_datetime`, a debug escape hatch). Returns `ordered_items` — the task's steps in the new order. A step that has never been reordered has no OrderDateTime and sorts in creation order until moved. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope (returns my_day_disabled / my_day_unavailable otherwise).",
+        inputSchema: {
+          task_id: z.string().min(1).describe("Microsoft Graph task id that owns the checklist item."),
+          item_id: z.string().min(1).describe("Checklist item id to move (from list_checklist_items)."),
+          list: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("Owning list (alias, name, or Graph list ID). Optional — resolved from the index via task_id when omitted; pass it if the task isn't indexed yet."),
+          position: z
+            .enum(["top", "bottom", "before", "after", "index", "set"])
+            .describe("Where to move the item."),
+          reference_item_id: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("Required for position 'before'/'after': the checklist item to position relative to (same task)."),
+          index: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("Required for position 'index': 1-based slot in step order (1 = top)."),
+          order_datetime: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("Required for position 'set': explicit OrderDateTime (ISO 8601). Debug escape hatch."),
+        },
+      },
+      async ({ task_id, item_id, list, position, reference_item_id, index, order_datetime }): Promise<McpResponse> =>
+        this.withSubstrate("reorder_checklist_item", async (sub) => {
+          // The neighbor read is the folder-scoped task GET (steps ride inline as
+          // `Subtasks`; there is no standalone subtasks collection), so the folder
+          // is REQUIRED — unlike the write PATCH, which is folder-free.
+          const list_id = await this.resolveListForTask(list, task_id);
+          if (!list_id) {
+            return errResponse("list_required", {
+              task_id,
+              hint: "Task not found in the index; pass `list` explicitly.",
+            });
+          }
+
+          // Read the task's subtasks once: yields BOTH the neighbor orders AND
+          // the reference's order, and lets us return ordered_items for every
+          // position (including 'set'). Full 429 budget — this is a write op.
+          const subtasks = await sub.listSubtasks(list_id, task_id);
+
+          let newOrder: string;
+          if (position === "set") {
+            if (!order_datetime) {
+              return errResponse("order_datetime_required", { hint: "Pass order_datetime for position 'set'." });
+            }
+            if (orderToMs(order_datetime) === null) {
+              return errResponse("invalid_order_datetime", { order_datetime, hint: "Use an ISO 8601 timestamp." });
+            }
+            newOrder = order_datetime;
+          } else {
+            const orders = subtasks
+              .filter((s) => s.Id !== item_id)
+              .map((s) => orderToMs(s.OrderDateTime ?? null))
+              .filter((ms): ms is number => ms !== null);
+
+            let spec: ReorderSpec;
+            if (position === "top" || position === "bottom") {
+              spec = { kind: position };
+            } else if (position === "index") {
+              if (index === undefined) {
+                return errResponse("index_required", { hint: "Pass index (1-based) for position 'index'." });
+              }
+              spec = { kind: "index", index };
+            } else {
+              // before / after
+              if (!reference_item_id) {
+                return errResponse("reference_required", {
+                  position,
+                  hint: "Pass reference_item_id for position 'before'/'after'.",
+                });
+              }
+              const ref = subtasks.find((s) => s.Id === reference_item_id);
+              if (!ref) {
+                return errResponse("reference_not_found", { task_id, reference_item_id });
+              }
+              const referenceMs = orderToMs(ref.OrderDateTime ?? null);
+              if (referenceMs === null) {
+                return errResponse("reference_has_no_order", {
+                  reference_item_id,
+                  hint: "The reference item has no manual-order value; move it first (e.g. position 'top').",
+                });
+              }
+              spec = { kind: position, referenceMs };
+            }
+
+            const computed = computeReorder(spec, orders);
+            if (!computed.ok) {
+              return errResponse(computed.reason, {
+                hint: "No room between neighbors at millisecond precision; use position 'top'/'bottom' to reset.",
+              });
+            }
+            newOrder = msToOrder(computed.ms);
+          }
+
+          await sub.patchSubtask(task_id, item_id, { OrderDateTime: newOrder });
+
+          // Project the steps in their NEW order (apply newOrder to the moved
+          // item locally — no second round-trip). Descending OrderDateTime,
+          // nulls last (shared comparator).
+          const ordered_items = subtasks
+            .map((s) => ({
+              item_id: s.Id ?? null,
+              display_name: s.Subject ?? null,
+              order_datetime: s.Id === item_id ? newOrder : (s.OrderDateTime ?? null),
+              is_checked: s.IsCompleted ?? null,
+            }))
+            .sort((a, b) => compareOrderDateTimeDesc(a.order_datetime, b.order_datetime));
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  list_id,
+                  task_id,
+                  item_id,
+                  position,
+                  order_datetime: newOrder,
+                  ordered_items,
+                }),
+              },
+            ],
+          };
+        }),
+    );
+
+    this.server.registerTool(
       "reorder_my_day_task",
       {
         description:
@@ -4101,6 +4267,31 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       },
       ident?.anchorMailbox ?? null,
     );
+  }
+
+  // Best-effort manual order for a task's checklist items: a map of
+  // checklistItem.id -> OrderDateTime (the Substrate subtask order Graph can't
+  // see), or null when My Day is disabled or Substrate is unavailable/unconsented.
+  // NEVER throws — order enrichment is optional; callers fall back to Graph
+  // creation order. (Verified live: Graph checklistItem.id == Substrate subtask.id,
+  // and Graph task id == Substrate task id for an un-reparented task.)
+  async #tryChecklistOrder(
+    listId: string,
+    taskId: string,
+  ): Promise<Map<string, string | null> | null> {
+    if (!myDayEnabled(this.env)) return null;
+    try {
+      const sub = await this.#buildSubstrateClient();
+      // fast: skip 429 retries — enrichment is optional, fall back rather than
+      // block ~40s on a throttled mailbox.
+      const subtasks = await sub.listSubtasks(listId, taskId, { fast: true });
+      const map = new Map<string, string | null>();
+      for (const s of subtasks) if (s.Id) map.set(s.Id, s.OrderDateTime ?? null);
+      return map;
+    } catch (e) {
+      log.warn("checklist_order_unavailable", { taskId, error: String(e) });
+      return null;
+    }
   }
 
   // move_task PRIMARY path: attempt the lossless in-place re-parent. Returns a

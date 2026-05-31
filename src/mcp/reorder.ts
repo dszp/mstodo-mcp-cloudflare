@@ -1,4 +1,5 @@
-// Pure manual-ordering math for the reorder_task tool.
+// Pure manual-ordering math shared by the reorder tools (reorder_task and
+// reorder_checklist_item).
 //
 // Microsoft To Do's manual (drag-to-reorder) position is backed by the
 // Substrate-only `OrderDateTime` field: a higher value sorts nearer the TOP of

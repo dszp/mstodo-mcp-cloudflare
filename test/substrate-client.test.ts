@@ -2,6 +2,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   SubstrateClient,
   compareOrderDateTimeDesc,
+  SubstrateSubtaskSchema,
+  extractSubtasks,
   type SubstrateTokenProvider,
 } from "../src/graph/substrate-client";
 
@@ -101,6 +103,90 @@ describe("SubstrateClient.reparentTask (lossless cross-list move)", () => {
       ParentFolderId: DEST,
       OrderDateTime: "2026-05-19T12:00:00Z",
     });
+  });
+});
+
+describe("SubstrateSubtaskSchema + extractSubtasks", () => {
+  it("parses the captured subtask shape leniently", () => {
+    const parsed = SubstrateSubtaskSchema.parse({
+      CompletedDateTime: null,
+      CreatedDateTime: "2026-05-30T04:44:00.55Z",
+      Id: "93cc4e58-09b9-42ec-bfe7-8958896b1403",
+      OrderDateTime: "2026-05-30T05:52:13.324Z",
+      IsCompleted: false,
+      Subject: "Step 2",
+      ExternalId: null,
+    });
+    expect(parsed.Id).toBe("93cc4e58-09b9-42ec-bfe7-8958896b1403");
+    expect(parsed.OrderDateTime).toBe("2026-05-30T05:52:13.324Z");
+    expect(parsed.IsCompleted).toBe(false);
+  });
+
+  it("extracts from value / Value / bare array, skipping malformed entries", () => {
+    const good = { Id: "a", Subject: "x" };
+    expect(extractSubtasks({ value: [good] })).toHaveLength(1);
+    expect(extractSubtasks({ Value: [good] })).toHaveLength(1);
+    expect(extractSubtasks([good])).toHaveLength(1);
+    expect(extractSubtasks({})).toEqual([]);
+    expect(extractSubtasks({ value: [good, 42] })).toHaveLength(1); // 42 skipped
+  });
+});
+
+describe("SubstrateClient.listSubtasks (inline Subtasks on folder-scoped task GET)", () => {
+  it("GETs taskfolders/{folder}/tasks/{id}?$select=* and pulls the inline Subtasks array", async () => {
+    // Steps ride inline on the task body (no standalone subtasks collection).
+    const { calls } = stubFetch({
+      Id: TASK,
+      Subject: "parent",
+      Subtasks: [
+        { Id: "a", Subject: "Step 1", OrderDateTime: "2026-05-30T02:27:25.324Z", IsCompleted: false },
+        { Id: "b", Subject: "Step 2", OrderDateTime: null, IsCompleted: false },
+      ],
+    });
+    const client = new SubstrateClient(tokens, null);
+
+    const subs = await client.listSubtasks(DEST, TASK);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe(
+      `https://substrate.office.com/todob2/api/v1/taskfolders/${encodeURIComponent(DEST)}/tasks/${encodeURIComponent(TASK)}?$select=*`,
+    );
+    expect(subs.map((s) => s.Id)).toEqual(["a", "b"]);
+    expect(subs[1].OrderDateTime).toBeNull();
+  });
+
+  it("returns [] when the task has no Subtasks property", async () => {
+    stubFetch({ Id: TASK, Subject: "no steps" });
+    const client = new SubstrateClient(tokens, null);
+    expect(await client.listSubtasks(DEST, TASK)).toEqual([]);
+  });
+});
+
+describe("SubstrateClient.patchSubtask (set OrderDateTime)", () => {
+  const SUBTASK = "93cc4e58-09b9-42ec-bfe7-8958896b1403";
+  it("PATCHes /tasks/{taskId}/subtasks/{subtaskId} with the body and returns the parsed subtask", async () => {
+    const { calls } = stubFetch({
+      Id: SUBTASK,
+      Subject: "Step 2",
+      OrderDateTime: "2026-05-30T05:52:13.324Z",
+      IsCompleted: false,
+    });
+    const client = new SubstrateClient(tokens, "OID:user@tenant");
+
+    const sub = await client.patchSubtask(TASK, SUBTASK, {
+      OrderDateTime: "2026-05-30T05:52:13.324Z",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("PATCH");
+    expect(calls[0].url).toBe(
+      `https://substrate.office.com/todob2/api/v1/tasks/${encodeURIComponent(TASK)}/subtasks/${encodeURIComponent(SUBTASK)}`,
+    );
+    expect(JSON.parse(calls[0].body!)).toEqual({ OrderDateTime: "2026-05-30T05:52:13.324Z" });
+    expect(calls[0].headers.authorization).toBe("Bearer tok-exo");
+    expect(calls[0].headers["x-anchormailbox"]).toBe("OID:user@tenant");
+    expect(sub.OrderDateTime).toBe("2026-05-30T05:52:13.324Z");
   });
 });
 

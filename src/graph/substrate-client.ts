@@ -113,6 +113,24 @@ export const SubstrateTaskSchema = z
   .passthrough();
 export type SubstrateTask = z.infer<typeof SubstrateTaskSchema>;
 
+// A To Do "step" — the Substrate subtask shape. Drag-reorder in the app PATCHes
+// OrderDateTime on the FOLDER-FREE /tasks/{id}/subtasks/{id} path (distinct from
+// the /taskfolders/{folder}/tasks/{id} path everything else uses). OrderDateTime
+// carries manual order — higher = nearer the top, same as a task's OrderDateTime.
+// Lenient/passthrough: the web client's exact field set isn't documented.
+export const SubstrateSubtaskSchema = z
+  .object({
+    Id: z.string().optional(),
+    Subject: z.string().optional(),
+    OrderDateTime: z.string().nullable().optional(),
+    IsCompleted: z.boolean().nullable().optional(),
+    CompletedDateTime: z.string().nullable().optional(),
+    CreatedDateTime: z.string().nullable().optional(),
+    ExternalId: z.string().nullable().optional(),
+  })
+  .passthrough();
+export type SubstrateSubtask = z.infer<typeof SubstrateSubtaskSchema>;
+
 // Shape of the projected detail block shared by every My Day tool. Identity
 // fields (list_id, task_id, title) are added by the caller — this is only the
 // per-task detail that rides along on the same Substrate response.
@@ -213,6 +231,23 @@ export function extractTasks(json: unknown): SubstrateTask[] {
   return out;
 }
 
+// Extract a subtask array without assuming a fixed envelope (value / Value /
+// bare array), leniently parsing each — mirrors extractTasks.
+export function extractSubtasks(json: unknown): SubstrateSubtask[] {
+  const raw: unknown = Array.isArray(json)
+    ? json
+    : isRecord(json)
+      ? (json.value ?? json.Value ?? [])
+      : [];
+  if (!Array.isArray(raw)) return [];
+  const out: SubstrateSubtask[] = [];
+  for (const item of raw) {
+    const parsed = SubstrateSubtaskSchema.safeParse(item);
+    if (parsed.success) out.push(parsed.data);
+  }
+  return out;
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
@@ -221,6 +256,14 @@ const taskUrl = (folderId: string, taskId: string) =>
   `${SUBSTRATE_BASE}/taskfolders/${encodeURIComponent(folderId)}/tasks/${encodeURIComponent(taskId)}`;
 const folderTasksUrl = (folderId: string) =>
   `${SUBSTRATE_BASE}/taskfolders/${encodeURIComponent(folderId)}/tasks`;
+
+// FOLDER-FREE subtask WRITE path — the To Do web app drags a step by PATCHing
+// this (no folder segment: only the Outlook task id == Graph task id for an
+// un-reparented task, and the subtask id). NOTE the asymmetry: the subtask
+// COLLECTION is not addressable here (GET 400s); steps are READ inline off the
+// folder-scoped task GET (see listSubtasks). Only the per-item PATCH lives here.
+const subtaskUrl = (taskId: string, subtaskId: string) =>
+  `${SUBSTRATE_BASE}/tasks/${encodeURIComponent(taskId)}/subtasks/${encodeURIComponent(subtaskId)}`;
 
 export class SubstrateClient {
   constructor(
@@ -285,7 +328,49 @@ export class SubstrateClient {
     return extractTasks(json);
   }
 
-  async #fetchWithRetry(url: string, method: string, body?: string): Promise<Response> {
+  // List a task's subtasks ("steps") with their OrderDateTime — the manual order
+  // Graph can't see. Substrate has NO standalone subtasks collection endpoint
+  // (GET /tasks/{id}/subtasks 400s "Endpoint not supported"); the steps ride
+  // INLINE on the folder-scoped single-task GET as a `Subtasks` array (verified
+  // live). So this reads the task with $select=* and pulls that array. OrderDateTime
+  // is null on a step that has never been dragged (creation order until reordered).
+  // `fast` skips 429 retries — used by best-effort order enrichment, which would
+  // rather fall back to creation order than block on a throttled mailbox.
+  async listSubtasks(
+    folderId: string,
+    taskId: string,
+    opts?: { fast?: boolean },
+  ): Promise<SubstrateSubtask[]> {
+    const res = await this.#fetchWithRetry(`${taskUrl(folderId, taskId)}?$select=*`, "GET", undefined, {
+      retry429: !opts?.fast,
+    });
+    const json = (await res.json()) as unknown;
+    return extractSubtasks(isRecord(json) ? json.Subtasks : undefined);
+  }
+
+  // PATCH a subtask. Used by reorder_checklist_item to set OrderDateTime
+  // (manual-order position). Returns the updated subtask for confirmation. Keeps
+  // the full 429 budget — this is a user-requested write, not optional.
+  async patchSubtask(
+    taskId: string,
+    subtaskId: string,
+    body: Record<string, unknown>,
+  ): Promise<SubstrateSubtask> {
+    const res = await this.#fetchWithRetry(
+      subtaskUrl(taskId, subtaskId),
+      "PATCH",
+      JSON.stringify(body),
+    );
+    const json = (await res.json()) as unknown;
+    return SubstrateSubtaskSchema.parse(json);
+  }
+
+  async #fetchWithRetry(
+    url: string,
+    method: string,
+    body?: string,
+    opts?: { retry429?: boolean },
+  ): Promise<Response> {
     assertSubstrateUrl(url);
     let retried401 = false;
     let retried429 = 0;
@@ -307,7 +392,7 @@ export class SubstrateClient {
       }
       // EXO throttles aggressively on MailboxConcurrency. Honor Retry-After
       // (clamped) and retry a bounded number of times before surfacing.
-      if (res.status === 429 && retried429 < MAX_429_RETRIES) {
+      if (res.status === 429 && opts?.retry429 !== false && retried429 < MAX_429_RETRIES) {
         retried429 += 1;
         const delayMs = parseRetryAfter(res.headers.get("retry-after"));
         log.warn("substrate_429_retry", {
