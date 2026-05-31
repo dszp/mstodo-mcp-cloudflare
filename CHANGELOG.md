@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] – 2026-05-31
+
 ### Added
 - **`reorder_checklist_item`** — move a checklist item (subtask / "step") within its task by
   `top` / `bottom` / `before` / `after` / `index` / `set`, via the Substrate subtask `OrderDateTime`
