@@ -257,11 +257,11 @@ const taskUrl = (folderId: string, taskId: string) =>
 const folderTasksUrl = (folderId: string) =>
   `${SUBSTRATE_BASE}/taskfolders/${encodeURIComponent(folderId)}/tasks`;
 
-// FOLDER-FREE subtask paths — the To Do web app drags steps via these. Unlike
-// taskUrl, no folder segment: only the Outlook task id (== Graph task id for an
-// un-reparented task) and the subtask id.
-const subtasksUrl = (taskId: string) =>
-  `${SUBSTRATE_BASE}/tasks/${encodeURIComponent(taskId)}/subtasks`;
+// FOLDER-FREE subtask WRITE path — the To Do web app drags a step by PATCHing
+// this (no folder segment: only the Outlook task id == Graph task id for an
+// un-reparented task, and the subtask id). NOTE the asymmetry: the subtask
+// COLLECTION is not addressable here (GET 400s); steps are READ inline off the
+// folder-scoped task GET (see listSubtasks). Only the per-item PATCH lives here.
 const subtaskUrl = (taskId: string, subtaskId: string) =>
   `${SUBSTRATE_BASE}/tasks/${encodeURIComponent(taskId)}/subtasks/${encodeURIComponent(subtaskId)}`;
 
@@ -329,15 +329,23 @@ export class SubstrateClient {
   }
 
   // List a task's subtasks ("steps") with their OrderDateTime — the manual order
-  // Graph can't see. Folder-free path; tolerant envelope (value/Value/array).
+  // Graph can't see. Substrate has NO standalone subtasks collection endpoint
+  // (GET /tasks/{id}/subtasks 400s "Endpoint not supported"); the steps ride
+  // INLINE on the folder-scoped single-task GET as a `Subtasks` array (verified
+  // live). So this reads the task with $select=* and pulls that array. OrderDateTime
+  // is null on a step that has never been dragged (creation order until reordered).
   // `fast` skips 429 retries — used by best-effort order enrichment, which would
   // rather fall back to creation order than block on a throttled mailbox.
-  async listSubtasks(taskId: string, opts?: { fast?: boolean }): Promise<SubstrateSubtask[]> {
-    const res = await this.#fetchWithRetry(subtasksUrl(taskId), "GET", undefined, {
+  async listSubtasks(
+    folderId: string,
+    taskId: string,
+    opts?: { fast?: boolean },
+  ): Promise<SubstrateSubtask[]> {
+    const res = await this.#fetchWithRetry(`${taskUrl(folderId, taskId)}?$select=*`, "GET", undefined, {
       retry429: !opts?.fast,
     });
     const json = (await res.json()) as unknown;
-    return extractSubtasks(json);
+    return extractSubtasks(isRecord(json) ? json.Subtasks : undefined);
   }
 
   // PATCH a subtask. Used by reorder_checklist_item to set OrderDateTime

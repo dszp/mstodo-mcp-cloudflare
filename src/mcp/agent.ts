@@ -1495,7 +1495,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             const result = await graph.getJson(url, ChecklistCollectionSchema);
             // Best-effort live manual order (Substrate). When unavailable, fall
             // back to Graph creation order — never an error.
-            const order = await this.#tryChecklistOrder(task_id);
+            const order = await this.#tryChecklistOrder(list_id, task_id);
             const items = order
               ? [...result.value]
                   .map((it) => ({ ...it, orderDateTime: order.get(it.id) ?? null }))
@@ -3822,7 +3822,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "reorder_checklist_item",
       {
         description:
-          "Change a checklist item's (subtask / 'step') MANUAL drag-to-reorder position within its task by setting the Substrate OrderDateTime (undocumented endpoint). `position`: 'top'/'bottom' (start/end of the step list), 'before'/'after' (relative to `reference_item_id`), 'index' (1-based slot via `index`, 1 = top), or 'set' (explicit `order_datetime`, a debug escape hatch). Returns `ordered_items` — the task's steps in the new order. `list` is optional and only echoed (the subtask endpoint is folder-free). Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope (returns my_day_disabled / my_day_unavailable otherwise).",
+          "Change a checklist item's (subtask / 'step') MANUAL drag-to-reorder position within its task by setting the Substrate OrderDateTime (undocumented endpoint). `position`: 'top'/'bottom' (start/end of the step list), 'before'/'after' (relative to `reference_item_id`), 'index' (1-based slot via `index`, 1 = top), or 'set' (explicit `order_datetime`, a debug escape hatch). Returns `ordered_items` — the task's steps in the new order. A step that has never been reordered has no OrderDateTime and sorts in creation order until moved. Opt-in: requires ENABLE_MY_DAY=true and the Exchange Online Tasks.ReadWrite scope (returns my_day_disabled / my_day_unavailable otherwise).",
         inputSchema: {
           task_id: z.string().min(1).describe("Microsoft Graph task id that owns the checklist item."),
           item_id: z.string().min(1).describe("Checklist item id to move (from list_checklist_items)."),
@@ -3830,7 +3830,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .string()
             .min(1)
             .optional()
-            .describe("Owning list (alias, name, or Graph list ID). Optional — echoed only; not needed for the move."),
+            .describe("Owning list (alias, name, or Graph list ID). Optional — resolved from the index via task_id when omitted; pass it if the task isn't indexed yet."),
           position: z
             .enum(["top", "bottom", "before", "after", "index", "set"])
             .describe("Where to move the item."),
@@ -3854,14 +3854,21 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       },
       async ({ task_id, item_id, list, position, reference_item_id, index, order_datetime }): Promise<McpResponse> =>
         this.withSubstrate("reorder_checklist_item", async (sub) => {
-          // list is cosmetic — the subtask path is folder-free. Resolve
-          // best-effort for the response echo; never fail on it.
-          const list_id = (await this.resolveListForTask(list, task_id)) ?? null;
+          // The neighbor read is the folder-scoped task GET (steps ride inline as
+          // `Subtasks`; there is no standalone subtasks collection), so the folder
+          // is REQUIRED — unlike the write PATCH, which is folder-free.
+          const list_id = await this.resolveListForTask(list, task_id);
+          if (!list_id) {
+            return errResponse("list_required", {
+              task_id,
+              hint: "Task not found in the index; pass `list` explicitly.",
+            });
+          }
 
           // Read the task's subtasks once: yields BOTH the neighbor orders AND
           // the reference's order, and lets us return ordered_items for every
           // position (including 'set'). Full 429 budget — this is a write op.
-          const subtasks = await sub.listSubtasks(task_id);
+          const subtasks = await sub.listSubtasks(list_id, task_id);
 
           let newOrder: string;
           if (position === "set") {
@@ -4250,13 +4257,16 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
   // NEVER throws — order enrichment is optional; callers fall back to Graph
   // creation order. (Verified live: Graph checklistItem.id == Substrate subtask.id,
   // and Graph task id == Substrate task id for an un-reparented task.)
-  async #tryChecklistOrder(taskId: string): Promise<Map<string, string | null> | null> {
+  async #tryChecklistOrder(
+    listId: string,
+    taskId: string,
+  ): Promise<Map<string, string | null> | null> {
     if (!myDayEnabled(this.env)) return null;
     try {
       const sub = await this.#buildSubstrateClient();
       // fast: skip 429 retries — enrichment is optional, fall back rather than
       // block ~40s on a throttled mailbox.
-      const subtasks = await sub.listSubtasks(taskId, { fast: true });
+      const subtasks = await sub.listSubtasks(listId, taskId, { fast: true });
       const map = new Map<string, string | null>();
       for (const s of subtasks) if (s.Id) map.set(s.Id, s.OrderDateTime ?? null);
       return map;

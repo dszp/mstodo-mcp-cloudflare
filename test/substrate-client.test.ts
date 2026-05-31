@@ -132,24 +132,34 @@ describe("SubstrateSubtaskSchema + extractSubtasks", () => {
   });
 });
 
-describe("SubstrateClient.listSubtasks (folder-free subtasks GET)", () => {
-  it("GETs /tasks/{taskId}/subtasks and parses the collection", async () => {
+describe("SubstrateClient.listSubtasks (inline Subtasks on folder-scoped task GET)", () => {
+  it("GETs taskfolders/{folder}/tasks/{id}?$select=* and pulls the inline Subtasks array", async () => {
+    // Steps ride inline on the task body (no standalone subtasks collection).
     const { calls } = stubFetch({
-      value: [
+      Id: TASK,
+      Subject: "parent",
+      Subtasks: [
         { Id: "a", Subject: "Step 1", OrderDateTime: "2026-05-30T02:27:25.324Z", IsCompleted: false },
-        { Id: "b", Subject: "Step 2", OrderDateTime: "2026-05-30T05:52:13.324Z", IsCompleted: false },
+        { Id: "b", Subject: "Step 2", OrderDateTime: null, IsCompleted: false },
       ],
     });
     const client = new SubstrateClient(tokens, null);
 
-    const subs = await client.listSubtasks(TASK);
+    const subs = await client.listSubtasks(DEST, TASK);
 
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe("GET");
     expect(calls[0].url).toBe(
-      `https://substrate.office.com/todob2/api/v1/tasks/${encodeURIComponent(TASK)}/subtasks`,
+      `https://substrate.office.com/todob2/api/v1/taskfolders/${encodeURIComponent(DEST)}/tasks/${encodeURIComponent(TASK)}?$select=*`,
     );
     expect(subs.map((s) => s.Id)).toEqual(["a", "b"]);
+    expect(subs[1].OrderDateTime).toBeNull();
+  });
+
+  it("returns [] when the task has no Subtasks property", async () => {
+    stubFetch({ Id: TASK, Subject: "no steps" });
+    const client = new SubstrateClient(tokens, null);
+    expect(await client.listSubtasks(DEST, TASK)).toEqual([]);
   });
 });
 
