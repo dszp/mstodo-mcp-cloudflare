@@ -620,7 +620,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "get_task",
       {
         description:
-          "Return one Microsoft To Do task by id with inline expansions (checklistItems, linkedResources, attachments) and the full body. `list` is optional — when omitted it is resolved from the index via task_id (pass it explicitly to skip the lookup or when the index hasn't seen the task yet). Returns task_not_found if the id is invalid, or list_required if the list can't be inferred. Pass include_my_day: true to also return the task's My Day fields (committed_day, committed_order) from the SQLite cache — off by default.",
+          "Return one Microsoft To Do task by id with inline expansions (checklistItems, linkedResources, attachments) and the full body. `list` is optional — when omitted it is resolved from the index via task_id (pass it explicitly to skip the lookup or when the index hasn't seen the task yet). Returns task_not_found if the id is invalid, or list_required if the list can't be inferred. Pass include_my_day: true to also return the task's My Day fields (committed_day, committed_order) from the SQLite cache — off by default. Pass include_checklist_order: true to return the inline checklistItems in live manual (drag) order with each item's orderDateTime (one Substrate round-trip; off by default).",
         inputSchema: {
           list: z
             .string()
@@ -637,9 +637,15 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .describe(
               "When true, also return the task's My Day fields (committed_day, committed_order) read from the SQLite cache (no extra Substrate round-trip). Off by default. my_day is null when the task isn't cached or My Day is disabled; an object with null fields means cached but not on My Day.",
             ),
+          include_checklist_order: z
+            .boolean()
+            .optional()
+            .describe(
+              "When true, return the inline checklistItems in live MANUAL (drag) order with each item's orderDateTime, fetched from Substrate in the same call. Off by default (creation order, no extra round-trip). No effect when My Day / the EXO scope is unavailable (falls back to creation order).",
+            ),
         },
       },
-      async ({ list, task_id, include_my_day }): Promise<McpResponse> =>
+      async ({ list, task_id, include_my_day, include_checklist_order }): Promise<McpResponse> =>
         this.withGraph("get_task", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
           if (!list_id) {
@@ -661,6 +667,18 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
 
           try {
             const task = await graph.getJson(url.toString(), TodoTaskSchema);
+            // include_checklist_order: enrich the inline steps with live manual
+            // order (same Substrate source as list_checklist_items). Best-effort —
+            // unavailable leaves Graph creation order. Sort + annotate in place so
+            // detailedTask's checklistItems passthrough carries orderDateTime.
+            if (include_checklist_order && Array.isArray(task.checklistItems)) {
+              const order = await this.#tryChecklistOrder(list_id, task_id);
+              if (order) {
+                task.checklistItems = [...task.checklistItems]
+                  .map((it) => ({ ...it, orderDateTime: order.get(it.id) ?? null }))
+                  .sort((a, b) => compareOrderDateTimeDesc(a.orderDateTime, b.orderDateTime));
+              }
+            }
             // include_my_day: cache read (committed_day/committed_order are
             // Substrate-only and invisible to Graph). null = not cached or My Day
             // off (unknown); {null,null} = cached but not on My Day. Omitted when
