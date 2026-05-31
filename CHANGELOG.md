@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`reorder_checklist_item`** — move a checklist item (subtask / "step") within its task by
+  `top` / `bottom` / `before` / `after` / `index` / `set`, via the Substrate subtask `OrderDateTime`
+  (the same manual-order mechanism `reorder_task` uses for tasks; Graph exposes no checklist order).
+  Returns `ordered_items` — the task's steps in their new order. Opt-in (`ENABLE_MY_DAY` + the EXO
+  Tasks scope). A step has no `OrderDateTime` until first reordered, so an un-dragged checklist sorts
+  in creation order until moved.
+- **Live checklist manual order on reads.** `list_checklist_items` now returns steps in live
+  drag-order when My Day / EXO is enabled — best-effort, adding an `ordered` flag and a per-item
+  `orderDateTime`, and falling back to Graph creation order otherwise. `get_task` gains
+  `include_checklist_order` (default off) for the same enrichment on its inline `checklistItems`.
+  Order is **read live, never cached** (it's Substrate-only and null until first dragged, so Graph's
+  `createdDateTime` is the free fallback).
+
 ### Security
 - Hardened `stripHtml` (task-body indexing) against a polynomial-ReDoS worst case:
   the `/<[^>]*>/g` tag strip was O(n²) on pathological input like `"<<<<…"` with no
