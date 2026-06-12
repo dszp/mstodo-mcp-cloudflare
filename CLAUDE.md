@@ -75,11 +75,14 @@ Gated by `ENABLE_CHECKLIST_CACHE` (**default OFF** — opt-in; it adds a one-tim
 
 Releases are cut **from `dev`**, then merged/pushed to `main` and tagged. The convention (see prior `Release X.Y.Z: …` commits):
 
-1. Confirm what's pending: `git log --oneline main..dev`.
+1. Confirm what's pending: `git log --oneline main..dev` (and `git fetch origin dev && git log --oneline dev..origin/dev` — if local `dev` is behind, rebase your work onto `origin/dev` first so the push stays a fast-forward).
 2. In `CHANGELOG.md`, rename the `## [Unreleased]` heading to `## [X.Y.Z] – YYYY-MM-DD` (en dash `–`, Keep-a-Changelog format, sections ordered Added/Changed/Fixed/…), add any missing entries, and open a fresh empty `## [Unreleased]` above it.
 3. Bump `version` in **`package.json`** and the two root entries in **`package-lock.json`** (lines ~3 and ~9 — do **not** touch a dependency that coincidentally shares the version).
 4. Commit as `Release X.Y.Z: <theme>`.
-5. Tag `vX.Y.Z` and push the branch + tag.
+5. **Tag — signed/annotated, never lightweight.** The repo sets `tag.gpgsign=true` with `gpg.format=ssh`, so use `git tag -s vX.Y.Z -m "Release X.Y.Z: <theme>"` (a bare `git tag vX.Y.Z` makes a *lightweight, unsigned* tag — wrong, and prior tags are signed `tag` objects). Verify with `git tag -v vX.Y.Z` (expect `Good "git" signature`). **Tags are protection-ruled on GitHub: the remote ref cannot be force-overwritten or deleted**, so get the signed tag right *before* pushing it — a pushed lightweight tag can't be cleanly upgraded in place.
+6. Push `dev` and the tag: `git push origin dev && git push origin vX.Y.Z`.
+7. **Merge to `main` via PR, not a local fast-forward.** `main` carries the `Merge pull request #N from dszp/dev` merge commits from every prior release, so it has diverged from `dev` and a local `git merge --ff-only` is impossible by design. Use `gh pr create --base main --head dev --title "Release X.Y.Z: …" --body …` then `gh pr merge <#> --merge` (a merge commit, matching #9–#12). The signed `vX.Y.Z` tag stays on the `Release` commit (now in `main`'s history); don't re-tag the merge commit.
+8. Deploy (`npm run deploy`) and confirm `/health` if this release ships code (often already deployed from `dev` before cutting the release — check first).
 
 ## Conventions & invariants worth preserving
 - **Only `TodoIndex` refreshes tokens.** Don't add token-endpoint calls elsewhere; route through the singleton's serializer.
