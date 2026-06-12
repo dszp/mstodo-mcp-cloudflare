@@ -89,3 +89,12 @@ export async function listGraphSubscriptions(graph: GraphClient): Promise<GraphS
   const res = await graph.getJson(SUBSCRIPTIONS_URL, SubscriptionListSchema);
   return res.value;
 }
+
+// Extract the todoTaskList id from a subscription resource path like
+// "/me/todo/lists/{id}/tasks" (tolerant of a missing leading slash or casing).
+// Returns null when the resource isn't a todoTask-tasks subscription.
+export function parseTodoListId(resource: string | undefined): string | null {
+  if (!resource) return null;
+  const m = resource.match(/todo\/lists\/([^/]+)\/tasks/i);
+  return m ? decodeURIComponent(m[1]) : null;
+}
