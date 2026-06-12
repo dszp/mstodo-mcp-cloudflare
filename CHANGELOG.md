@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] – 2026-06-12
+
+### Added
+- **`subscription_status`** — read-only introspection for the Graph change-notification
+  (webhook) layer. Returns the effective env-derived config (subscriptions on/off, webhook URL,
+  lifetime, renew margin, max ops/cycle, delta interval, My Day scan cadence) and a three-way
+  coverage diff: `dark` (roster lists with no live Graph subscription), `dead` (local records whose
+  Graph subscription is gone — silent drift), and `orphan` (subscriptions on this Worker's webhook
+  URL that are unwanted or untracked, leaking tenant quota). Config is read from runtime `env`
+  bindings (what `wrangler.jsonc` produced), not the file. When Graph is unreachable, `graph_error`
+  is set and `dark` falls back to "wanted with no local record".
+
+### Fixed
+- **Silent subscription drift.** `reconcileSubscriptions` treated the presence of a *local* DO
+  record as proof a list was subscribed, so a Graph subscription expired or evicted out from under
+  us (early kill, tenant quota, admin action) left a healthy-looking record while that list silently
+  degraded to delta-only — and todoTask has no lifecycle/missed-notification signal to surface it.
+  Reconcile now cross-checks the live Graph roster (`listGraphSubscriptions`, previously built but
+  unused at runtime): records with no matching Graph subscription are dropped and recreated the same
+  cycle, and orphaned subscriptions on our webhook URL are torn down to reclaim quota. Best-effort —
+  a failed roster fetch falls back to the prior record-only behaviour rather than dropping records it
+  can't disprove. The roster fetch follows `@odata.nextLink` to completion (and throws rather than
+  act on a truncated page), so a paginated roster can't misclassify live subscriptions as dead; and
+  for a tracked subscription the cross-check trusts the local record's list id over re-parsing the
+  Graph resource string, so a malformed resource can't tear down a healthy subscription.
+
 ## [0.12.0] – 2026-05-31
 
 ### Added

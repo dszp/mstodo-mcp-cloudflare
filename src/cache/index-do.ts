@@ -44,6 +44,7 @@ import { shouldSkipSync } from "../config/sync-policy";
 import {
   taskSubscriptionsEnabled,
   webhookUrl,
+  SUBSCRIPTION_LIFETIME_MS,
   SUBSCRIPTION_RENEW_MARGIN_MS,
   maxSubscriptionOpsPerCycle,
 } from "../subscriptions/gate";
@@ -53,8 +54,11 @@ import {
   createSubscription,
   renewSubscription,
   deleteSubscription,
+  listGraphSubscriptions,
+  parseTodoListId,
   newClientState,
   desiredExpiration,
+  type GraphSubscription,
 } from "../subscriptions/manager";
 
 // Phase 5 — TodoIndex: singleton Durable Object, the single source of truth for
@@ -138,6 +142,38 @@ interface SyncStateRow {
   last_synced_at: number | null;
   status: string | null;
   last_error: string | null;
+}
+
+// Concrete (RPC-serializable) shapes for subscriptionStatus(). Avoid
+// Record<string, unknown> here — Cloudflare's RPC type mapper collapses
+// `unknown`-valued returns to `never` at the call site.
+export interface SubscriptionConfig {
+  subscriptions_enabled: boolean;
+  webhook_url: string | null;
+  service_base_url: string | null;
+  my_day_enabled: boolean;
+  subscription_lifetime_min: number;
+  subscription_renew_margin_min: number;
+  max_subscription_ops_per_cycle: number;
+  delta_sync_interval_min: number;
+  my_day_scan_every_n_cycles: number;
+  my_day_scan_window_min: number;
+}
+export interface SubscriptionStatus {
+  ok: true;
+  config: SubscriptionConfig;
+  summary: {
+    wanted: number;
+    local_records: number;
+    graph_subs_ours: number;
+    dark: number;
+    dead: number;
+    orphan: number;
+  };
+  dark: string[];
+  dead: Array<{ list_id: string; subscription_id: string; expiration_ms: number }>;
+  orphan: Array<{ subscription_id: string; list_id: string | null; resource?: string }>;
+  graph_error?: string;
 }
 
 export class TodoIndex extends DurableObject<Env> implements TokenProvider {
@@ -649,13 +685,60 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
         .filter((l) => !shouldSkipSync({ list_id: l.list_id, wellknown: l.wellknown }, cfg))
         .map((l) => l.list_id),
     );
-    const haveByList = new Map(records.map((r) => [r.list_id, r]));
 
     const graph = new GraphClient(this);
     let budget = maxSubscriptionOpsPerCycle(this.env);
 
-    // 1. Delete records whose list is gone or now skipped.
-    for (const rec of records) {
+    // 0. Cross-check our local records against Graph's actual subscription
+    //    roster. Graph can expire or evict a subscription out from under us
+    //    (early kill, tenant quota, admin action), and todoTask has no
+    //    lifecycle/missed-notification signal — so a local record can look
+    //    healthy (future expiry) while the Graph subscription is already gone,
+    //    silently degrading that list to delta-only. Presence of a *local
+    //    record* was the old proxy for "subscribed"; this makes Graph the
+    //    source of truth. Best-effort: on a failed fetch we skip the
+    //    cross-check and keep the record-only behaviour (never drop a record we
+    //    couldn't disprove).
+    try {
+      const { aliveIds, orphans } = this.#diffGraphSubscriptions(
+        await listGraphSubscriptions(graph),
+        url,
+        wanted,
+      );
+      // Dead records: a local record whose Graph subscription no longer exists.
+      // Drop it (local-only, no budget) so the create pass below recreates a
+      // fresh, validatable subscription this same cycle.
+      for (const rec of records) {
+        if (!aliveIds.has(rec.subscription_id)) {
+          this.deleteSubscriptionRecord(rec.subscription_id);
+          log.info("subscription_record_dead", {
+            list_id: rec.list_id,
+            subscription_id: rec.subscription_id,
+          });
+        }
+      }
+      // Orphan Graph subs: ours (by notificationUrl) but unwanted or untracked.
+      // Tear them down to reclaim tenant quota. We can't adopt them — Graph's
+      // GET omits clientState, so their notifications wouldn't be validatable.
+      for (const { sub } of orphans) {
+        if (budget <= 0) return;
+        budget -= 1;
+        await this.#tearDownSubscription(graph, sub.id);
+      }
+    } catch (e) {
+      log.warn("subscription_graph_list_failed", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+
+    // Re-read after possible record drops so the maps below reflect reality.
+    const recordsNow = this.getSubscriptions();
+    const haveByList = new Map(recordsNow.map((r) => [r.list_id, r]));
+
+    // 1. Delete records whose list is gone or now skipped. (When the Graph
+    //    cross-check ran, most of these are already handled as orphans; this
+    //    remains the fallback when Graph was unreachable.)
+    for (const rec of recordsNow) {
       if (budget <= 0) return;
       if (!wanted.has(rec.list_id)) {
         budget -= 1;
@@ -663,14 +746,143 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       }
     }
 
-    // 2. Create for wanted lists with no record. The per-cycle cap rotates
-    //    coverage over a few cycles for a large roster (free-tier safety).
+    // 2. Create for wanted lists with no record — covers brand-new lists and
+    //    the dead records dropped above. The per-cycle cap rotates coverage
+    //    over a few cycles for a large roster.
     for (const listId of wanted) {
       if (budget <= 0) return;
       if (haveByList.has(listId)) continue;
       budget -= 1;
       await this.#createSubscriptionFor(graph, listId, url, now);
     }
+  }
+
+  // Partition Graph's subscription roster relative to ours, the single source of
+  // truth shared by reconcile and subscriptionStatus. "Ours" = subscribed to
+  // this Worker's webhook URL. Returns:
+  //   aliveIds    — live Graph subscription ids on our URL (caller spots dead
+  //                 local records as records whose id isn't here).
+  //   aliveByList — the lists those live subs cover (caller spots `dark` lists).
+  //   orphans     — ours but untracked, or tracked on a list we no longer want;
+  //                 torn down to reclaim quota (we can't adopt an untracked sub:
+  //                 Graph's GET omits clientState, so its notifications wouldn't
+  //                 validate). Carries the resolved listId for reporting.
+  // For a tracked sub we trust the local record's list_id over re-parsing the
+  // resource string, so a malformed resource can never misclassify (and later
+  // tear down) a subscription we know is healthy.
+  #diffGraphSubscriptions(
+    graphSubs: GraphSubscription[],
+    url: string,
+    wanted: Set<string>,
+  ): {
+    aliveIds: Set<string>;
+    aliveByList: Set<string>;
+    orphans: Array<{ sub: GraphSubscription; listId: string | null }>;
+  } {
+    const trackedListById = new Map(
+      this.getSubscriptions().map((r) => [r.subscription_id, r.list_id]),
+    );
+    const aliveIds = new Set<string>();
+    const aliveByList = new Set<string>();
+    const orphans: Array<{ sub: GraphSubscription; listId: string | null }> = [];
+    for (const sub of graphSubs) {
+      if (sub.notificationUrl !== url) continue; // not ours
+      aliveIds.add(sub.id);
+      const tracked = trackedListById.get(sub.id);
+      const listId = tracked ?? parseTodoListId(sub.resource);
+      if (listId) aliveByList.add(listId);
+      if (tracked === undefined || !listId || !wanted.has(listId)) {
+        orphans.push({ sub, listId });
+      }
+    }
+    return { aliveIds, aliveByList, orphans };
+  }
+
+  // Read-only introspection for the subscription layer: the env-derived
+  // effective config plus a three-way diff between what SHOULD be subscribed
+  // (non-skipped roster), what we hold LOCAL records for, and what Graph
+  // ACTUALLY holds — the same comparison reconcile acts on. Surfaces silent
+  // drift (`dead`), uncovered lists (`dark`), and quota-leaking `orphan`s.
+  // Never writes. When Graph is unreachable, `graph_error` is set and `dark`
+  // falls back to "wanted with no local record".
+  async subscriptionStatus(): Promise<SubscriptionStatus> {
+    const enabled = taskSubscriptionsEnabled(this.env);
+    const url = webhookUrl(this.env);
+    const cfg = await loadListsConfig(this.env);
+    const wanted = new Set(
+      this.listLists()
+        .filter((l) => !shouldSkipSync({ list_id: l.list_id, wellknown: l.wellknown }, cfg))
+        .map((l) => l.list_id),
+    );
+    const records = this.getSubscriptions();
+    const recByList = new Set(records.map((r) => r.list_id));
+
+    const config: SubscriptionConfig = {
+      subscriptions_enabled: enabled,
+      // null ⇒ SERVICE_BASE_URL missing or non-https ⇒ no subscriptions created.
+      webhook_url: url,
+      service_base_url: (this.env.SERVICE_BASE_URL ?? null) || null,
+      my_day_enabled: myDayEnabled(this.env),
+      subscription_lifetime_min: Math.round(SUBSCRIPTION_LIFETIME_MS / 60_000),
+      subscription_renew_margin_min: Math.round(SUBSCRIPTION_RENEW_MARGIN_MS / 60_000),
+      max_subscription_ops_per_cycle: maxSubscriptionOpsPerCycle(this.env),
+      delta_sync_interval_min: this.#intervalMs() / 60_000,
+      my_day_scan_every_n_cycles: this.#myDayScanEveryNCycles(),
+      my_day_scan_window_min: this.#myDayScanWindowMs() / 60_000,
+    };
+
+    // Graph truth (best-effort), via the same partition reconcile acts on so the
+    // report can't drift from the reconciler's behaviour. Without it we can
+    // still report wanted/local, but can't classify dead/orphan — flag that with
+    // graph_error.
+    let aliveIds: Set<string> | null = null;
+    let darkFromGraph: string[] | null = null;
+    const orphan: Array<{ subscription_id: string; list_id: string | null; resource?: string }> = [];
+    let graph_error: string | undefined;
+    try {
+      const graph = new GraphClient(this);
+      const { aliveIds: alive, aliveByList, orphans } = this.#diffGraphSubscriptions(
+        await listGraphSubscriptions(graph),
+        url ?? "",
+        wanted,
+      );
+      for (const o of orphans) {
+        orphan.push({ subscription_id: o.sub.id, list_id: o.listId, resource: o.sub.resource });
+      }
+      aliveIds = alive;
+      darkFromGraph = [...wanted].filter((l) => !aliveByList.has(l));
+    } catch (e) {
+      graph_error = e instanceof Error ? e.message : String(e);
+    }
+
+    const dead =
+      aliveIds === null
+        ? []
+        : records
+            .filter((r) => !aliveIds!.has(r.subscription_id))
+            .map((r) => ({
+              list_id: r.list_id,
+              subscription_id: r.subscription_id,
+              expiration_ms: r.expiration_ms,
+            }));
+    const dark = darkFromGraph ?? [...wanted].filter((l) => !recByList.has(l));
+
+    return {
+      ok: true,
+      config,
+      summary: {
+        wanted: wanted.size,
+        local_records: records.length,
+        graph_subs_ours: aliveIds === null ? -1 : aliveIds.size,
+        dark: dark.length,
+        dead: dead.length,
+        orphan: orphan.length,
+      },
+      dark,
+      dead,
+      orphan,
+      graph_error,
+    };
   }
 
   // Renew records nearing expiry, budgeted. Called from the cycle alongside

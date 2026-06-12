@@ -293,6 +293,26 @@ covers user-touched tasks).
 > tiered ranking (title/body matches first, checklist-only matches appended). Tool/param **names**
 > stay `checklist` (API + existing-tool consistency); descriptions carry the subtask/step synonyms.
 
+### 4c. Checklist-item manual ordering (reorder + live order read) — ✅ DONE (0.12.0)
+
+> **Status: shipped in 0.12.0.** Checklist items have a user-controllable drag order, backed by
+> the Substrate-only subtask `OrderDateTime` — the same manual-order mechanism `reorder_task` uses
+> for tasks (Graph exposes no checklist order at all). `reorder_checklist_item` moves a step by
+> `top`/`bottom`/`before`/`after`/`index`/`set` (reusing the `src/mcp/reorder.ts` math) and returns
+> `ordered_items`; `list_checklist_items` enriches order best-effort (adds `ordered` + per-item
+> `orderDateTime`); `get_task` gains opt-in `include_checklist_order`. Opt-in (`ENABLE_MY_DAY` + EXO).
+>
+> **Read/write asymmetry, both verified live (drove the implementation):** order is **read INLINE**
+> as a `Subtasks[]` array on the folder-scoped task GET (`GET /taskfolders/{folder}/tasks/{id}?$select=*`)
+> — Substrate has **no** standalone subtasks collection (`GET /tasks/{id}/subtasks` 400s
+> "Endpoint not supported") — but the **write is folder-free** per-item (`PATCH /tasks/{id}/subtasks/{subtaskId}`).
+>
+> **Why order is NOT cached (unlike §4a/§4b):** a step's `OrderDateTime` is **null until it is first
+> dragged**, so an un-reordered checklist has no stored order and displays in `createdDateTime` order
+> — which Graph already provides for free. Caching would mostly store nulls and add a per-scan
+> Substrate call; reading order live on the two single-task surfaces (the cross-task search surfaces
+> are order-agnostic) is strictly cheaper. No schema migration.
+
 ## 5. Email-to-task webhook ingress
 
 Migrate the existing email-to-task flow off n8n: a webhook (or Cloudflare Email
@@ -426,7 +446,72 @@ authenticate to each other. Keeps the auth surface minimal and the AI in control
 portable from the §8 capability/handler code); the destination `upload_attachment_url`
 already exists on the Obsidian side and mainly needs the host allowlist hardened.
 
-## 10. Multi-user mode
+## 10. Link rules on sync — auto-link tasks created/edited outside the MCP server (opt-in)
+
+Run the existing link-rules engine over tasks as they arrive through **normal
+delta sync**, so a task created or edited in the To Do app (or any other client)
+gets its linked resource created automatically — the same outcome the MCP server
+already produces, but without an MCP write. Today a ticket number typed into the
+app never gets linked: `runLinkRules` (`src/config/link-rules-engine.ts`, pure,
+DoS-guarded) only fires on the MCP write paths — `create_task` / `update_task` /
+the on-demand `extract_links` tool, all via `MSToDoMCP.applyLinkRules`. A task that
+never passes through one of those handlers is never scanned. This item closes that
+gap: type `INC0042189` into a task in the app, and on its next sync cycle it picks
+up the matching linked resource.
+
+**Gated behind a new `ENABLE_LINK_RULES_SYNC` preference, default OFF (opt-in).**
+Same posture as `ENABLE_CHECKLIST_CACHE` — but for a stronger reason: unlike the
+§4a/§4b/§4c caches, which only *read* Microsoft, this feature **writes** to the
+user's tasks automatically (creates a linked resource). Auto-mutation should be a
+deliberate opt-in, not a default.
+
+**Architectural fit — reuse the engine, move the trigger.** The pure `runLinkRules`
+and the write/skip/dedup logic of `applyLinkRules` (one-linked-resource-per-task
+rule, never clobber an existing link, `LinkedResourceSizeExceeded`→skip, failures
+non-fatal) port nearly verbatim. The natural home is **`TodoIndex`** (the sync owner,
+and the place a sync-driven mutation belongs), reusing its `GraphClient` (host-pinned,
+sole-refresher invariant intact). The change-detection pattern is exactly §4b's: a
+`tasks.link_scanned_at` marker column (migration **v4**, excluded from `TASK_COLUMNS`
+so the delta UPSERT never clobbers it), `NULL` = "needs link scan". `#applyRows` nulls
+it whenever a task rides `$delta` with a changed title/body (the only two fields the
+engine reads), and a **budgeted** per-task scan drains the NULL set on calm cycles
+(`LINK_RULES_SCAN_MAX_TASKS_PER_CYCLE`, open tasks in non-skipped lists only — mirror
+§4b's scope; completed tasks excluded). The change signal is **delta itself**, so this
+is independent of §4 subscriptions (which only lower latency).
+
+**The one real departure to design around — the sync path stops being read-only.**
+Every sync/notification path built so far is *strictly read-only* toward Microsoft
+task data (see §4: "zero mutating Graph/Substrate calls … no feedback loop"). This
+feature deliberately breaks that for the gated case by issuing a `POST .../linkedResources`
+from sync. Two things to handle:
+
+1. **Feedback loop.** Creating a linked resource bumps the task's `lastModifiedDateTime`
+   (**verify live** — the §4b checklist case confirmed sub-resource edits ride `$delta`),
+   so the self-induced task re-enters `$delta` and re-nulls the marker. This is **safe by
+   idempotency, not by suppression**: To Do allows exactly one linked resource per task and
+   `applyLinkRules` already skips a task that already carries one, so the re-scan finds the
+   link it just created and no-ops. The only cost is one wasted `$expand=linkedResources`
+   GET per self-induced create — bounded and non-destructive. (Optional tightening: only
+   re-null the marker when title/body actually changed, comparing against the cached row.)
+2. **Existing-link check.** `$delta` doesn't expand `linkedResources`, so the scan must GET
+   each candidate task with `$expand=linkedResources` before creating (same as `extract_links`
+   does) to honor the one-per-task rule and **never clobber a link the user added by hand**.
+
+**Non-destructive, like §4b.** A failed or skipped create leaves the marker `NULL` (retried
+next calm cycle) and never mutates the cached task row, so an unreachable Graph or a transient
+error can't corrupt task state.
+
+**Relationship to `extract_links`.** This is the automatic, sync-driven counterpart of the
+existing manual `extract_links` tool — identical engine, identical dedup — just triggered by
+sync instead of an explicit call. `extract_links` stays for on-demand runs and one-shot
+backfill of the existing roster after enabling the gate (or after editing link rules).
+
+**Effort:** ~1–1.5 days — the migration-v4 marker column + `#applyRows` null hook + a budgeted
+scan batch (all patterned on §4b), lifting `applyLinkRules` into `TodoIndex`, the
+`ENABLE_LINK_RULES_SYNC` gate, and a live check that a sync-created linked resource rides the
+next `$delta` (the feedback-loop assumption).
+
+## 11. Multi-user mode
 
 Replace the hardcoded `owner` props and the singleton `idFromName("owner")` DO
 with per-user, KV-scoped tokens and per-user DO keying (the `OWNER_DO_NAME` seam

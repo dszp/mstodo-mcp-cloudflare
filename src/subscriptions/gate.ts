@@ -53,6 +53,12 @@ export const SUBSCRIPTION_RENEW_MARGIN_MS = 12 * 60 * 60_000; // 12 hours
 // worst-case ramp cycle both could spend it, so size it as "per maintenance
 // pass" headroom, not a hard combined guarantee.
 //
+// Reconcile additionally spends ONE *unbudgeted* GET /subscriptions per calm
+// cycle (plus a page per extra @odata.nextLink — ~one for a single-user roster)
+// for the Graph cross-check that heals silent drift. It's a read, not a mutating
+// op, so it sits outside this cap; count it as +1 subrequest on the calm-cycle
+// envelope above.
+//
 // Tunable via the MAX_SUBSCRIPTION_OPS_PER_CYCLE var (mirrors the My Day scan
 // caps). FREE PLAN: leave at 2. PAID PLAN (1000-subrequest ceiling): raise it —
 // up to your list count — for faster initial coverage and renewal headroom.

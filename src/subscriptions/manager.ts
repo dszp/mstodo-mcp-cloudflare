@@ -27,8 +27,18 @@ export const GraphSubscriptionSchema = z
 export type GraphSubscription = z.infer<typeof GraphSubscriptionSchema>;
 
 const SubscriptionListSchema = z
-  .object({ value: z.array(GraphSubscriptionSchema) })
+  .object({
+    value: z.array(GraphSubscriptionSchema),
+    "@odata.nextLink": z.string().optional(),
+  })
   .passthrough();
+
+// A single-user app holds roughly one subscription per list (tens), so the
+// /subscriptions roster fits in one or two pages. This cap is a runaway guard,
+// not a real page budget: hitting it means the roster paginated far past what
+// we expect, so we'd rather throw (→ record-only fallback in reconcile) than
+// act on a roster we can't prove complete.
+const MAX_SUBSCRIPTION_PAGES = 20;
 
 // 32 bytes of CSPRNG → base64url. ~43 chars, well under Graph's 128-char
 // clientState cap. The secret echoed back in every notification.
@@ -85,7 +95,47 @@ export async function deleteSubscription(graph: GraphClient, subscriptionId: str
   await graph.deleteResource(subscriptionUrl(subscriptionId));
 }
 
+// Fetch Graph's full subscription roster, following @odata.nextLink to the
+// terminal page. Reconcile treats this list as ground truth, so it MUST be
+// complete: a partial roster would misclassify live subscriptions as dead
+// (dropped + recreated) and their originals as orphans (torn down), re-creating
+// the very drift the cross-check exists to heal. If pagination runs past the
+// runaway cap we throw rather than return a truncated list — the caller then
+// degrades to the safe record-only fallback. Host-pin is inherited: every
+// getJson (including the nextLink follows) routes through GraphClient →
+// assertGraphUrl.
 export async function listGraphSubscriptions(graph: GraphClient): Promise<GraphSubscription[]> {
-  const res = await graph.getJson(SUBSCRIPTIONS_URL, SubscriptionListSchema);
-  return res.value;
+  const out: GraphSubscription[] = [];
+  let next: string | undefined = SUBSCRIPTIONS_URL;
+  let pages = 0;
+  while (next) {
+    if (pages++ >= MAX_SUBSCRIPTION_PAGES) {
+      throw new Error(
+        `listGraphSubscriptions exceeded ${MAX_SUBSCRIPTION_PAGES} pages; refusing to act on a possibly truncated roster`,
+      );
+    }
+    const res: z.infer<typeof SubscriptionListSchema> = await graph.getJson(
+      next,
+      SubscriptionListSchema,
+    );
+    out.push(...res.value);
+    next = res["@odata.nextLink"];
+  }
+  return out;
+}
+
+// Extract the todoTaskList id from a subscription resource path like
+// "/me/todo/lists/{id}/tasks" (tolerant of a missing leading slash or casing).
+// Returns null when the resource isn't a todoTask-tasks subscription.
+export function parseTodoListId(resource: string | undefined): string | null {
+  if (!resource) return null;
+  const m = resource.match(/todo\/lists\/([^/]+)\/tasks/i);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    // Malformed %-escape (URIError) — fall back to the raw capture rather than
+    // throwing, so one bad resource string can't abort the whole cross-check.
+    return m[1];
+  }
 }
