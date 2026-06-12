@@ -20,6 +20,7 @@ export const GraphSubscriptionSchema = z
     id: z.string(),
     resource: z.string().optional(),
     notificationUrl: z.string().optional(),
+    lifecycleNotificationUrl: z.string().nullish(),
     expirationDateTime: z.string(),
     clientState: z.string().nullish(),
   })

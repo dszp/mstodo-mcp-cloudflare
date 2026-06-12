@@ -192,6 +192,10 @@ export interface SubscriptionStatus {
   dark: string[];
   dead: Array<{ list_id: string; subscription_id: string; expiration_ms: number }>;
   orphan: Array<{ subscription_id: string; list_id: string | null; resource?: string }>;
+  // How many of our live Graph subs carry a lifecycleNotificationUrl (delivery
+  // prerequisite). `lists_with` names the lists already on a lifecycle-enabled
+  // sub. Absent when Graph was unreachable (graph_error set).
+  lifecycle?: { with: number; without: number; lists_with: string[] };
   graph_error?: string;
 }
 
@@ -863,11 +867,18 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     let aliveIds: Set<string> | null = null;
     let darkFromGraph: string[] | null = null;
     const orphan: Array<{ subscription_id: string; list_id: string | null; resource?: string }> = [];
+    // Delivery prerequisite: which of OUR live Graph subs carry a
+    // lifecycleNotificationUrl (the field that keeps Exchange-backed todoTask
+    // subscriptions from going dormant). A sub created before that field was
+    // added shows lifecycle:false until recreated; lists_with names the lists
+    // already on a lifecycle-enabled sub.
+    let lifecycle: { with: number; without: number; lists_with: string[] } | undefined;
     let graph_error: string | undefined;
     try {
       const graph = new GraphClient(this);
+      const graphSubs = await listGraphSubscriptions(graph);
       const { aliveIds: alive, aliveByList, orphans } = this.#diffGraphSubscriptions(
-        await listGraphSubscriptions(graph),
+        graphSubs,
         url ?? "",
         wanted,
       );
@@ -876,6 +887,21 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       }
       aliveIds = alive;
       darkFromGraph = [...wanted].filter((l) => !aliveByList.has(l));
+      const trackedListById = new Map(records.map((r) => [r.subscription_id, r.list_id]));
+      let withL = 0;
+      let withoutL = 0;
+      const lists_with: string[] = [];
+      for (const sub of graphSubs) {
+        if (!alive.has(sub.id)) continue; // ours only
+        if (sub.lifecycleNotificationUrl) {
+          withL += 1;
+          const listId = trackedListById.get(sub.id) ?? parseTodoListId(sub.resource);
+          if (listId) lists_with.push(listId);
+        } else {
+          withoutL += 1;
+        }
+      }
+      lifecycle = { with: withL, without: withoutL, lists_with };
     } catch (e) {
       graph_error = e instanceof Error ? e.message : String(e);
     }
@@ -906,6 +932,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       dark,
       dead,
       orphan,
+      lifecycle,
       graph_error,
     };
   }
