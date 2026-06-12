@@ -46,6 +46,23 @@ describe("handleWebhook", () => {
     await settle(); // deferred DO call settles without throwing through
   });
 
+  it("acks a lifecycle notification with 202 and routes it to onLifecycleEvent", async () => {
+    const { ctx, settle } = ctxStub();
+    const body = JSON.stringify({
+      value: [
+        { subscriptionId: "SUB1", clientState: "good", lifecycleEvent: "reauthorizationRequired" },
+      ],
+    });
+    const req = new Request("https://x/webhook", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    const res = await handleWebhook(req, env, ctx);
+    expect(res!.status).toBe(202);
+    await settle(); // the deferred lifecycle path settles without throwing through
+  });
+
   it("returns 202 for an unparseable body (never makes Graph retry on our parse error)", async () => {
     const { ctx } = ctxStub();
     const req = new Request("https://x/webhook", {

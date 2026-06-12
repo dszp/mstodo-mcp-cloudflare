@@ -804,8 +804,14 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     const aliveIds = new Set<string>();
     const aliveByList = new Set<string>();
     const orphans: Array<{ sub: GraphSubscription; listId: string | null }> = [];
+    // Normalized "ours" compare: if Graph ever echoed the notificationUrl with
+    // different casing or a trailing slash, a strict !== would read every sub as
+    // not-ours and (with cleared/dead records) churn the whole fleet. Compare
+    // case- and trailing-slash-insensitively.
+    const norm = (u: string | undefined) => (u ?? "").trim().replace(/\/+$/, "").toLowerCase();
+    const ourUrl = norm(url);
     for (const sub of graphSubs) {
-      if (sub.notificationUrl !== url) continue; // not ours
+      if (norm(sub.notificationUrl) !== ourUrl) continue; // not ours
       aliveIds.add(sub.id);
       const tracked = trackedListById.get(sub.id);
       const listId = tracked ?? parseTodoListId(sub.resource);
@@ -946,6 +952,10 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       const { id, expirationDateTime } = await createSubscription(graph, {
         listId,
         notificationUrl,
+        // Same /webhook endpoint; the handler routes by payload shape. Carrying
+        // a lifecycleNotificationUrl is what keeps an Exchange-backed todoTask
+        // subscription delivering — reauthorization challenges land here.
+        lifecycleNotificationUrl: notificationUrl,
         clientState,
         expirationDateTime: desiredExpiration(now),
       });
@@ -1435,6 +1445,97 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     }
 
     return { accepted, rejected };
+  }
+
+  // Lifecycle-event entrypoint (the webhook splits these out of the same POST by
+  // payload shape). These are what keep an Exchange-backed todoTask subscription
+  // alive between renewals:
+  //   reauthorizationRequired — Graph's periodic re-consent check (cadence ≈
+  //     access-token TTL, far shorter than our renewal margin). Respond by
+  //     PATCH-renewing, which re-binds the current token; ignoring it is exactly
+  //     how the subscription goes dormant (renews fine, stops delivering).
+  //   subscriptionRemoved — Graph dropped it; clear the record so reconcile
+  //     mints a fresh one.
+  //   missed — a delivery gap; arm delta to backfill.
+  // clientState-validated like change notifications. The reauthorize PATCH is a
+  // mutation of the SUBSCRIPTION resource, not task data, so it cannot emit a
+  // todoTask notification — the read-only-toward-task-data invariant holds.
+  async onLifecycleEvent(
+    items: Array<{ subscriptionId?: string; clientState?: string; lifecycleEvent?: string }>,
+  ): Promise<{ reauthorized: number; removed: number; missed: number; rejected: number }> {
+    let reauthorized = 0;
+    let removed = 0;
+    let missed = 0;
+    let rejected = 0;
+    const graph = new GraphClient(this);
+    for (const item of items) {
+      const rec = item.subscriptionId ? this.findSubscription(item.subscriptionId) : null;
+      if (!rec || rec.client_state !== item.clientState) {
+        rejected += 1;
+        continue;
+      }
+      switch (item.lifecycleEvent) {
+        case "reauthorizationRequired":
+          try {
+            const next = desiredExpiration(Date.now());
+            const { expirationDateTime } = await renewSubscription(graph, rec.subscription_id, next);
+            this.putSubscription({ ...rec, expiration_ms: Date.parse(expirationDateTime) });
+            reauthorized += 1;
+            log.info("subscription_reauthorized", {
+              subscription_id: rec.subscription_id,
+              list_id: rec.list_id,
+            });
+          } catch (e) {
+            // 404 → gone on Graph's side; drop so reconcile recreates. Other
+            // errors: leave it for the renew/reconcile cycle to retry.
+            if (e instanceof GraphError && e.status === 404) {
+              this.deleteSubscriptionRecord(rec.subscription_id);
+            }
+            log.warn("subscription_reauthorize_failed", {
+              subscription_id: rec.subscription_id,
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+          break;
+        case "subscriptionRemoved":
+          this.deleteSubscriptionRecord(rec.subscription_id);
+          removed += 1;
+          log.info("subscription_removed_by_graph", {
+            subscription_id: rec.subscription_id,
+            list_id: rec.list_id,
+          });
+          break;
+        case "missed":
+          missed += 1;
+          break;
+        default:
+          rejected += 1;
+      }
+    }
+    // Removed records and missed gaps both want a delta cycle (recreate the sub /
+    // backfill the gap). A reauthorize alone doesn't change task state.
+    if (removed + missed > 0) await this.ctx.storage.setAlarm(Date.now() + 1);
+    return { reauthorized, removed, missed, rejected };
+  }
+
+  // Tear down and re-mint subscriptions so they pick up the current creation
+  // shape (notably lifecycleNotificationUrl, which can't be PATCHed onto an
+  // existing subscription). Clears the local record(s); the next reconcile cycle
+  // then tears down the now-untracked old Graph subs as orphans and creates
+  // fresh ones for the wanted lists. Scope to one list (the delivery experiment:
+  // recreate one list, leave the rest as a control) or all (the rollout).
+  async recreateSubscriptions(listId?: string): Promise<{ cleared: number }> {
+    const cleared = this.getSubscriptions().filter(
+      (r) => listId === undefined || r.list_id === listId,
+    ).length;
+    if (listId === undefined) {
+      this.sql.exec("DELETE FROM subscriptions");
+    } else {
+      this.sql.exec("DELETE FROM subscriptions WHERE list_id = ?", listId);
+    }
+    await this.ctx.storage.setAlarm(Date.now() + 1);
+    log.info("subscriptions_recreate_requested", { list_id: listId ?? "*", cleared });
+    return { cleared };
   }
 
   // One sync cycle per alarm, then re-arm: soon if anything is still mid-cycle

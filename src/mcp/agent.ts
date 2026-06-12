@@ -3423,6 +3423,36 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
+    this.server.registerTool(
+      "recreate_subscriptions",
+      {
+        description:
+          "Tear down and re-mint Graph change-notification subscriptions so they pick up the current creation shape — notably lifecycleNotificationUrl, which cannot be PATCHed onto an existing subscription and is what keeps an Exchange-backed todoTask subscription from going dormant (validating + renewing but never delivering). Clears the local record(s); the next reconcile cycle tears down the now-untracked old Graph subs as orphans and creates fresh ones for the wanted lists (recovery rides the delta poll in the meantime). Pass `list` to recreate one list's subscription (the delivery experiment: recreate one, leave the rest as a control, then watch sync_status.notifications.last_notification_at); omit to recreate the whole fleet. Returns ok + how many local records were cleared.",
+        inputSchema: {
+          list: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Recreate only this list's subscription (alias, display name, or Graph list ID). Omit to recreate every subscription.",
+            ),
+        },
+      },
+      async ({ list }): Promise<McpResponse> =>
+        instrument("recreate_subscriptions", async () => {
+          const list_id = list !== undefined ? await this.resolveList(list) : undefined;
+          const r = await this.#index().recreateSubscriptions(list_id);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ ok: true, scope: list_id ?? "all", cleared: r.cleared }),
+              },
+            ],
+          };
+        }),
+    );
+
     // -- My Day (opt-in, Substrate endpoint) ---------------------------------
     // Registered unconditionally; each gates at invocation via withSubstrate,
     // which returns my_day_disabled when ENABLE_MY_DAY != "true" and

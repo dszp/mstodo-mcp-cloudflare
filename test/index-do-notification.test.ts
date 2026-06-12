@@ -162,6 +162,70 @@ describe("onChangeNotification", () => {
     expect(out.rejected).toBe(1);
   });
 
+  it("onLifecycleEvent reauthorizationRequired renews (PATCHes) the subscription", async () => {
+    await signIn();
+    const stub = indexStub("notif-life-1");
+    const now = Date.now();
+    await stub.putSubscription({
+      subscription_id: "SUB1", list_id: "L1", client_state: "good",
+      expiration_ms: now + 60_000, created_at_ms: now,
+    });
+    const calls: { url: string; method: string }[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      calls.push({ url, method });
+      if (method === "PATCH" && url.includes("/subscriptions/SUB1"))
+        return Response.json(
+          { id: "SUB1", expirationDateTime: new Date(now + 70 * 60 * 60_000).toISOString() },
+          { status: 200 },
+        );
+      return new Response("unexpected", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const out = await stub.onLifecycleEvent([
+      { subscriptionId: "SUB1", clientState: "good", lifecycleEvent: "reauthorizationRequired" },
+    ]);
+    expect(out.reauthorized).toBe(1);
+    expect(calls.some((c) => c.method === "PATCH" && c.url.includes("/subscriptions/SUB1"))).toBe(true);
+    // The reauthorize PATCH advanced expiry well past the 12h renew margin.
+    expect((await stub.findSubscription("SUB1"))!.expiration_ms).toBeGreaterThan(now + 12 * 60 * 60_000);
+  });
+
+  it("onLifecycleEvent subscriptionRemoved drops the record (reconcile recreates)", async () => {
+    await signIn();
+    const stub = indexStub("notif-life-2");
+    const now = Date.now();
+    await stub.putSubscription({
+      subscription_id: "SUB1", list_id: "L1", client_state: "good",
+      expiration_ms: now + 60_000, created_at_ms: now,
+    });
+    globalThis.fetch = vi.fn(async () => new Response("", { status: 404 })) as unknown as typeof fetch;
+    const out = await stub.onLifecycleEvent([
+      { subscriptionId: "SUB1", clientState: "good", lifecycleEvent: "subscriptionRemoved" },
+    ]);
+    expect(out.removed).toBe(1);
+    expect(await stub.findSubscription("SUB1")).toBeNull();
+  });
+
+  it("onLifecycleEvent rejects a clientState mismatch and does not reauthorize", async () => {
+    const stub = indexStub("notif-life-3");
+    const now = Date.now();
+    await stub.putSubscription({
+      subscription_id: "SUB1", list_id: "L1", client_state: "good",
+      expiration_ms: now + 60_000, created_at_ms: now,
+    });
+    globalThis.fetch = vi.fn(async () => new Response("", { status: 404 })) as unknown as typeof fetch;
+    const out = await stub.onLifecycleEvent([
+      { subscriptionId: "SUB1", clientState: "WRONG", lifecycleEvent: "reauthorizationRequired" },
+    ]);
+    // reauthorized:0 proves no PATCH was issued (a reauthorize requires one);
+    // rejected:1 + the untouched record prove the mismatch was a no-op.
+    expect(out.rejected).toBe(1);
+    expect(out.reauthorized).toBe(0);
+    expect((await stub.findSubscription("SUB1"))!.expiration_ms).toBe(now + 60_000);
+  });
+
   it("stamps webhook delivery health on accepted notifications, never on rejected ones", async () => {
     await signIn();
     const stub = indexStub("notif-health");

@@ -20,6 +20,10 @@ const NotificationItemSchema = z
     subscriptionId: z.string().optional(),
     clientState: z.string().optional(),
     changeType: z.string().optional(),
+    // Present only on lifecycle notifications (reauthorizationRequired /
+    // subscriptionRemoved / missed); absent on change notifications. Routes the
+    // item to onLifecycleEvent vs onChangeNotification.
+    lifecycleEvent: z.string().optional(),
     // Basic notification carries the changed task id here (no resource data).
     resourceData: z.object({ id: z.string().optional() }).passthrough().nullish(),
   })
@@ -62,18 +66,49 @@ export async function handleWebhook(
   }
 
   if (taskSubscriptionsEnabled(env) && parsed.value.length > 0) {
-    const items = parsed.value.map((v) => ({
-      subscriptionId: v.subscriptionId,
-      clientState: v.clientState,
-      changeType: v.changeType,
-      resourceId: v.resourceData?.id,
-    }));
-    ctx.waitUntil(
-      ownerIndex(env)
-        .onChangeNotification(items)
-        .then((r) => log.info("webhook_processed", { accepted: r.accepted, rejected: r.rejected }))
-        .catch((e) => log.warn("webhook_process_failed", { error: String(e) })),
-    );
+    // Same POST carries both kinds; split by payload shape. Lifecycle items have
+    // a `lifecycleEvent` and no resource/changeType.
+    const lifecycle = parsed.value
+      .filter((v) => v.lifecycleEvent)
+      .map((v) => ({
+        subscriptionId: v.subscriptionId,
+        clientState: v.clientState,
+        lifecycleEvent: v.lifecycleEvent,
+      }));
+    const changes = parsed.value
+      .filter((v) => !v.lifecycleEvent)
+      .map((v) => ({
+        subscriptionId: v.subscriptionId,
+        clientState: v.clientState,
+        changeType: v.changeType,
+        resourceId: v.resourceData?.id,
+      }));
+    const index = ownerIndex(env);
+    if (changes.length > 0) {
+      ctx.waitUntil(
+        index
+          .onChangeNotification(changes)
+          .then((r) =>
+            log.info("webhook_processed", { accepted: r.accepted, rejected: r.rejected }),
+          )
+          .catch((e) => log.warn("webhook_process_failed", { error: String(e) })),
+      );
+    }
+    if (lifecycle.length > 0) {
+      ctx.waitUntil(
+        index
+          .onLifecycleEvent(lifecycle)
+          .then((r) =>
+            log.info("webhook_lifecycle", {
+              reauthorized: r.reauthorized,
+              removed: r.removed,
+              missed: r.missed,
+              rejected: r.rejected,
+            }),
+          )
+          .catch((e) => log.warn("webhook_lifecycle_failed", { error: String(e) })),
+      );
+    }
   }
   return ack(202);
 }

@@ -1,5 +1,6 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect, vi, afterEach } from "vitest";
+import type { TodoIndex } from "../src/cache/index-do";
 import { SCOPES, TOKENS_KEY } from "../src/auth/microsoft";
 import { parseTodoListId } from "../src/subscriptions/manager";
 
@@ -116,6 +117,38 @@ describe("reconcileSubscriptions", () => {
     await stub.reconcileSubscriptions();
     await stub.reconcileSubscriptions();
     expect((await stub.getSubscriptions()).length).toBe(5);
+  });
+
+  it("creates subscriptions with a lifecycleNotificationUrl on the same /webhook endpoint", async () => {
+    await signIn();
+    const stub = indexStub("recon-lifecycle");
+    await stub.upsertList({ id: "L1", displayName: "L1", isOwner: true, isShared: false });
+    const { calls } = installGraph();
+    await stub.reconcileSubscriptions();
+    const post = calls.find((c) => c.method === "POST");
+    expect(post).toBeTruthy();
+    // The field that keeps an Exchange-backed todoTask sub from going dormant.
+    expect(post!.body.lifecycleNotificationUrl).toBeTruthy();
+    expect(post!.body.lifecycleNotificationUrl).toBe(post!.body.notificationUrl);
+  });
+
+  it("recreateSubscriptions clears records (one list, then all) and arms the alarm", async () => {
+    const stub = indexStub("recon-recreate");
+    // Seed records directly and read back synchronously inside the DO so a
+    // freshly-armed alarm can't run reconcile and re-mint between assertions.
+    await runInDurableObject(stub, async (inst: TodoIndex) => {
+      const now = 1_700_000_000_000;
+      inst.putSubscription({
+        subscription_id: "S1", list_id: "L1", client_state: "cs", expiration_ms: now, created_at_ms: now,
+      });
+      inst.putSubscription({
+        subscription_id: "S2", list_id: "L2", client_state: "cs", expiration_ms: now, created_at_ms: now,
+      });
+      expect((await inst.recreateSubscriptions("L1")).cleared).toBe(1);
+      expect(inst.getSubscriptions().map((r) => r.list_id)).toEqual(["L2"]);
+      expect((await inst.recreateSubscriptions()).cleared).toBe(1);
+      expect(inst.getSubscriptions()).toHaveLength(0);
+    });
   });
 
   it("deletes a record (and the Graph sub) when its list is gone", async () => {
