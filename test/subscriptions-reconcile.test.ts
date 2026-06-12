@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { SCOPES, TOKENS_KEY } from "../src/auth/microsoft";
+import { parseTodoListId } from "../src/subscriptions/manager";
 
 function indexStub(name: string) {
   return env.TODO_INDEX_DO.getByName(name);
@@ -24,24 +25,43 @@ afterEach(async () => {
 });
 
 // Stateful Graph fake: GET /subscriptions reflects what POST created (and DELETE
-// removed), so the reconciler's Graph cross-check sees a faithful roster. Returns
-// the recorded `calls` plus `dropFromGraph(id)` to simulate Graph expiring/evicting
-// a subscription out from under us (without touching our local record).
-function installGraph() {
+// removed), so the reconciler's Graph cross-check sees a faithful roster.
+//
+// Options model the roster-fetch edge cases the cross-check has to survive:
+//   pageSize    — paginate the roster via @odata.nextLink (?skip=N), so we can
+//                 prove the follower reassembles a multi-page roster without
+//                 misclassifying live subs as dead.
+//   infinite    — every roster page returns a nextLink (never terminates), so
+//                 listGraphSubscriptions trips its page cap and throws.
+// Controls returned: dropFromGraph(id) simulates Graph expiring a sub out from
+// under us; seedGraphSub(sub) injects an untracked sub already on Graph;
+// setFailList(v) makes the roster GET 500 (unreachable Graph).
+function installGraph(opts: { pageSize?: number; infinite?: boolean } = {}) {
   const calls: { url: string; method: string; body: any }[] = [];
   const subs = new Map<string, any>();
   let n = 0;
+  let failList = false;
   const idFromUrl = (url: string) => {
     const m = url.match(/subscriptions\/([^/?]+)/);
     return m ? decodeURIComponent(m[1]) : null;
   };
+  const isCollection = (url: string) => /\/subscriptions(\?|$)/.test(url);
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(init.body as string) : null;
     calls.push({ url, method, body });
-    if (url.endsWith("/subscriptions") && method === "GET")
-      return Response.json({ value: [...subs.values()] }, { status: 200 });
+    if (method === "GET" && isCollection(url)) {
+      if (failList) return new Response("boom", { status: 500 });
+      const all = [...subs.values()];
+      const size = opts.pageSize && opts.pageSize > 0 ? opts.pageSize : all.length || 1;
+      const skip = Number(url.match(/[?&]skip=(\d+)/)?.[1] ?? 0);
+      const page = all.slice(skip, skip + size);
+      const payload: any = { value: page };
+      if (opts.infinite || skip + size < all.length)
+        payload["@odata.nextLink"] = `https://graph.microsoft.com/v1.0/subscriptions?skip=${skip + size}`;
+      return Response.json(payload, { status: 200 });
+    }
     if (url.endsWith("/subscriptions") && method === "POST") {
       const id = `SUB${++n}`;
       subs.set(id, {
@@ -69,7 +89,14 @@ function installGraph() {
     }
     return new Response(`unscripted ${method} ${url}`, { status: 404 });
   }) as unknown as typeof fetch;
-  return { calls, dropFromGraph: (id: string) => subs.delete(id) };
+  return {
+    calls,
+    dropFromGraph: (id: string) => subs.delete(id),
+    seedGraphSub: (sub: any) => subs.set(sub.id, sub),
+    setFailList: (v: boolean) => {
+      failList = v;
+    },
+  };
 }
 
 describe("reconcileSubscriptions", () => {
@@ -206,5 +233,109 @@ describe("reconcileSubscriptions", () => {
     expect(drifted.dead[0].list_id).toBe("L1");
     expect(drifted.summary.dark).toBe(1);
     expect((await stub.getSubscriptions()).length).toBe(1); // read-only: record untouched
+  });
+
+  it("reassembles a paginated Graph roster without misclassifying live subs", async () => {
+    await signIn();
+    const stub = indexStub("recon-paged");
+    await stub.upsertList({ id: "L1", displayName: "L1", isOwner: true, isShared: false });
+    await stub.upsertList({ id: "L2", displayName: "L2", isOwner: true, isShared: false });
+    const { calls } = installGraph({ pageSize: 1 }); // one sub per roster page
+    await stub.reconcileSubscriptions(); // creates SUB1, SUB2 (budget 2)
+    const before = await stub.getSubscriptions();
+    expect(before).toHaveLength(2);
+
+    // Second cycle: the roster now spans two pages. If the follower stopped at
+    // page 1, SUB2 would read as dead → dropped + recreated (churn). It must not.
+    await stub.reconcileSubscriptions();
+    const after = await stub.getSubscriptions();
+    expect(after.map((r) => r.subscription_id).sort()).toEqual(
+      before.map((r) => r.subscription_id).sort(),
+    ); // same ids, no churn
+    expect(calls.some((c) => c.method === "GET" && /skip=1/.test(c.url))).toBe(true); // page 2 fetched
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(2); // no recreate
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false); // no teardown
+  });
+
+  it("falls back to record-only when the roster paginates without end", async () => {
+    await signIn();
+    const stub = indexStub("recon-infinite");
+    await stub.upsertList({ id: "L1", displayName: "L1", isOwner: true, isShared: false });
+    installGraph();
+    await stub.reconcileSubscriptions(); // create the sub for L1
+    const before = await stub.getSubscriptions();
+    expect(before).toHaveLength(1);
+
+    // Graph's roster now paginates forever: the page cap throws, so the
+    // cross-check is skipped and the record is PRESERVED rather than churned —
+    // "never act on a roster we can't prove complete". (The fresh fake's roster
+    // is empty, so without the guard the record would read as dead and recreate.)
+    const { calls } = installGraph({ infinite: true });
+    await stub.reconcileSubscriptions();
+    const after = await stub.getSubscriptions();
+    expect(after).toHaveLength(1);
+    expect(after[0].subscription_id).toBe(before[0].subscription_id); // untouched
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("preserves records when the Graph roster fetch fails (never drops what it can't disprove)", async () => {
+    await signIn();
+    const stub = indexStub("recon-listfail");
+    await stub.upsertList({ id: "L1", displayName: "L1", isOwner: true, isShared: false });
+    const ctl = installGraph();
+    await stub.reconcileSubscriptions();
+    const before = await stub.getSubscriptions();
+    expect(before).toHaveLength(1);
+
+    // Graph really did drop the sub, but the roster GET is now unreachable (500).
+    // The cross-check can't run, so it must NOT drop the record on suspicion.
+    ctl.dropFromGraph(before[0].subscription_id);
+    ctl.setFailList(true);
+    await stub.reconcileSubscriptions();
+    const after = await stub.getSubscriptions();
+    expect(after).toHaveLength(1);
+    expect(after[0].subscription_id).toBe(before[0].subscription_id); // untouched
+  });
+
+  it("tears down an untracked Graph sub on our webhook URL (orphan)", async () => {
+    await signIn();
+    const stub = indexStub("recon-orphan");
+    await stub.upsertList({ id: "L1", displayName: "L1", isOwner: true, isShared: false });
+    const ctl = installGraph();
+    await stub.reconcileSubscriptions(); // creates a tracked sub on L1
+    const notifUrl = ctl.calls.find((c) => c.method === "POST")!.body.notificationUrl;
+
+    // An extra Graph sub on OUR webhook URL that no local record tracks (e.g. a
+    // create whose record write was lost). It can't be adopted — Graph's GET
+    // omits clientState — so reconcile tears it down to reclaim tenant quota.
+    ctl.seedGraphSub({
+      id: "ORPHAN1",
+      resource: "/me/todo/lists/L1/tasks",
+      notificationUrl: notifUrl,
+      expirationDateTime: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    await stub.reconcileSubscriptions();
+    expect(
+      ctl.calls.some((c) => c.method === "DELETE" && /\/subscriptions\/ORPHAN1/.test(c.url)),
+    ).toBe(true);
+    expect((await stub.getSubscriptions()).map((r) => r.list_id)).toContain("L1"); // tracked sub kept
+  });
+});
+
+describe("parseTodoListId", () => {
+  it("extracts the list id from a todoTask tasks resource (leading slash optional)", () => {
+    expect(parseTodoListId("/me/todo/lists/AQMk123/tasks")).toBe("AQMk123");
+    expect(parseTodoListId("me/todo/lists/AQMk123/tasks")).toBe("AQMk123");
+  });
+  it("returns null for non-todoTask resources and empty input", () => {
+    expect(parseTodoListId(undefined)).toBeNull();
+    expect(parseTodoListId("/me/messages")).toBeNull();
+  });
+  it("does not throw on a malformed %-escape — falls back to the raw capture", () => {
+    expect(parseTodoListId("/me/todo/lists/bad%ZZ/tasks")).toBe("bad%ZZ");
+  });
+  it("decodes a percent-encoded list id", () => {
+    expect(parseTodoListId("/me/todo/lists/a%2Fb/tasks")).toBe("a/b");
   });
 });

@@ -720,7 +720,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       // Orphan Graph subs: ours (by notificationUrl) but unwanted or untracked.
       // Tear them down to reclaim tenant quota. We can't adopt them — Graph's
       // GET omits clientState, so their notifications wouldn't be validatable.
-      for (const sub of orphans) {
+      for (const { sub } of orphans) {
         if (budget <= 0) return;
         budget -= 1;
         await this.#tearDownSubscription(graph, sub.id);
@@ -757,27 +757,45 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     }
   }
 
-  // Partition Graph's subscription roster relative to ours. "Ours" = subscribed
-  // to this Worker's webhook URL. Returns the set of live subscription ids (so
-  // the caller can spot dead local records) and the orphans among ours — a sub
-  // whose list isn't wanted, or that no local record tracks — for teardown.
+  // Partition Graph's subscription roster relative to ours, the single source of
+  // truth shared by reconcile and subscriptionStatus. "Ours" = subscribed to
+  // this Worker's webhook URL. Returns:
+  //   aliveIds    — live Graph subscription ids on our URL (caller spots dead
+  //                 local records as records whose id isn't here).
+  //   aliveByList — the lists those live subs cover (caller spots `dark` lists).
+  //   orphans     — ours but untracked, or tracked on a list we no longer want;
+  //                 torn down to reclaim quota (we can't adopt an untracked sub:
+  //                 Graph's GET omits clientState, so its notifications wouldn't
+  //                 validate). Carries the resolved listId for reporting.
+  // For a tracked sub we trust the local record's list_id over re-parsing the
+  // resource string, so a malformed resource can never misclassify (and later
+  // tear down) a subscription we know is healthy.
   #diffGraphSubscriptions(
     graphSubs: GraphSubscription[],
     url: string,
     wanted: Set<string>,
-  ): { aliveIds: Set<string>; orphans: GraphSubscription[] } {
-    const known = new Set(this.getSubscriptions().map((r) => r.subscription_id));
+  ): {
+    aliveIds: Set<string>;
+    aliveByList: Set<string>;
+    orphans: Array<{ sub: GraphSubscription; listId: string | null }>;
+  } {
+    const trackedListById = new Map(
+      this.getSubscriptions().map((r) => [r.subscription_id, r.list_id]),
+    );
     const aliveIds = new Set<string>();
-    const orphans: GraphSubscription[] = [];
+    const aliveByList = new Set<string>();
+    const orphans: Array<{ sub: GraphSubscription; listId: string | null }> = [];
     for (const sub of graphSubs) {
       if (sub.notificationUrl !== url) continue; // not ours
       aliveIds.add(sub.id);
-      const listId = parseTodoListId(sub.resource);
-      if (!listId || !wanted.has(listId) || !known.has(sub.id)) {
-        orphans.push(sub);
+      const tracked = trackedListById.get(sub.id);
+      const listId = tracked ?? parseTodoListId(sub.resource);
+      if (listId) aliveByList.add(listId);
+      if (tracked === undefined || !listId || !wanted.has(listId)) {
+        orphans.push({ sub, listId });
       }
     }
-    return { aliveIds, orphans };
+    return { aliveIds, aliveByList, orphans };
   }
 
   // Read-only introspection for the subscription layer: the env-derived
@@ -798,7 +816,6 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     );
     const records = this.getSubscriptions();
     const recByList = new Set(records.map((r) => r.list_id));
-    const recById = new Set(records.map((r) => r.subscription_id));
 
     const config: SubscriptionConfig = {
       subscriptions_enabled: enabled,
@@ -814,25 +831,23 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       my_day_scan_window_min: this.#myDayScanWindowMs() / 60_000,
     };
 
-    // Graph truth (best-effort). Without it we can still report wanted/local,
-    // but can't classify dead/orphan — flag that with graph_error.
+    // Graph truth (best-effort), via the same partition reconcile acts on so the
+    // report can't drift from the reconciler's behaviour. Without it we can
+    // still report wanted/local, but can't classify dead/orphan — flag that with
+    // graph_error.
     let aliveIds: Set<string> | null = null;
     let darkFromGraph: string[] | null = null;
     const orphan: Array<{ subscription_id: string; list_id: string | null; resource?: string }> = [];
     let graph_error: string | undefined;
     try {
       const graph = new GraphClient(this);
-      const graphSubs = await listGraphSubscriptions(graph);
-      const alive = new Set<string>();
-      const aliveByList = new Set<string>();
-      for (const sub of graphSubs) {
-        if (sub.notificationUrl !== url) continue;
-        alive.add(sub.id);
-        const listId = parseTodoListId(sub.resource);
-        if (listId) aliveByList.add(listId);
-        if (!listId || !wanted.has(listId) || !recById.has(sub.id)) {
-          orphan.push({ subscription_id: sub.id, list_id: listId, resource: sub.resource });
-        }
+      const { aliveIds: alive, aliveByList, orphans } = this.#diffGraphSubscriptions(
+        await listGraphSubscriptions(graph),
+        url ?? "",
+        wanted,
+      );
+      for (const o of orphans) {
+        orphan.push({ subscription_id: o.sub.id, list_id: o.listId, resource: o.sub.resource });
       }
       aliveIds = alive;
       darkFromGraph = [...wanted].filter((l) => !aliveByList.has(l));

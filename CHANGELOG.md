@@ -26,7 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unused at runtime): records with no matching Graph subscription are dropped and recreated the same
   cycle, and orphaned subscriptions on our webhook URL are torn down to reclaim quota. Best-effort —
   a failed roster fetch falls back to the prior record-only behaviour rather than dropping records it
-  can't disprove.
+  can't disprove. The roster fetch follows `@odata.nextLink` to completion (and throws rather than
+  act on a truncated page), so a paginated roster can't misclassify live subscriptions as dead; and
+  for a tracked subscription the cross-check trusts the local record's list id over re-parsing the
+  Graph resource string, so a malformed resource can't tear down a healthy subscription.
 
 ## [0.12.0] – 2026-05-31
 
