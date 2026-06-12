@@ -161,4 +161,53 @@ describe("onChangeNotification", () => {
     expect(out.accepted).toBe(0);
     expect(out.rejected).toBe(1);
   });
+
+  it("stamps webhook delivery health on accepted notifications, never on rejected ones", async () => {
+    await signIn();
+    const stub = indexStub("notif-health");
+    // List in the roster + far-future expiry so the subscription survives any
+    // reconcile/renew cycle a firing alarm runs between the two accepts (an
+    // unrostered or near-expiry sub would be torn down under the 404 stub).
+    await stub.upsertList({ id: "L1", displayName: "L1", isOwner: true, isShared: false });
+    await stub.putSubscription({
+      subscription_id: "SUB1",
+      list_id: "L1",
+      client_state: "good",
+      expiration_ms: Date.now() + 100 * 60 * 60_000,
+      created_at_ms: Date.now(),
+    });
+    // Uncached task ⇒ the My Day branch marks scan-due and issues no Substrate
+    // call; 404-stub fetch is just insurance against accidental real network.
+    globalThis.fetch = vi.fn(async () => new Response("", { status: 404 })) as unknown as typeof fetch;
+
+    const before = await stub.syncStatus();
+    expect(before.notifications.last_notification_at).toBeNull();
+    expect(before.notifications.notifications_total).toBe(0);
+    expect(before.notifications.minutes_since).toBeNull();
+
+    // A rejected notification (bad clientState) must NOT stamp health — the
+    // public /webhook cannot be used to forge a "delivering" signal.
+    await stub.onChangeNotification([
+      { subscriptionId: "SUB1", clientState: "WRONG", changeType: "updated", resourceId: "T1" },
+    ]);
+    const afterReject = await stub.syncStatus();
+    expect(afterReject.notifications.last_notification_at).toBeNull();
+    expect(afterReject.notifications.notifications_total).toBe(0);
+
+    // An accepted notification stamps last_notification_at and the total.
+    const out = await stub.onChangeNotification([
+      { subscriptionId: "SUB1", clientState: "good", changeType: "updated", resourceId: "T1" },
+    ]);
+    expect(out.accepted).toBe(1);
+    const afterAccept = await stub.syncStatus();
+    expect(afterAccept.notifications.last_notification_at).not.toBeNull();
+    expect(afterAccept.notifications.notifications_total).toBe(1);
+    expect(afterAccept.notifications.minutes_since).toBeGreaterThanOrEqual(0);
+
+    // A second accepted batch accumulates the cumulative total.
+    await stub.onChangeNotification([
+      { subscriptionId: "SUB1", clientState: "good", changeType: "updated", resourceId: "T2" },
+    ]);
+    expect((await stub.syncStatus()).notifications.notifications_total).toBe(2);
+  });
 });

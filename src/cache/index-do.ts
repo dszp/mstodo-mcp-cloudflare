@@ -144,6 +144,25 @@ interface SyncStateRow {
   last_error: string | null;
 }
 
+// Reserved sync_state row holding webhook-delivery telemetry (last_synced_at =
+// last accepted notification's epoch ms; status = cumulative accepted count as
+// a string). It is NOT a "lists"/"tasks:*"/"myday:*" resource, so syncStatus'
+// generic report loop ignores it — it only surfaces via #webhookHealth().
+const WEBHOOK_HEALTH_KEY = "meta:webhook";
+
+// Delivery-health view of the Graph change-notification (webhook) path. The
+// signal that distinguishes "subscriptions exist (coverage ok)" from
+// "subscriptions are actually delivering": Graph can silently stop sending
+// todoTask notifications with no lifecycle event, leaving full coverage but a
+// stale `last_notification_at`. Only *accepted* (clientState-validated)
+// notifications are recorded, so unauthenticated POSTs to the public /webhook
+// can't forge a healthy signal.
+export interface WebhookHealth {
+  last_notification_at: number | null; // epoch ms of the last accepted notification
+  notifications_total: number; // cumulative accepted notifications
+  minutes_since: number | null; // age of last_notification_at, null if never
+}
+
 // Concrete (RPC-serializable) shapes for subscriptionStatus(). Avoid
 // Record<string, unknown> here — Cloudflare's RPC type mapper collapses
 // `unknown`-valued returns to `never` at the call site.
@@ -1244,6 +1263,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   async syncStatus(): Promise<{
     resources: SyncStatusReport[];
     totals: { tasks: number; lists: number; all_idle: boolean };
+    notifications: WebhookHealth;
   }> {
     const cfg = await loadListsConfig(this.env);
 
@@ -1309,7 +1329,11 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     const all_idle = resources
       .filter((r) => r.status !== "sync_disabled")
       .every((r) => r.status === "idle" && !r.mid_cycle);
-    return { resources, totals: { tasks, lists: listRows.length, all_idle } };
+    return {
+      resources,
+      totals: { tasks, lists: listRows.length, all_idle },
+      notifications: this.#webhookHealth(Date.now()),
+    };
   }
 
   // -- Sync (alarm-driven, resumable, budget-bounded) -----------------------
@@ -1349,8 +1373,14 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       work.push({ listId: rec.list_id, taskId: item.resourceId, changeType: item.changeType });
     }
 
-    // Arm the alarm once for the Graph delta refresh (idempotent; coalesces).
-    if (accepted > 0) await this.ctx.storage.setAlarm(Date.now() + 1);
+    // Arm the alarm once for the Graph delta refresh (idempotent; coalesces),
+    // and stamp delivery health so a silent stop in Graph's notifications is
+    // observable (full coverage + a stale last_notification_at).
+    if (accepted > 0) {
+      const now = Date.now();
+      await this.ctx.storage.setAlarm(now + 1);
+      this.#recordNotification(accepted, now);
+    }
 
     // Targeted My Day refresh of each changed task. Sequential (EXO forbids
     // parallel Substrate calls). Skipped entirely when My Day is off.
@@ -1716,6 +1746,27 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       .exec("SELECT * FROM sync_state WHERE resource = ?", resource)
       .toArray() as unknown as SyncStateRow[];
     return rows.length > 0 ? rows[0] : null;
+  }
+
+  // Stamp the webhook-delivery telemetry on each accepted notification batch.
+  #recordNotification(accepted: number, now: number): void {
+    const cur = this.#getSyncState(WEBHOOK_HEALTH_KEY);
+    const prevTotal = cur?.status ? Number(cur.status) || 0 : 0;
+    this.#setSyncState(WEBHOOK_HEALTH_KEY, {
+      last_synced_at: now,
+      status: String(prevTotal + accepted),
+    });
+  }
+
+  // Read the webhook-delivery health (see WebhookHealth / WEBHOOK_HEALTH_KEY).
+  #webhookHealth(now: number): WebhookHealth {
+    const row = this.#getSyncState(WEBHOOK_HEALTH_KEY);
+    const last = row?.last_synced_at ?? null;
+    return {
+      last_notification_at: last,
+      notifications_total: row?.status ? Number(row.status) || 0 : 0,
+      minutes_since: last === null ? null : Math.round((now - last) / 60_000),
+    };
   }
 
   #setSyncState(resource: string, patch: Partial<Omit<SyncStateRow, "resource">>): void {

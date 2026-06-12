@@ -3367,7 +3367,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "sync_status",
       {
         description:
-          "Read-only health probe for the TodoIndex delta sync. Returns one report per resource (the 'lists' roster + one 'tasks:{listId}' per list) with status, last_synced_at, mid_cycle (resume cursor outstanding), last_error, and row_count — plus totals { tasks, lists, all_idle }. all_idle=true means every resource is fully caught up.",
+          "Read-only health probe for the TodoIndex delta sync. Returns one report per resource (the 'lists' roster + one 'tasks:{listId}' per list) with status, last_synced_at, mid_cycle (resume cursor outstanding), last_error, and row_count — plus totals { tasks, lists, all_idle }. all_idle=true means every resource is fully caught up. Also returns `notifications` (webhook-delivery health): last_notification_at (epoch ms of the last accepted Graph change notification), notifications_total (cumulative accepted), and minutes_since. A null/very-old last_notification_at while subscription coverage is full means Graph has silently stopped delivering todoTask notifications and sync is riding the delta poll only — pair this with subscription_status (coverage) to tell 'no subscriptions' from 'subscriptions present but not delivering'.",
         inputSchema: {},
       },
       async (): Promise<McpResponse> =>
