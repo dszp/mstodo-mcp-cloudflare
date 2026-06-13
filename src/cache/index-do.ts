@@ -196,6 +196,18 @@ export interface SubscriptionStatus {
   // prerequisite). `lists_with` names the lists already on a lifecycle-enabled
   // sub. Absent when Graph was unreachable (graph_error set).
   lifecycle?: { with: number; without: number; lists_with: string[] };
+  // Raw Graph subscription objects for our subs (clientState omitted) — diagnostic.
+  graph_raw: Array<{
+    subscription_id: string;
+    resource?: string;
+    notification_url?: string;
+    lifecycle_url: string | null;
+    change_type: string | null;
+    application_id: string | null;
+    creator_id: string | null;
+    content_type: string | null;
+    expiration?: string;
+  }>;
   graph_error?: string;
 }
 
@@ -873,10 +885,40 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     // added shows lifecycle:false until recreated; lists_with names the lists
     // already on a lifecycle-enabled sub.
     let lifecycle: { with: number; without: number; lists_with: string[] } | undefined;
+    // Raw Graph subscription objects for OUR subs (clientState omitted — it's our
+    // secret). Diagnostic: surfaces applicationId / creatorId / changeType /
+    // expiration so an anomalous sub (wrong owning app, etc.) is visible.
+    const graph_raw: Array<{
+      subscription_id: string;
+      resource?: string;
+      notification_url?: string;
+      lifecycle_url: string | null;
+      change_type: string | null;
+      application_id: string | null;
+      creator_id: string | null;
+      content_type: string | null;
+      expiration?: string;
+    }> = [];
     let graph_error: string | undefined;
     try {
       const graph = new GraphClient(this);
       const graphSubs = await listGraphSubscriptions(graph);
+      const ourUrlNorm = (url ?? "").trim().replace(/\/+$/, "").toLowerCase();
+      for (const sub of graphSubs) {
+        if ((sub.notificationUrl ?? "").trim().replace(/\/+$/, "").toLowerCase() !== ourUrlNorm)
+          continue;
+        graph_raw.push({
+          subscription_id: sub.id,
+          resource: sub.resource,
+          notification_url: sub.notificationUrl,
+          lifecycle_url: sub.lifecycleNotificationUrl ?? null,
+          change_type: sub.changeType ?? null,
+          application_id: sub.applicationId ?? null,
+          creator_id: sub.creatorId ?? null,
+          content_type: sub.notificationContentType ?? null,
+          expiration: sub.expirationDateTime,
+        });
+      }
       const { aliveIds: alive, aliveByList, orphans } = this.#diffGraphSubscriptions(
         graphSubs,
         url ?? "",
@@ -933,6 +975,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       dead,
       orphan,
       lifecycle,
+      graph_raw,
       graph_error,
     };
   }

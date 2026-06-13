@@ -23,6 +23,11 @@ export const GraphSubscriptionSchema = z
     lifecycleNotificationUrl: z.string().nullish(),
     expirationDateTime: z.string(),
     clientState: z.string().nullish(),
+    // Diagnostic fields (which app/user owns the sub, what it subscribes to).
+    applicationId: z.string().nullish(),
+    creatorId: z.string().nullish(),
+    changeType: z.string().nullish(),
+    notificationContentType: z.string().nullish(),
   })
   .passthrough();
 export type GraphSubscription = z.infer<typeof GraphSubscriptionSchema>;
