@@ -1,6 +1,7 @@
-import { z } from "zod";
+import { z, type ZodRawShape } from "zod";
 import { McpAgent } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type ToolCallback, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { Props } from "../types";
 import { errResponse, instrument, type McpResponse } from "../observability/instrument";
 import { log } from "../log";
@@ -376,11 +377,88 @@ function getGraphInnerErrorCode(detail: string | undefined): string | undefined 
   }
 }
 
+// Central MCP ToolAnnotations for every registered tool, applied via #tool().
+// Clients use these hints to group/style tools and gate confirmations.
+//   readOnlyHint   — no side effects (pure read).
+//   destructiveHint — may irreversibly remove data. NOTE: the MCP default is
+//                     TRUE, so non-destructive writes set it false explicitly.
+//   idempotentHint  — repeating with the same args has no additional effect.
+// (openWorldHint is intentionally omitted — every tool operates on the single
+// owner's bounded Microsoft To Do account, so the open/closed distinction is
+// ambiguous here and left unset rather than asserted.)
+const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
+  // Read-only
+  whoami: { title: "Who am I", readOnlyHint: true },
+  list_lists: { title: "List task lists", readOnlyHint: true },
+  get_list: { title: "Get list", readOnlyHint: true },
+  list_tasks: { title: "List tasks", readOnlyHint: true },
+  get_task: { title: "Get task", readOnlyHint: true },
+  list_checklist_items: { title: "List checklist items (steps)", readOnlyHint: true },
+  list_linked_resources: { title: "List linked resources", readOnlyHint: true },
+  get_linked_resource: { title: "Get linked resource", readOnlyHint: true },
+  list_attachments: { title: "List attachments", readOnlyHint: true },
+  get_attachment: { title: "Get attachment", readOnlyHint: true },
+  get_link_rules: { title: "Get link rules", readOnlyHint: true },
+  extract_links: { title: "Extract links", readOnlyHint: true },
+  get_attachment_config: { title: "Get attachment config", readOnlyHint: true },
+  get_list_config: { title: "Get list config", readOnlyHint: true },
+  query_tasks: { title: "Query tasks", readOnlyHint: true },
+  search_tasks: { title: "Search tasks", readOnlyHint: true },
+  search_checklist_items: { title: "Search checklist items", readOnlyHint: true },
+  find_task_list: { title: "Find task list", readOnlyHint: true },
+  get_pending_across_lists: { title: "Get pending across lists", readOnlyHint: true },
+  get_recently_completed: { title: "Get recently completed", readOnlyHint: true },
+  sync_status: { title: "Sync status", readOnlyHint: true },
+  subscription_status: { title: "Subscription status", readOnlyHint: true },
+  list_my_day_tasks: { title: "List My Day tasks", readOnlyHint: true },
+  list_tasks_by_manual_order: { title: "List tasks by manual order", readOnlyHint: true },
+  // Destructive
+  delete_task: { title: "Delete task", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  delete_list: { title: "Delete list", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  delete_checklist_item: { title: "Delete checklist item", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  delete_linked_resource: { title: "Delete linked resource", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  remove_attachment: { title: "Remove attachment", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  recreate_subscriptions: { title: "Recreate subscriptions", readOnlyHint: false, destructiveHint: true },
+  // Writes (non-destructive)
+  create_task: { title: "Create task", readOnlyHint: false, destructiveHint: false },
+  update_task: { title: "Update task", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  move_task: { title: "Move task", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  create_list: { title: "Create list", readOnlyHint: false, destructiveHint: false },
+  update_list: { title: "Update list", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  create_checklist_item: { title: "Create checklist item", readOnlyHint: false, destructiveHint: false },
+  update_checklist_item: { title: "Update checklist item", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  create_linked_resource: { title: "Create linked resource", readOnlyHint: false, destructiveHint: false },
+  update_linked_resource: { title: "Update linked resource", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  create_upload_link: { title: "Create upload link", readOnlyHint: false, destructiveHint: false },
+  mint_download_link: { title: "Mint download link", readOnlyHint: false, destructiveHint: false },
+  set_link_rules: { title: "Set link rules", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  set_attachment_config: { title: "Set attachment config", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  set_list_config: { title: "Set list config", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  set_list_alias: { title: "Set list alias", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  resync: { title: "Resync", readOnlyHint: false, destructiveHint: false },
+  add_to_my_day: { title: "Add to My Day", readOnlyHint: false, destructiveHint: false },
+  remove_from_my_day: { title: "Remove from My Day", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  reorder_task: { title: "Reorder task", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  reorder_checklist_item: { title: "Reorder checklist item", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  reorder_my_day_task: { title: "Reorder My Day task", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+};
+
 export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvider {
   server = new McpServer({ name: "mstodo-mcp", version: VERSION });
 
+  // registerTool wrapper that injects each tool's ToolAnnotations from the
+  // central TOOL_ANNOTATIONS table, so call sites stay { description, inputSchema }
+  // and the read-only / destructive / idempotent classification lives in one place.
+  #tool<InputArgs extends ZodRawShape>(
+    name: string,
+    config: { description: string; inputSchema: InputArgs },
+    cb: ToolCallback<InputArgs>,
+  ): RegisteredTool {
+    return this.server.registerTool(name, { ...config, annotations: TOOL_ANNOTATIONS[name] }, cb);
+  }
+
   async init() {
-    this.server.registerTool(
+    this.#tool(
       "whoami",
       {
         description:
@@ -424,7 +502,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "list_lists",
       {
         description:
@@ -492,7 +570,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "get_list",
       {
         description:
@@ -523,7 +601,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "list_tasks",
       {
         description:
@@ -616,7 +694,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "get_task",
       {
         description:
@@ -708,7 +786,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "create_task",
       {
         description:
@@ -814,7 +892,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "update_task",
       {
         description:
@@ -1014,7 +1092,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "delete_task",
       {
         description:
@@ -1052,7 +1130,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "move_task",
       {
         description:
@@ -1370,7 +1448,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "create_list",
       {
         description:
@@ -1395,7 +1473,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "update_list",
       {
         description:
@@ -1439,7 +1517,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "delete_list",
       {
         description:
@@ -1489,7 +1567,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       .object({ value: z.array(ChecklistItemSchema) })
       .passthrough();
 
-    this.server.registerTool(
+    this.#tool(
       "list_checklist_items",
       {
         description:
@@ -1549,7 +1627,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "create_checklist_item",
       {
         description:
@@ -1600,7 +1678,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "update_checklist_item",
       {
         description:
@@ -1652,7 +1730,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "delete_checklist_item",
       {
         description:
@@ -1710,7 +1788,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       .object({ value: z.array(LinkedResourceSchema) })
       .passthrough();
 
-    this.server.registerTool(
+    this.#tool(
       "list_linked_resources",
       {
         description: "Return all linked resources attached to a Microsoft To Do task.",
@@ -1760,7 +1838,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "get_linked_resource",
       {
         description: "Return a single linked resource by id.",
@@ -1809,7 +1887,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "create_linked_resource",
       {
         description:
@@ -1880,7 +1958,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "update_linked_resource",
       {
         description:
@@ -1951,7 +2029,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "delete_linked_resource",
       {
         description:
@@ -2006,7 +2084,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     );
 
     // Attachment collection schema — used inline by list_attachments.
-    this.server.registerTool(
+    this.#tool(
       "list_attachments",
       {
         description:
@@ -2056,7 +2134,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "get_attachment",
       {
         description:
@@ -2133,7 +2211,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "create_upload_link",
       {
         description:
@@ -2236,7 +2314,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "mint_download_link",
       {
         description:
@@ -2335,7 +2413,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "remove_attachment",
       {
         description:
@@ -2386,7 +2464,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "get_link_rules",
       {
         description:
@@ -2407,7 +2485,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "set_link_rules",
       {
         description:
@@ -2454,7 +2532,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "extract_links",
       {
         description:
@@ -2596,7 +2674,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "get_attachment_config",
       {
         description:
@@ -2612,7 +2690,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "set_attachment_config",
       {
         description:
@@ -2638,7 +2716,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "get_list_config",
       {
         description:
@@ -2693,7 +2771,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "set_list_config",
       {
         description:
@@ -2784,7 +2862,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "set_list_alias",
       {
         description:
@@ -2876,7 +2954,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     ]);
     const ClassEnum = z.enum(["todo", "reference", "excluded", "unclassified"]);
 
-    this.server.registerTool(
+    this.#tool(
       "query_tasks",
       {
         description:
@@ -3021,7 +3099,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "search_tasks",
       {
         description:
@@ -3122,7 +3200,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "search_checklist_items",
       {
         description:
@@ -3181,7 +3259,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "find_task_list",
       {
         description:
@@ -3259,7 +3337,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "get_pending_across_lists",
       {
         description:
@@ -3302,7 +3380,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "get_recently_completed",
       {
         description:
@@ -3363,7 +3441,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "sync_status",
       {
         description:
@@ -3379,7 +3457,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "resync",
       {
         description:
@@ -3407,7 +3485,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "subscription_status",
       {
         description:
@@ -3430,7 +3508,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "recreate_subscriptions",
       {
         description:
@@ -3465,7 +3543,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     // which returns my_day_disabled when ENABLE_MY_DAY != "true" and
     // my_day_unavailable when the EXO scope isn't consented/granted. This keeps
     // the tool list stable across the flag (matches create_upload_link).
-    this.server.registerTool(
+    this.#tool(
       "add_to_my_day",
       {
         description:
@@ -3548,7 +3626,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "remove_from_my_day",
       {
         description:
@@ -3604,7 +3682,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "list_my_day_tasks",
       {
         description:
@@ -3689,7 +3767,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "list_tasks_by_manual_order",
       {
         description:
@@ -3755,7 +3833,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "reorder_task",
       {
         description:
@@ -3889,7 +3967,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "reorder_checklist_item",
       {
         description:
@@ -4028,7 +4106,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
         }),
     );
 
-    this.server.registerTool(
+    this.#tool(
       "reorder_my_day_task",
       {
         description:
