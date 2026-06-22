@@ -6,15 +6,31 @@ see [README.md](./README.md).
 
 ## Contents
 
-- [Prerequisites](#prerequisites)
-- [Microsoft Entra app registration](#microsoft-entra-app-registration)
-- [Steps](#steps)
-- [Optional: custom domain](#optional-custom-domain)
-- [Keeping sync cost down](#keeping-sync-cost-down)
-- [My Day support (optional)](#my-day-support-optional)
-- [Troubleshooting](#troubleshooting)
-- [Local development](#local-development)
-- [Reset and teardown](#reset-and-teardown)
+- [Deployment guide](#deployment-guide)
+  - [Contents](#contents)
+  - [Prerequisites](#prerequisites)
+    - [A note on the Cloudflare plan (free vs Paid)](#a-note-on-the-cloudflare-plan-free-vs-paid)
+  - [Microsoft Entra app registration](#microsoft-entra-app-registration)
+    - [1. Create the registration](#1-create-the-registration)
+    - [2. API permissions](#2-api-permissions)
+    - [3. Client secret](#3-client-secret)
+    - [4. The four secrets](#4-the-four-secrets)
+  - [Steps](#steps)
+    - [1. Clone and install](#1-clone-and-install)
+    - [2. Create the two KV namespaces](#2-create-the-two-kv-namespaces)
+    - [3. Configure Wrangler](#3-configure-wrangler)
+    - [4. Set the secrets](#4-set-the-secrets)
+    - [5. Deploy](#5-deploy)
+    - [6. Point the Entra redirect URI at your deployment](#6-point-the-entra-redirect-uri-at-your-deployment)
+    - [7. Connect from Claude.ai or your own AI MCP consumer](#7-connect-from-claudeai-or-your-own-ai-mcp-consumer)
+    - [8. Verify](#8-verify)
+  - [Optional: custom domain](#optional-custom-domain)
+  - [Keeping sync cost down](#keeping-sync-cost-down)
+  - [My Day support (optional)](#my-day-support-optional)
+    - [What enabling My Day unlocks (and what it costs)](#what-enabling-my-day-unlocks-and-what-it-costs)
+  - [Troubleshooting](#troubleshooting)
+  - [Local development](#local-development)
+  - [Reset and teardown](#reset-and-teardown)
 
 ## Prerequisites
 
@@ -94,9 +110,44 @@ block, then save and **Grant admin consent**.
 }
 ```
 
+The entire section for `requiredResourceAccess` with all the required permissions including the above, should look like this to enable My Day support and several other features this enables that are not available via the normal Graph API (such as moving tasks positionally within lists, and others):
+
+```jsonc
+	"requiredResourceAccess": [
+		{
+			"resourceAppId": "00000002-0000-0ff1-ce00-000000000000",
+			"resourceAccess": [
+				{
+					"id": "6b49b74d-642f-4417-a6b4-820576845707",
+					"type": "Scope"
+				}
+			]
+		},
+		{
+			"resourceAppId": "00000003-0000-0000-c000-000000000000",
+			"resourceAccess": [
+				{
+					"id": "7427e0e9-2fba-42fe-b0c0-848c9e6a8182",
+					"type": "Scope"
+				},
+				{
+					"id": "2219042f-cab5-40cc-b0d2-16b1540b4c5f",
+					"type": "Scope"
+				},
+				{
+					"id": "e1fe6dd8-ba31-4d61-89e7-88639da4683d",
+					"type": "Scope"
+				}
+			]
+		}
+	],
+  ```
+
 After saving, `Tasks.ReadWrite` appears under **API permissions → Office 365
 Exchange Online**. This is only needed if you turn on My Day; leave it off
 otherwise. See [My Day support](#my-day-support-optional) below.
+
+Ensure after all permission changes (including the above custom edit) that you go to the **API Permissions** blade and click "Grant admin consent" and confirm the Status column shows Granted for all the listed permissions.
 
 ### 3. Client secret
 
