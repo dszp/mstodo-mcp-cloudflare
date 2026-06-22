@@ -144,6 +144,25 @@ interface SyncStateRow {
   last_error: string | null;
 }
 
+// Reserved sync_state row holding webhook-delivery telemetry (last_synced_at =
+// last accepted notification's epoch ms; status = cumulative accepted count as
+// a string). It is NOT a "lists"/"tasks:*"/"myday:*" resource, so syncStatus'
+// generic report loop ignores it — it only surfaces via #webhookHealth().
+const WEBHOOK_HEALTH_KEY = "meta:webhook";
+
+// Delivery-health view of the Graph change-notification (webhook) path. The
+// signal that distinguishes "subscriptions exist (coverage ok)" from
+// "subscriptions are actually delivering": Graph can silently stop sending
+// todoTask notifications with no lifecycle event, leaving full coverage but a
+// stale `last_notification_at`. Only *accepted* (clientState-validated)
+// notifications are recorded, so unauthenticated POSTs to the public /webhook
+// can't forge a healthy signal.
+export interface WebhookHealth {
+  last_notification_at: number | null; // epoch ms of the last accepted notification
+  notifications_total: number; // cumulative accepted notifications
+  minutes_since: number | null; // age of last_notification_at, null if never
+}
+
 // Concrete (RPC-serializable) shapes for subscriptionStatus(). Avoid
 // Record<string, unknown> here — Cloudflare's RPC type mapper collapses
 // `unknown`-valued returns to `never` at the call site.
@@ -173,6 +192,24 @@ export interface SubscriptionStatus {
   dark: string[];
   dead: Array<{ list_id: string; subscription_id: string; expiration_ms: number }>;
   orphan: Array<{ subscription_id: string; list_id: string | null; resource?: string }>;
+  // How many of our live Graph subs carry a lifecycleNotificationUrl (delivery
+  // prerequisite). `lists_with` names the lists already on a lifecycle-enabled
+  // sub. Absent when Graph was unreachable (graph_error set).
+  lifecycle?: { with: number; without: number; lists_with: string[] };
+  // Raw Graph subscription objects for our subs (clientState omitted) — diagnostic,
+  // OPT-IN: only populated when subscriptionStatus is called with { includeRaw: true }
+  // (the subscription_status tool's `include_raw` flag); omitted from the response otherwise.
+  graph_raw?: Array<{
+    subscription_id: string;
+    resource?: string;
+    notification_url?: string;
+    lifecycle_url: string | null;
+    change_type: string | null;
+    application_id: string | null;
+    creator_id: string | null;
+    content_type: string | null;
+    expiration?: string;
+  }>;
   graph_error?: string;
 }
 
@@ -785,8 +822,14 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     const aliveIds = new Set<string>();
     const aliveByList = new Set<string>();
     const orphans: Array<{ sub: GraphSubscription; listId: string | null }> = [];
+    // Normalized "ours" compare: if Graph ever echoed the notificationUrl with
+    // different casing or a trailing slash, a strict !== would read every sub as
+    // not-ours and (with cleared/dead records) churn the whole fleet. Compare
+    // case- and trailing-slash-insensitively.
+    const norm = (u: string | undefined) => (u ?? "").trim().replace(/\/+$/, "").toLowerCase();
+    const ourUrl = norm(url);
     for (const sub of graphSubs) {
-      if (sub.notificationUrl !== url) continue; // not ours
+      if (norm(sub.notificationUrl) !== ourUrl) continue; // not ours
       aliveIds.add(sub.id);
       const tracked = trackedListById.get(sub.id);
       const listId = tracked ?? parseTodoListId(sub.resource);
@@ -805,7 +848,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   // drift (`dead`), uncovered lists (`dark`), and quota-leaking `orphan`s.
   // Never writes. When Graph is unreachable, `graph_error` is set and `dark`
   // falls back to "wanted with no local record".
-  async subscriptionStatus(): Promise<SubscriptionStatus> {
+  async subscriptionStatus(opts: { includeRaw?: boolean } = {}): Promise<SubscriptionStatus> {
     const enabled = taskSubscriptionsEnabled(this.env);
     const url = webhookUrl(this.env);
     const cfg = await loadListsConfig(this.env);
@@ -838,11 +881,51 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     let aliveIds: Set<string> | null = null;
     let darkFromGraph: string[] | null = null;
     const orphan: Array<{ subscription_id: string; list_id: string | null; resource?: string }> = [];
+    // Delivery prerequisite: which of OUR live Graph subs carry a
+    // lifecycleNotificationUrl (the field that keeps Exchange-backed todoTask
+    // subscriptions from going dormant). A sub created before that field was
+    // added shows lifecycle:false until recreated; lists_with names the lists
+    // already on a lifecycle-enabled sub.
+    let lifecycle: { with: number; without: number; lists_with: string[] } | undefined;
+    // Raw Graph subscription objects for OUR subs (clientState omitted — it's our
+    // secret). Diagnostic: surfaces applicationId / creatorId / changeType /
+    // expiration so an anomalous sub (wrong owning app, etc.) is visible.
+    const graph_raw: Array<{
+      subscription_id: string;
+      resource?: string;
+      notification_url?: string;
+      lifecycle_url: string | null;
+      change_type: string | null;
+      application_id: string | null;
+      creator_id: string | null;
+      content_type: string | null;
+      expiration?: string;
+    }> = [];
     let graph_error: string | undefined;
     try {
       const graph = new GraphClient(this);
+      const graphSubs = await listGraphSubscriptions(graph);
+      // Opt-in raw dump — skip the whole pass unless requested.
+      if (opts.includeRaw) {
+        const ourUrlNorm = (url ?? "").trim().replace(/\/+$/, "").toLowerCase();
+        for (const sub of graphSubs) {
+          if ((sub.notificationUrl ?? "").trim().replace(/\/+$/, "").toLowerCase() !== ourUrlNorm)
+            continue;
+          graph_raw.push({
+            subscription_id: sub.id,
+            resource: sub.resource,
+            notification_url: sub.notificationUrl,
+            lifecycle_url: sub.lifecycleNotificationUrl ?? null,
+            change_type: sub.changeType ?? null,
+            application_id: sub.applicationId ?? null,
+            creator_id: sub.creatorId ?? null,
+            content_type: sub.notificationContentType ?? null,
+            expiration: sub.expirationDateTime,
+          });
+        }
+      }
       const { aliveIds: alive, aliveByList, orphans } = this.#diffGraphSubscriptions(
-        await listGraphSubscriptions(graph),
+        graphSubs,
         url ?? "",
         wanted,
       );
@@ -851,6 +934,21 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       }
       aliveIds = alive;
       darkFromGraph = [...wanted].filter((l) => !aliveByList.has(l));
+      const trackedListById = new Map(records.map((r) => [r.subscription_id, r.list_id]));
+      let withL = 0;
+      let withoutL = 0;
+      const lists_with: string[] = [];
+      for (const sub of graphSubs) {
+        if (!alive.has(sub.id)) continue; // ours only
+        if (sub.lifecycleNotificationUrl) {
+          withL += 1;
+          const listId = trackedListById.get(sub.id) ?? parseTodoListId(sub.resource);
+          if (listId) lists_with.push(listId);
+        } else {
+          withoutL += 1;
+        }
+      }
+      lifecycle = { with: withL, without: withoutL, lists_with };
     } catch (e) {
       graph_error = e instanceof Error ? e.message : String(e);
     }
@@ -881,6 +979,8 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       dark,
       dead,
       orphan,
+      lifecycle,
+      graph_raw: opts.includeRaw ? graph_raw : undefined,
       graph_error,
     };
   }
@@ -927,6 +1027,10 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       const { id, expirationDateTime } = await createSubscription(graph, {
         listId,
         notificationUrl,
+        // Same /webhook endpoint; the handler routes by payload shape. Carrying
+        // a lifecycleNotificationUrl is what keeps an Exchange-backed todoTask
+        // subscription delivering — reauthorization challenges land here.
+        lifecycleNotificationUrl: notificationUrl,
         clientState,
         expirationDateTime: desiredExpiration(now),
       });
@@ -1244,6 +1348,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   async syncStatus(): Promise<{
     resources: SyncStatusReport[];
     totals: { tasks: number; lists: number; all_idle: boolean };
+    notifications: WebhookHealth;
   }> {
     const cfg = await loadListsConfig(this.env);
 
@@ -1309,7 +1414,11 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     const all_idle = resources
       .filter((r) => r.status !== "sync_disabled")
       .every((r) => r.status === "idle" && !r.mid_cycle);
-    return { resources, totals: { tasks, lists: listRows.length, all_idle } };
+    return {
+      resources,
+      totals: { tasks, lists: listRows.length, all_idle },
+      notifications: this.#webhookHealth(Date.now()),
+    };
   }
 
   // -- Sync (alarm-driven, resumable, budget-bounded) -----------------------
@@ -1349,8 +1458,14 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       work.push({ listId: rec.list_id, taskId: item.resourceId, changeType: item.changeType });
     }
 
-    // Arm the alarm once for the Graph delta refresh (idempotent; coalesces).
-    if (accepted > 0) await this.ctx.storage.setAlarm(Date.now() + 1);
+    // Arm the alarm once for the Graph delta refresh (idempotent; coalesces),
+    // and stamp delivery health so a silent stop in Graph's notifications is
+    // observable (full coverage + a stale last_notification_at).
+    if (accepted > 0) {
+      const now = Date.now();
+      await this.ctx.storage.setAlarm(now + 1);
+      this.#recordNotification(accepted, now);
+    }
 
     // Targeted My Day refresh of each changed task. Sequential (EXO forbids
     // parallel Substrate calls). Skipped entirely when My Day is off.
@@ -1405,6 +1520,97 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     }
 
     return { accepted, rejected };
+  }
+
+  // Lifecycle-event entrypoint (the webhook splits these out of the same POST by
+  // payload shape). These are what keep an Exchange-backed todoTask subscription
+  // alive between renewals:
+  //   reauthorizationRequired — Graph's periodic re-consent check (cadence ≈
+  //     access-token TTL, far shorter than our renewal margin). Respond by
+  //     PATCH-renewing, which re-binds the current token; ignoring it is exactly
+  //     how the subscription goes dormant (renews fine, stops delivering).
+  //   subscriptionRemoved — Graph dropped it; clear the record so reconcile
+  //     mints a fresh one.
+  //   missed — a delivery gap; arm delta to backfill.
+  // clientState-validated like change notifications. The reauthorize PATCH is a
+  // mutation of the SUBSCRIPTION resource, not task data, so it cannot emit a
+  // todoTask notification — the read-only-toward-task-data invariant holds.
+  async onLifecycleEvent(
+    items: Array<{ subscriptionId?: string; clientState?: string; lifecycleEvent?: string }>,
+  ): Promise<{ reauthorized: number; removed: number; missed: number; rejected: number }> {
+    let reauthorized = 0;
+    let removed = 0;
+    let missed = 0;
+    let rejected = 0;
+    const graph = new GraphClient(this);
+    for (const item of items) {
+      const rec = item.subscriptionId ? this.findSubscription(item.subscriptionId) : null;
+      if (!rec || rec.client_state !== item.clientState) {
+        rejected += 1;
+        continue;
+      }
+      switch (item.lifecycleEvent) {
+        case "reauthorizationRequired":
+          try {
+            const next = desiredExpiration(Date.now());
+            const { expirationDateTime } = await renewSubscription(graph, rec.subscription_id, next);
+            this.putSubscription({ ...rec, expiration_ms: Date.parse(expirationDateTime) });
+            reauthorized += 1;
+            log.info("subscription_reauthorized", {
+              subscription_id: rec.subscription_id,
+              list_id: rec.list_id,
+            });
+          } catch (e) {
+            // 404 → gone on Graph's side; drop so reconcile recreates. Other
+            // errors: leave it for the renew/reconcile cycle to retry.
+            if (e instanceof GraphError && e.status === 404) {
+              this.deleteSubscriptionRecord(rec.subscription_id);
+            }
+            log.warn("subscription_reauthorize_failed", {
+              subscription_id: rec.subscription_id,
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+          break;
+        case "subscriptionRemoved":
+          this.deleteSubscriptionRecord(rec.subscription_id);
+          removed += 1;
+          log.info("subscription_removed_by_graph", {
+            subscription_id: rec.subscription_id,
+            list_id: rec.list_id,
+          });
+          break;
+        case "missed":
+          missed += 1;
+          break;
+        default:
+          rejected += 1;
+      }
+    }
+    // Removed records and missed gaps both want a delta cycle (recreate the sub /
+    // backfill the gap). A reauthorize alone doesn't change task state.
+    if (removed + missed > 0) await this.ctx.storage.setAlarm(Date.now() + 1);
+    return { reauthorized, removed, missed, rejected };
+  }
+
+  // Tear down and re-mint subscriptions so they pick up the current creation
+  // shape (notably lifecycleNotificationUrl, which can't be PATCHed onto an
+  // existing subscription). Clears the local record(s); the next reconcile cycle
+  // then tears down the now-untracked old Graph subs as orphans and creates
+  // fresh ones for the wanted lists. Scope to one list (the delivery experiment:
+  // recreate one list, leave the rest as a control) or all (the rollout).
+  async recreateSubscriptions(listId?: string): Promise<{ cleared: number }> {
+    const cleared = this.getSubscriptions().filter(
+      (r) => listId === undefined || r.list_id === listId,
+    ).length;
+    if (listId === undefined) {
+      this.sql.exec("DELETE FROM subscriptions");
+    } else {
+      this.sql.exec("DELETE FROM subscriptions WHERE list_id = ?", listId);
+    }
+    await this.ctx.storage.setAlarm(Date.now() + 1);
+    log.info("subscriptions_recreate_requested", { list_id: listId ?? "*", cleared });
+    return { cleared };
   }
 
   // One sync cycle per alarm, then re-arm: soon if anything is still mid-cycle
@@ -1716,6 +1922,27 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       .exec("SELECT * FROM sync_state WHERE resource = ?", resource)
       .toArray() as unknown as SyncStateRow[];
     return rows.length > 0 ? rows[0] : null;
+  }
+
+  // Stamp the webhook-delivery telemetry on each accepted notification batch.
+  #recordNotification(accepted: number, now: number): void {
+    const cur = this.#getSyncState(WEBHOOK_HEALTH_KEY);
+    const prevTotal = cur?.status ? Number(cur.status) || 0 : 0;
+    this.#setSyncState(WEBHOOK_HEALTH_KEY, {
+      last_synced_at: now,
+      status: String(prevTotal + accepted),
+    });
+  }
+
+  // Read the webhook-delivery health (see WebhookHealth / WEBHOOK_HEALTH_KEY).
+  #webhookHealth(now: number): WebhookHealth {
+    const row = this.#getSyncState(WEBHOOK_HEALTH_KEY);
+    const last = row?.last_synced_at ?? null;
+    return {
+      last_notification_at: last,
+      notifications_total: row?.status ? Number(row.status) || 0 : 0,
+      minutes_since: last === null ? null : Math.round((now - last) / 60_000),
+    };
   }
 
   #setSyncState(resource: string, patch: Partial<Omit<SyncStateRow, "resource">>): void {

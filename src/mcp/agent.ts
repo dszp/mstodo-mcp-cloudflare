@@ -3367,7 +3367,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "sync_status",
       {
         description:
-          "Read-only health probe for the TodoIndex delta sync. Returns one report per resource (the 'lists' roster + one 'tasks:{listId}' per list) with status, last_synced_at, mid_cycle (resume cursor outstanding), last_error, and row_count — plus totals { tasks, lists, all_idle }. all_idle=true means every resource is fully caught up.",
+          "Read-only health probe for the TodoIndex delta sync. Returns one report per resource (the 'lists' roster + one 'tasks:{listId}' per list) with status, last_synced_at, mid_cycle (resume cursor outstanding), last_error, and row_count — plus totals { tasks, lists, all_idle }. all_idle=true means every resource is fully caught up. Also returns `notifications` (webhook-delivery health): last_notification_at (epoch ms of the last accepted Graph change notification), notifications_total (cumulative accepted), and minutes_since. A null/very-old last_notification_at while subscription coverage is full means Graph has silently stopped delivering todoTask notifications and sync is riding the delta poll only — pair this with subscription_status (coverage) to tell 'no subscriptions' from 'subscriptions present but not delivering'.",
         inputSchema: {},
       },
       async (): Promise<McpResponse> =>
@@ -3411,14 +3411,51 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       "subscription_status",
       {
         description:
-          "Read-only introspection for the Graph change-notification (webhook) layer. Returns the effective env-derived config (subscriptions on/off, webhook URL, lifetime, renew margin, max ops/cycle, delta interval, My Day scan cadence) and a three-way coverage diff: `dark` (roster lists with no live Graph subscription), `dead` (local records whose Graph subscription is gone — the silent-drift case the reconciler now self-heals), and `orphan` (subscriptions on this Worker's webhook URL that are unwanted or untracked, leaking tenant quota). `summary` has counts; `graph_subs_ours` is -1 when Graph was unreachable, in which case `graph_error` is set and `dark` falls back to roster-without-local-record. Never writes. Config is read from runtime env bindings (what wrangler.jsonc produced), not the file itself.",
-        inputSchema: {},
+          "Read-only introspection for the Graph change-notification (webhook) layer. Returns the effective env-derived config (subscriptions on/off, webhook URL, lifetime, renew margin, max ops/cycle, delta interval, My Day scan cadence) and a three-way coverage diff: `dark` (roster lists with no live Graph subscription), `dead` (local records whose Graph subscription is gone — the silent-drift case the reconciler now self-heals), and `orphan` (subscriptions on this Worker's webhook URL that are unwanted or untracked, leaking tenant quota). `summary` has counts; `graph_subs_ours` is -1 when Graph was unreachable, in which case `graph_error` is set and `dark` falls back to roster-without-local-record. Also reports `lifecycle` (how many of our live subs carry a lifecycleNotificationUrl). Pass `include_raw: true` to also dump the raw Graph subscription objects under `graph_raw` (applicationId/creatorId/changeType/expiration per sub; clientState omitted) for deeper diagnostics — omitted by default. Never writes. Config is read from runtime env bindings (what wrangler.jsonc produced), not the file itself.",
+        inputSchema: {
+          include_raw: z
+            .boolean()
+            .optional()
+            .describe(
+              "Include the raw Graph subscription objects (clientState omitted) under `graph_raw`. Off by default; opt in for diagnostics such as spotting a wrong owning application.",
+            ),
+        },
       },
-      async (): Promise<McpResponse> =>
+      async ({ include_raw }): Promise<McpResponse> =>
         instrument("subscription_status", async () => {
-          const status = await this.#index().subscriptionStatus();
+          const status = await this.#index().subscriptionStatus({ includeRaw: include_raw === true });
           return {
             content: [{ type: "text", text: JSON.stringify(status) }],
+          };
+        }),
+    );
+
+    this.server.registerTool(
+      "recreate_subscriptions",
+      {
+        description:
+          "Tear down and re-mint Graph change-notification subscriptions so they pick up the current creation shape — notably lifecycleNotificationUrl, which cannot be PATCHed onto an existing subscription and is what keeps an Exchange-backed todoTask subscription from going dormant (validating + renewing but never delivering). Clears the local record(s); the next reconcile cycle tears down the now-untracked old Graph subs as orphans and creates fresh ones for the wanted lists (recovery rides the delta poll in the meantime). Pass `list` to recreate one list's subscription (the delivery experiment: recreate one, leave the rest as a control, then watch sync_status.notifications.last_notification_at); omit to recreate the whole fleet. Returns ok + how many local records were cleared.",
+        inputSchema: {
+          list: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Recreate only this list's subscription (alias, display name, or Graph list ID). Omit to recreate every subscription.",
+            ),
+        },
+      },
+      async ({ list }): Promise<McpResponse> =>
+        instrument("recreate_subscriptions", async () => {
+          const list_id = list !== undefined ? await this.resolveList(list) : undefined;
+          const r = await this.#index().recreateSubscriptions(list_id);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ ok: true, scope: list_id ?? "all", cleared: r.cleared }),
+              },
+            ],
           };
         }),
     );

@@ -20,8 +20,14 @@ export const GraphSubscriptionSchema = z
     id: z.string(),
     resource: z.string().optional(),
     notificationUrl: z.string().optional(),
+    lifecycleNotificationUrl: z.string().nullish(),
     expirationDateTime: z.string(),
     clientState: z.string().nullish(),
+    // Diagnostic fields (which app/user owns the sub, what it subscribes to).
+    applicationId: z.string().nullish(),
+    creatorId: z.string().nullish(),
+    changeType: z.string().nullish(),
+    notificationContentType: z.string().nullish(),
   })
   .passthrough();
 export type GraphSubscription = z.infer<typeof GraphSubscriptionSchema>;
@@ -62,6 +68,16 @@ export async function createSubscription(
     notificationUrl: string;
     clientState: string;
     expirationDateTime: string;
+    // Where Graph delivers lifecycle events (reauthorizationRequired /
+    // subscriptionRemoved / missed). REQUIRED for delivery reliability on
+    // Exchange-backed todoTask subscriptions: the reauthorization challenge is
+    // sent ONLY here, and its cadence tracks the access-token TTL (~60–90 min),
+    // far shorter than our renewal margin — without it the subscription goes
+    // dormant (validates + renews fine, but stops delivering). Cannot be PATCHed
+    // onto an existing subscription, so a sub created without it must be
+    // recreated to gain it. Reuses the same /webhook endpoint; the handler tells
+    // change notifications from lifecycle events by payload shape.
+    lifecycleNotificationUrl?: string;
   },
 ): Promise<{ id: string; expirationDateTime: string }> {
   const sub = await graph.postJson(
@@ -69,6 +85,9 @@ export async function createSubscription(
     {
       changeType: CHANGE_TYPE,
       notificationUrl: opts.notificationUrl,
+      ...(opts.lifecycleNotificationUrl
+        ? { lifecycleNotificationUrl: opts.lifecycleNotificationUrl }
+        : {}),
       resource: `/me/todo/lists/${opts.listId}/tasks`,
       expirationDateTime: opts.expirationDateTime,
       clientState: opts.clientState,

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] – 2026-06-22
+
+### Added
+- **Webhook delivery-health signal** in `sync_status` — a `notifications` block with
+  `last_notification_at` (epoch ms of the last accepted Graph change notification),
+  `notifications_total`, and `minutes_since`. A null or very-old `last_notification_at` while
+  subscription coverage is full means Graph has silently stopped delivering `todoTask` notifications
+  and sync is riding the delta poll only — pair it with `subscription_status` to tell "no
+  subscriptions" from "subscriptions present but not delivering".
+- **`recreate_subscriptions`** tool — tears down and re-mints Graph change-notification
+  subscriptions so they pick up the current creation shape (notably `lifecycleNotificationUrl`,
+  which cannot be PATCHed onto an existing subscription). Pass `list` to recreate one list's
+  subscription; omit to recreate the whole fleet. Recovery rides the delta poll in the meantime.
+- **Lifecycle coverage in `subscription_status`** — a `lifecycle: { with, without, lists_with }`
+  block reporting how many of our live Graph subscriptions carry a `lifecycleNotificationUrl`.
+- **`subscription_status` `include_raw` flag** — opt-in dump of the raw Graph subscription objects
+  under `graph_raw` (applicationId/creatorId/changeType/expiration per sub; `clientState` omitted)
+  for deeper diagnostics. Omitted by default.
+
+### Changed
+- **`lifecycleNotificationUrl` on every subscription.** Subscriptions are now created with a
+  `lifecycleNotificationUrl` (reusing the `/webhook` endpoint) — the field that keeps
+  Exchange-backed `todoTask` subscriptions from going dormant. Inbound lifecycle events are handled:
+  `reauthorizationRequired` → renew, `subscriptionRemoved` → drop the local record, `missed` → arm a
+  resync. The webhook handler distinguishes change notifications from lifecycle events by payload
+  shape. (A subscription created before this field was added shows `lifecycle:false` until recreated
+  via `recreate_subscriptions`.)
+- **Reconcile hardening.** `listGraphSubscriptions` now paginates the full `/subscriptions` roster
+  and refuses to act on a possibly-truncated list; `parseTodoListId` no longer throws on a malformed
+  resource path; and notificationUrl comparison is normalized (trailing slash / case) so the
+  cross-check can't misclassify a live subscription as drift.
+
 ## [0.13.0] – 2026-06-12
 
 ### Added
