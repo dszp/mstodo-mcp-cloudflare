@@ -383,9 +383,14 @@ function getGraphInnerErrorCode(detail: string | undefined): string | undefined 
 //   destructiveHint — may irreversibly remove data. NOTE: the MCP default is
 //                     TRUE, so non-destructive writes set it false explicitly.
 //   idempotentHint  — repeating with the same args has no additional effect.
-// (openWorldHint is intentionally omitted — every tool operates on the single
-// owner's bounded Microsoft To Do account, so the open/closed distinction is
-// ambiguous here and left unset rather than asserted.)
+//   openWorldHint   — false on every tool: each operates on the single owner's
+//                     bounded Microsoft To Do account (a closed, known domain),
+//                     not an open world of external entities like web search.
+// #tool() applies base defaults (readOnlyHint:false, destructiveHint:false,
+// openWorldHint:false) under each entry, so all three core hints are present on
+// every tool (ChatGPT requires all three; it is strict about openWorldHint).
+// Entries below stay explicit for readability; the base only fills hints a row
+// omits — notably openWorldHint everywhere and destructiveHint on read-only rows.
 const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   // Read-only
   whoami: { title: "Who am I", readOnlyHint: true },
@@ -454,7 +459,23 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     config: { description: string; inputSchema: InputArgs },
     cb: ToolCallback<InputArgs>,
   ): RegisteredTool {
-    return this.server.registerTool(name, { ...config, annotations: TOOL_ANNOTATIONS[name] }, cb);
+    // Emit all three core hints on EVERY tool. ChatGPT requires
+    // readOnlyHint+destructiveHint+openWorldHint present (and is strict about
+    // openWorldHint); Claude wants at least one. Base defaults — non-read-only,
+    // non-destructive, closed-world — are overridden by the per-tool entry.
+    return this.server.registerTool(
+      name,
+      {
+        ...config,
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          openWorldHint: false,
+          ...TOOL_ANNOTATIONS[name],
+        },
+      },
+      cb,
+    );
   }
 
   async init() {
