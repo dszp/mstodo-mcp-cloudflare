@@ -43,10 +43,19 @@ describe("download capability tokens", () => {
   });
 
   it("mints an opaque id that does not encode the scope", async () => {
-    const { token } = await createDownloadCapability(env, SCOPE);
-    expect(token).not.toContain("L1");
-    expect(token).not.toContain("T1");
-    expect(token).not.toContain("A1");
+    // Use long, distinctive scope values. The token is a random base64url id, so
+    // short markers like "L1"/"T1" collide by chance (~flaky); these markers are
+    // long enough that a coincidental substring match is effectively impossible,
+    // while a real encoding bug would still embed them verbatim.
+    const distinct = {
+      list_id: "LIST-zq7scopemarker8x-0001",
+      task_id: "TASK-vn3scopemarker6w-0002",
+      attachment_id: "ATCH-kf9scopemarker2p-0003",
+    };
+    const { token } = await createDownloadCapability(env, distinct);
+    expect(token).not.toContain(distinct.list_id);
+    expect(token).not.toContain(distinct.task_id);
+    expect(token).not.toContain(distinct.attachment_id);
   });
 
   it("rejects an unknown id as link_invalid", async () => {
