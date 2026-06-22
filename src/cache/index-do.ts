@@ -196,8 +196,10 @@ export interface SubscriptionStatus {
   // prerequisite). `lists_with` names the lists already on a lifecycle-enabled
   // sub. Absent when Graph was unreachable (graph_error set).
   lifecycle?: { with: number; without: number; lists_with: string[] };
-  // Raw Graph subscription objects for our subs (clientState omitted) — diagnostic.
-  graph_raw: Array<{
+  // Raw Graph subscription objects for our subs (clientState omitted) — diagnostic,
+  // OPT-IN: only populated when subscriptionStatus is called with { includeRaw: true }
+  // (the subscription_status tool's `include_raw` flag); omitted from the response otherwise.
+  graph_raw?: Array<{
     subscription_id: string;
     resource?: string;
     notification_url?: string;
@@ -846,7 +848,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   // drift (`dead`), uncovered lists (`dark`), and quota-leaking `orphan`s.
   // Never writes. When Graph is unreachable, `graph_error` is set and `dark`
   // falls back to "wanted with no local record".
-  async subscriptionStatus(): Promise<SubscriptionStatus> {
+  async subscriptionStatus(opts: { includeRaw?: boolean } = {}): Promise<SubscriptionStatus> {
     const enabled = taskSubscriptionsEnabled(this.env);
     const url = webhookUrl(this.env);
     const cfg = await loadListsConfig(this.env);
@@ -903,21 +905,24 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     try {
       const graph = new GraphClient(this);
       const graphSubs = await listGraphSubscriptions(graph);
-      const ourUrlNorm = (url ?? "").trim().replace(/\/+$/, "").toLowerCase();
-      for (const sub of graphSubs) {
-        if ((sub.notificationUrl ?? "").trim().replace(/\/+$/, "").toLowerCase() !== ourUrlNorm)
-          continue;
-        graph_raw.push({
-          subscription_id: sub.id,
-          resource: sub.resource,
-          notification_url: sub.notificationUrl,
-          lifecycle_url: sub.lifecycleNotificationUrl ?? null,
-          change_type: sub.changeType ?? null,
-          application_id: sub.applicationId ?? null,
-          creator_id: sub.creatorId ?? null,
-          content_type: sub.notificationContentType ?? null,
-          expiration: sub.expirationDateTime,
-        });
+      // Opt-in raw dump — skip the whole pass unless requested.
+      if (opts.includeRaw) {
+        const ourUrlNorm = (url ?? "").trim().replace(/\/+$/, "").toLowerCase();
+        for (const sub of graphSubs) {
+          if ((sub.notificationUrl ?? "").trim().replace(/\/+$/, "").toLowerCase() !== ourUrlNorm)
+            continue;
+          graph_raw.push({
+            subscription_id: sub.id,
+            resource: sub.resource,
+            notification_url: sub.notificationUrl,
+            lifecycle_url: sub.lifecycleNotificationUrl ?? null,
+            change_type: sub.changeType ?? null,
+            application_id: sub.applicationId ?? null,
+            creator_id: sub.creatorId ?? null,
+            content_type: sub.notificationContentType ?? null,
+            expiration: sub.expirationDateTime,
+          });
+        }
       }
       const { aliveIds: alive, aliveByList, orphans } = this.#diffGraphSubscriptions(
         graphSubs,
@@ -975,7 +980,7 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       dead,
       orphan,
       lifecycle,
-      graph_raw,
+      graph_raw: opts.includeRaw ? graph_raw : undefined,
       graph_error,
     };
   }

@@ -257,6 +257,13 @@ describe("reconcileSubscriptions", () => {
     expect(healthy.summary.dead).toBe(0);
     expect(healthy.summary.orphan).toBe(0);
 
+    // graph_raw is OPT-IN: omitted by default, present only with includeRaw.
+    expect(healthy.graph_raw).toBeUndefined();
+    const withRaw = await stub.subscriptionStatus({ includeRaw: true });
+    expect(Array.isArray(withRaw.graph_raw)).toBe(true);
+    expect(withRaw.graph_raw!.length).toBeGreaterThanOrEqual(1);
+    expect(withRaw.graph_raw![0].subscription_id).toBeTruthy();
+
     // After Graph drops the sub, status sees the local record as dead and the
     // list as dark (no live Graph sub), without mutating anything.
     const recs = await stub.getSubscriptions();
