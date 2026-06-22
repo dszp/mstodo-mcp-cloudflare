@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] – 2026-06-22
+
+### Added
+- **MCP tool annotations on every tool.** Each registered tool now carries
+  `ToolAnnotations` — a friendly `title` plus `readOnlyHint` / `destructiveHint` /
+  `idempotentHint` / `openWorldHint`. Clients use these to group and style tools and to
+  gate confirmations: read-only tools can auto-approve and (in Claude Code) dispatch
+  concurrently, while destructive tools (`delete_*`, `remove_attachment`,
+  `recreate_subscriptions`) can be held behind a confirmation. All three core hints
+  (`readOnlyHint`/`destructiveHint`/`openWorldHint`) are emitted on every tool so the
+  annotations pass directory-submission checks (ChatGPT requires all three and is strict
+  about `openWorldHint`; Claude wants at least one). `openWorldHint` is `false` throughout —
+  every tool operates on the single owner's bounded Microsoft To Do account (a closed,
+  known domain), not an open world. The classification lives in one central
+  `TOOL_ANNOTATIONS` table applied via a typed `#tool()` wrapper, so call sites are
+  unchanged. Pure metadata — no change to tool behavior.
+
 ## [0.14.0] – 2026-06-22
 
 ### Added
