@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] – 2026-10-15
+
+Security hardening from an external review: per-client consent before Microsoft sign-in, revocable MCP
+grants, detection of Microsoft revocation and Conditional Access, encrypted token storage, and
+date handling corrected against live Graph behavior.
+
+### Added
+- **`revoke_all_connections` tool.** Disconnects every MCP client at once, including the one
+  calling it; each reconnects and approves access again. Microsoft sign-in and the task cache are
+  kept.
+
+### Changed
+- **Dependencies:** `@cloudflare/workers-oauth-provider` 0.5.0 → 1.2.3, `agents` 0.12.4 → 0.28.1,
+  `@modelcontextprotocol/sdk` 1.29.0 → 1.32.1 (clears GHSA-6qxp-vccf-f47h, which affects the SDK's
+  OAuth *client* and didn't reach this server), `zod` 4.4.3 → 4.6.7.
+- **Tooling:** `wrangler` 4.95.0 → 4.150.0 (adds `wrangler login --device`, which works over
+  SSH where the localhost callback can't be reached), `@cloudflare/vitest-pool-workers` → 0.23.0.
+- **Tests:** the download-token scope check no longer fails when a random id happens to contain
+  the scope string, and a test asserts every registered tool has an annotations entry.
+
+### Fixed
+- **`get_task` returns `@odata.etag`**, so `update_task`'s `if_match` can be used as documented.
+  It was stripped before.
+- **Reminders are read in the owner's `TIMEZONE`.** A `reminder` without a `Z` or offset was sent
+  to Graph as UTC, so a 9:00 reminder fired at 5:00 EDT. It's now converted from local time. `due`
+  and `start` are dates in To Do — Graph keeps only the date part (verified live) — so they're sent
+  as the owner's intended date, and a value with an offset is placed on the owner's local calendar
+  first.
+- **`query_tasks` date filters match how due and completion dates are stored.** The To Do app
+  stores a due date as local midnight (`04:00Z` in New York) and Graph writes store UTC midnight,
+  so `due_before: "2026-10-20"` excluded app-set tasks due on the 20th. Date-only bounds on
+  `due_*` / `completed_*` now cover UTC midnight ± 12 hours, which matches both conventions;
+  `created_after` and datetime bounds are read in local time.
+
 ### Security
 - **Per-client consent before Microsoft sign-in.** `/authorize` now shows a consent page that
   names the requesting MCP client and the host its access will be sent to, and starts the
@@ -41,25 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Less in logs.** Failed tool calls log only their reason code (error payloads could carry Graph
   error bodies and echoed input); a rejected sign-in logs only the email domain; identity-change
   and sign-in lines log account ids, not names or addresses.
-
-### Fixed
-- **`get_task` returns `@odata.etag`**, so `update_task`'s `if_match` can be used as documented.
-  It was stripped before.
-- **Reminders are read in the owner's `TIMEZONE`.** A `reminder` without a `Z` or offset was sent
-  to Graph as UTC, so a 9:00 reminder fired at 5:00 EDT. It's now converted from local time. `due`
-  and `start` are dates in To Do — Graph keeps only the date part (verified live) — so they're sent
-  as the owner's intended date, and a value with an offset is placed on the owner's local calendar
-  first.
-- **`query_tasks` date filters match how due and completion dates are stored.** The To Do app
-  stores a due date as local midnight (`04:00Z` in New York) and Graph writes store UTC midnight,
-  so `due_before: "2026-10-20"` excluded app-set tasks due on the 20th. Date-only bounds on
-  `due_*` / `completed_*` now cover UTC midnight ± 12 hours, which matches both conventions;
-  `created_after` and datetime bounds are read in local time.
-
-### Changed
-- **Dependencies:** `@cloudflare/workers-oauth-provider` 0.5.0 → 1.2.3, `agents` 0.12.4 → 0.28.1,
-  `@modelcontextprotocol/sdk` 1.29.0 → 1.32.1 (clears GHSA-6qxp-vccf-f47h, which affects the SDK's
-  OAuth *client* and didn't reach this server), `zod` 4.4.3 → 4.6.7.
 
 ### Upgrade notes
 - **Every MCP client reconnects once.** Grants issued before this release carry no auth epoch and
