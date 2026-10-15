@@ -27,7 +27,7 @@ import {
 import type { TodoIndex } from "../cache/index-do";
 import { mapPool } from "../graph/concurrency";
 import { VERSION } from "../version";
-import { parseDateInput, toGraphDateTime } from "../util/dates";
+import { parseDateInput, toGraphDate, toGraphDateTime } from "../util/dates";
 import {
   createDownloadCapability,
   createUploadCapability,
@@ -78,12 +78,13 @@ const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
 // configured TIMEZONE (an IANA name). en-CA formats as YYYY-MM-DD.
 const MY_DAY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // Graph dateTimeTimeZone fields for the task date params. undefined = not
-// supplied (omitted), null = clear (sent as null). Naive values are read in the
-// owner's TIMEZONE — see util/dates.ts.
+// supplied (omitted), null = clear (sent as null). Graph keeps only the date of
+// due/start but the full time of reminder, so they convert differently — see
+// util/dates.ts.
 const GRAPH_DATE_KEYS = {
-  due: "dueDateTime",
-  reminder: "reminderDateTime",
-  start: "startDateTime",
+  due: { key: "dueDateTime", convert: toGraphDate },
+  reminder: { key: "reminderDateTime", convert: toGraphDateTime },
+  start: { key: "startDateTime", convert: toGraphDate },
 } as const;
 
 function graphDateFields(
@@ -91,14 +92,14 @@ function graphDateFields(
   input: Partial<Record<keyof typeof GRAPH_DATE_KEYS, string | null | undefined>>,
 ): { ok: true; fields: Record<string, unknown> } | { ok: false; response: McpResponse } {
   const fields: Record<string, unknown> = {};
-  for (const [param, key] of Object.entries(GRAPH_DATE_KEYS)) {
+  for (const [param, { key, convert }] of Object.entries(GRAPH_DATE_KEYS)) {
     const value = input[param as keyof typeof GRAPH_DATE_KEYS];
     if (value === undefined) continue;
     if (value === null) {
       fields[key] = null;
       continue;
     }
-    const converted = toGraphDateTime(value, timeZone);
+    const converted = convert(value, timeZone);
     if (!converted) {
       return {
         ok: false,
@@ -929,7 +930,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .string()
             .optional()
             .describe(
-              "Due date as ISO 8601 (e.g. '2026-05-30'). A value without Z or a UTC offset is read as the owner's local time (TIMEZONE).",
+              "Due date as ISO 8601 (e.g. '2026-05-30'). To Do keeps only the date; any time of day is dropped.",
             ),
           reminder: z
             .string()
@@ -940,7 +941,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           start: z
             .string()
             .optional()
-            .describe("Start date/time as ISO 8601. A value without Z or a UTC offset is read as the owner's local time (TIMEZONE)."),
+            .describe("Start date as ISO 8601 (e.g. '2026-05-30'). To Do keeps only the date; any time of day is dropped."),
           importance: z
             .enum(["low", "normal", "high"])
             .optional()
@@ -1034,7 +1035,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .string()
             .nullable()
             .optional()
-            .describe("New due date (ISO 8601). A value without Z or a UTC offset is read as the owner's local time (TIMEZONE). Pass null to clear."),
+            .describe("New due date (ISO 8601, e.g. '2026-05-30'). To Do keeps only the date; any time of day is dropped. Pass null to clear."),
           reminder: z
             .string()
             .nullable()
@@ -1044,7 +1045,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .string()
             .nullable()
             .optional()
-            .describe("New start date/time (ISO 8601). A value without Z or a UTC offset is read as the owner's local time (TIMEZONE). Pass null to clear."),
+            .describe("New start date (ISO 8601). To Do keeps only the date; any time of day is dropped. Pass null to clear."),
           completed_date: z
             .string()
             .nullable()
@@ -3140,8 +3141,16 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           const dates: Record<string, number> = {};
           for (const [field, value] of dateInputs) {
             if (value === undefined) continue;
-            // A date-only *_before bound covers the whole local day.
-            const ms = parseDateInput(value, this.env.TIMEZONE, field.endsWith("_before") ? "end" : "start");
+            // due/completed are dates in To Do (see util/dates.ts), so a date-only
+            // bound on them uses the UTC-midnight ± 12 h window; created_after is
+            // a true instant and uses the owner's local day.
+            const dateField = field.startsWith("due_") || field.startsWith("completed_");
+            const isEnd = field.endsWith("_before");
+            const ms = parseDateInput(
+              value,
+              this.env.TIMEZONE,
+              dateField ? (isEnd ? "day-end" : "day-start") : isEnd ? "end" : "start",
+            );
             if (ms === null) {
               return errResponse("invalid_date", {
                 field,

@@ -392,12 +392,11 @@ Do clients. Right after deploy (or a re-baseline), `list_my_day_tasks` may retur
 `stale: true` until the first scan completes (within a cycle or two).
 
 **Timezone.** Set **`TIMEZONE`** (an IANA name like `America/New_York`) to your own zone. The
-server reads every date you give it without a `Z` or UTC offset as local time in that zone:
-`due`, `reminder` and `start` on `create_task` / `update_task`, the `query_tasks` date filters
-(a date-only `*_before` bound covers the whole local day), and "today" for the My Day tools
-when you don't pass a `date`. A due date of `2026-10-20` is stored as local midnight, the way
-the To Do app stores it. `completed_date` is the exception: To Do keeps completion as a date,
-so that value is used as-is.
+server reads a time you give it without a `Z` or UTC offset as local time in that zone: a
+`reminder` on `create_task` / `update_task`, datetime bounds and `created_after` in
+`query_tasks`, and "today" for the My Day tools when you don't pass a `date`. Due, start and
+completion are calendar dates in To Do — Graph drops any time of day — so `due: "2026-10-20"`
+means the 20th in every zone.
 
 **Checklist-item cache — opt-in (`ENABLE_CHECKLIST_CACHE`, default `"false"`).** Set it to
 `"true"` to mirror task checklist items into a queryable table, enabling `search_checklist_items`

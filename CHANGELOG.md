@@ -45,11 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **`get_task` returns `@odata.etag`**, so `update_task`'s `if_match` can be used as documented.
   It was stripped before.
-- **Dates are read in the owner's `TIMEZONE`.** `due`, `reminder` and `start` without a `Z` or
-  offset were sent to Graph as UTC, so `due: "2026-10-20"` landed on the 19th in US zones and a
-  9:00 reminder fired at 5:00 EDT. They're now converted from local time, matching how the To Do
-  app stores due dates. `query_tasks` date filters had the same flaw (`due_before: "2026-10-20"`
-  excluded tasks due on the 20th); a date-only `*_before` bound now covers the whole local day.
+- **Reminders are read in the owner's `TIMEZONE`.** A `reminder` without a `Z` or offset was sent
+  to Graph as UTC, so a 9:00 reminder fired at 5:00 EDT. It's now converted from local time. `due`
+  and `start` are dates in To Do — Graph keeps only the date part (verified live) — so they're sent
+  as the owner's intended date, and a value with an offset is placed on the owner's local calendar
+  first.
+- **`query_tasks` date filters match how due and completion dates are stored.** The To Do app
+  stores a due date as local midnight (`04:00Z` in New York) and Graph writes store UTC midnight,
+  so `due_before: "2026-10-20"` excluded app-set tasks due on the 20th. Date-only bounds on
+  `due_*` / `completed_*` now cover UTC midnight ± 12 hours, which matches both conventions;
+  `created_after` and datetime bounds are read in local time.
 
 ### Changed
 - **Dependencies:** `@cloudflare/workers-oauth-provider` 0.5.0 → 1.2.3, `agents` 0.12.4 → 0.28.1,

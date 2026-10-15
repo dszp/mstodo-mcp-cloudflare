@@ -3,9 +3,18 @@
 // The model names dates the way a person does — "2026-10-20", "2026-10-20T09:00"
 // — meaning the owner's local time, not UTC. Those naive forms are read in the
 // configured TIMEZONE (an IANA name); a value with an explicit `Z` or `±hh:mm`
-// offset is taken as written. Graph wants UTC, and the To Do app stores a
-// due date as local midnight in UTC (2026-10-20 in New York → 04:00Z), so
-// converting here makes tool-set dates land on the same day the app shows.
+// offset is taken as written.
+//
+// To Do has two kinds of date field, verified live against Graph:
+//   - instants: reminderDateTime keeps its time → toGraphDateTime (local → UTC).
+//   - dates: dueDateTime and startDateTime keep only the date — a 04:00Z write
+//     reads back as 00:00Z — so they go over as the intended local date at UTC
+//     midnight → toGraphDate. Converting a local date to a UTC instant here
+//     would move it back a day in every zone east of UTC.
+// Stored date fields therefore follow two conventions: UTC midnight (written
+// through Graph) and local midnight (written by the To Do app: 04:00Z for New
+// York). Both lie within 12 h of UTC midnight on the intended date, which is
+// what the "day-start"/"day-end" filter bounds rely on.
 
 const UNIT_MS: Record<string, number> = {
   m: 60_000,
@@ -15,6 +24,7 @@ const UNIT_MS: Record<string, number> = {
 };
 
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const HALF_DAY_MS = 43_200_000;
 const NAIVE_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?$/;
 const HAS_OFFSET = /(?:[zZ]|[+-]\d{2}:?\d{2})$/;
 
@@ -86,20 +96,31 @@ function absoluteMs(s: string, timeZone: string, bound: "start" | "end"): number
 // now ("+7d", "-30d", "+12h", "-2w"; units m/h/d/w). Returns epoch ms, or null
 // so callers can reject with `invalid_date` instead of silently widening a
 // filter.
+//
+// Bounds for a date-only value: "start"/"end" cover the local day (for true
+// instants such as createdDateTime); "day-start"/"day-end" cover UTC midnight
+// ± 12 h (for date fields — due, completed — see the header).
 export function parseDateInput(
   s: string,
   timeZone = "UTC",
-  bound: "start" | "end" = "start",
+  bound: "start" | "end" | "day-start" | "day-end" = "start",
 ): number | null {
   const trimmed = s.trim();
   if (trimmed === "") return null;
+
+  if ((bound === "day-start" || bound === "day-end") && DATE_ONLY.test(trimmed)) {
+    const midnight = Date.parse(`${trimmed}T00:00:00Z`);
+    if (Number.isNaN(midnight)) return null;
+    return bound === "day-start" ? midnight - HALF_DAY_MS : midnight + HALF_DAY_MS - 1;
+  }
+  const instantBound = bound === "day-end" ? "end" : bound === "day-start" ? "start" : bound;
 
   const rel = trimmed.match(/^([+-])(\d+)([mhdw])$/);
   if (rel) {
     const sign = rel[1] === "-" ? -1 : 1;
     return Date.now() + sign * Number(rel[2]) * UNIT_MS[rel[3]];
   }
-  return absoluteMs(trimmed, timeZone, bound);
+  return absoluteMs(trimmed, timeZone, instantBound);
 }
 
 // Graph dateTimeTimeZone for a write (due, reminder, start, completed). Always
@@ -111,4 +132,26 @@ export function toGraphDateTime(
   const ms = absoluteMs(s.trim(), timeZone, "start");
   if (ms === null) return null;
   return { dateTime: new Date(ms).toISOString().replace(/Z$/, ""), timeZone: "UTC" };
+}
+
+// Graph dateTimeTimeZone for a date field (due, start): the owner's intended
+// calendar date at midnight UTC. A date or naive datetime keeps its own date; a
+// value with an offset is placed on the owner's local calendar first.
+export function toGraphDate(
+  s: string,
+  timeZone: string,
+): { dateTime: string; timeZone: "UTC" } | null {
+  const trimmed = s.trim();
+  let date: string | null = null;
+  if (DATE_ONLY.test(trimmed)) {
+    date = zonedWallTimeToUtc(`${trimmed}T00:00:00`, "UTC") === null ? null : trimmed;
+  } else if (HAS_OFFSET.test(trimmed)) {
+    const ms = Date.parse(trimmed);
+    if (!Number.isNaN(ms)) {
+      date = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
+    }
+  } else if (zonedWallTimeToUtc(trimmed, "UTC") !== null) {
+    date = trimmed.slice(0, 10);
+  }
+  return date ? { dateTime: `${date}T00:00:00`, timeZone: "UTC" } : null;
 }
