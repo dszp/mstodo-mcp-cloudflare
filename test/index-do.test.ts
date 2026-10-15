@@ -8,6 +8,7 @@ import {
   IDENTITY_KEY,
   SCOPES,
   wipeIdentityScopedState,
+  loadTokens,
 } from "../src/auth/microsoft";
 
 function indexStub(name = OWNER_DO_NAME) {
@@ -286,7 +287,7 @@ describe("TodoIndex substrate (My Day) token mint", () => {
 
     // The substrate mint persists ONLY the rotated refresh token; the Graph
     // access token in tokens:owner is untouched (a Graph caller still reads it).
-    const stored = JSON.parse((await env.TODO_CACHE.get(TOKENS_KEY))!);
+    const stored = (await loadTokens(env as unknown as Env))!;
     expect(stored.access_token).toBe("graph-at");
     expect(stored.refresh_token).toBe("rt-2");
   });
@@ -307,7 +308,7 @@ describe("TodoIndex substrate (My Day) token mint", () => {
     expect(spy).toHaveBeenCalledTimes(2);
 
     // Graph's full record persisted; substrate didn't clobber the access token.
-    const stored = JSON.parse((await env.TODO_CACHE.get(TOKENS_KEY))!);
+    const stored = (await loadTokens(env as unknown as Env))!;
     expect(stored.access_token).toBe("graph-at-new");
   });
 
@@ -891,7 +892,7 @@ describe("TodoIndex #refresh generation guard (H4)", () => {
     });
 
     // The prior-account tokens were NOT written over the (now-wiped) identity.
-    const stored = JSON.parse((await env.TODO_CACHE.get(TOKENS_KEY))!);
+    const stored = (await loadTokens(env as unknown as Env))!;
     expect(stored.access_token).toBe("at-old");
   });
 });

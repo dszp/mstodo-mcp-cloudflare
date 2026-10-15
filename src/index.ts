@@ -1,26 +1,13 @@
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { MSToDoMCP } from "./mcp/agent";
 import { TodoIndex } from "./cache/index-do";
 import { OWNER_DO_NAME } from "./cache/sql";
-import AuthHandler from "./auth/handler";
+import { buildOAuthProvider } from "./auth/oauth";
 import { handleUpload } from "./upload/handler";
 import { handleDownload } from "./upload/download-handler";
 import { handleWebhook } from "./subscriptions/webhook-handler";
 import { VERSION } from "./version";
 
 export { MSToDoMCP, TodoIndex };
-
-const oauthProvider = new OAuthProvider({
-  apiRoute: "/mcp",
-  // serve(path, { binding }) — agents/mcp defaults binding to "MCP_OBJECT",
-  // but our DO binding (wrangler.jsonc) is named TODO_INDEX. Without this
-  // arg the SDK throws on first /mcp request: env.MCP_OBJECT is undefined.
-  apiHandler: MSToDoMCP.serve("/mcp", { binding: "TODO_INDEX" }) as never,
-  defaultHandler: AuthHandler as never,
-  authorizeEndpoint: "/authorize",
-  tokenEndpoint: "/token",
-  clientRegistrationEndpoint: "/register",
-});
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -52,7 +39,7 @@ export default {
     const webhookRes = await handleWebhook(req, env, ctx);
     if (webhookRes) return webhookRes;
 
-    return oauthProvider.fetch(req, env, ctx);
+    return buildOAuthProvider(url.origin).fetch(req, env, ctx);
   },
 
   // Phase 5: cron heartbeat. Pokes the singleton TodoIndex DO to (re-)arm its

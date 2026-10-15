@@ -16,8 +16,10 @@ import {
   TokenExchangeError,
   loadIdentity,
   myDayEnabled,
+  reauthReasonFromTokenError,
   type StoredTokens,
 } from "../auth/microsoft";
+import { ReauthRequiredError, type ReauthState } from "../auth/reauth";
 import { SubstrateClient, SubstrateError } from "../graph/substrate-client";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import { followToTerminal, type DeltaRow } from "../graph/delta";
@@ -213,6 +215,10 @@ export interface SubscriptionStatus {
   graph_error?: string;
 }
 
+// DO-storage keys for the MCP grant epoch and the re-auth flag (see authState).
+const AUTH_EPOCH_KEY = "auth:epoch";
+const REAUTH_KEY = "auth:reauth";
+
 export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -229,6 +235,60 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
 
   private get sql() {
     return this.ctx.storage.sql;
+  }
+
+  // -- MCP grant epoch + re-auth state --------------------------------------
+  // Both live in DO storage rather than KV because they gate access: a
+  // revocation must take effect on the next tool call everywhere, and KV reads
+  // can serve a cached value for up to 60 s after a write.
+  //
+  // The epoch is an opaque random value stamped into every MCP grant's props at
+  // /authorize. A grant whose epoch doesn't match the current one is dead — the
+  // tool preflight refuses it and its next refresh is rejected (auth/oauth.ts).
+  // Bumping the epoch therefore revokes every outstanding MCP grant at once.
+  //
+  // The re-auth flag is set when Microsoft refuses a refresh for good or answers
+  // with a Conditional Access claims challenge. While it's set, every tool —
+  // including the cache-only ones — reports reauth_required, so cached task data
+  // stops being served once Microsoft access is gone.
+
+  async authState(): Promise<{ epoch: string; reauth: ReauthState | null }> {
+    let epoch = await this.ctx.storage.get<string>(AUTH_EPOCH_KEY);
+    if (!epoch) epoch = await this.#newEpoch();
+    const reauth = (await this.ctx.storage.get<ReauthState>(REAUTH_KEY)) ?? null;
+    return { epoch, reauth };
+  }
+
+  // Invalidate every outstanding MCP grant. Returns the new epoch.
+  async revokeAllGrants(): Promise<string> {
+    const epoch = await this.#newEpoch();
+    log.warn("mcp_grants_revoked", {});
+    return epoch;
+  }
+
+  async markReauthRequired(reason: string, claims?: string): Promise<void> {
+    const state: ReauthState = { reason, at: Date.now(), ...(claims ? { claims } : {}) };
+    await this.ctx.storage.put(REAUTH_KEY, state);
+    log.warn("reauth_required", { reason });
+  }
+
+  // Called after a successful /authorize: Microsoft access is back, so resume
+  // syncing (the alarm stops re-arming while re-auth is required).
+  async clearReauth(): Promise<void> {
+    await this.ctx.storage.delete(REAUTH_KEY);
+    await this.ensureSyncing();
+  }
+
+  // ClaimsChallengeSink for this DO's own GraphClient (the sync loop).
+  async reportClaimsChallenge(claims: string): Promise<void> {
+    await this.markReauthRequired("claims_challenge", claims);
+  }
+
+  async #newEpoch(): Promise<string> {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    const epoch = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    await this.ctx.storage.put(AUTH_EPOCH_KEY, epoch);
+    return epoch;
   }
 
   // -- Token refresh (sole refresher; global single-flight) -----------------
@@ -335,13 +395,21 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       } catch (e) {
         // AADSTS65001 = the owner consented to Graph but not the EXO resource.
         // Latch unavailable so My Day tools degrade cleanly instead of retrying.
+        const reauth = reauthReasonFromTokenError(e);
+        // An EXO-only refusal (AADSTS65001 unconsented scope, or a Conditional
+        // Access policy that targets Exchange Online but not Graph) disables My
+        // Day, not the whole server: Graph access is still fine, and re-authorizing
+        // wouldn't help if the policy can't be met for EXO.
         if (
           resource === "substrate" &&
-          e instanceof TokenExchangeError &&
-          e.detail.includes("AADSTS65001")
+          (reauth || (e instanceof TokenExchangeError && e.detail.includes("AADSTS65001")))
         ) {
           this.#substrateUnavailable = true;
           throw new Error("my_day_unavailable");
+        }
+        if (reauth && gen === this.#identityGeneration) {
+          await this.markReauthRequired(reauth);
+          throw new ReauthRequiredError(reauth);
         }
         throw e;
       }
@@ -1619,6 +1687,9 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     // Cold / never-authorized: nothing to sync. Don't re-arm — ensureSyncing()
     // (cron heartbeat or a post-/authorize read) restarts the loop.
     if (!(await loadTokens(this.env))) return;
+    // Microsoft refused our refresh token or demanded Conditional Access step-up:
+    // every refresh would fail the same way, so stop until clearReauth() re-arms.
+    if (await this.ctx.storage.get(REAUTH_KEY)) return;
     const midCycle = await this.runSyncCycle();
     const intervalMs = this.#intervalMs();
     await this.ctx.storage.setAlarm(
@@ -1669,6 +1740,10 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     await this.#teardownAllSubscriptions();
     this.#substrateToken = null;
     this.#substrateUnavailable = false;
+    // Kill every MCP grant paired with the outgoing account; the new account's
+    // grant is issued under the fresh epoch right after this wipe.
+    await this.#newEpoch();
+    await this.ctx.storage.delete(REAUTH_KEY);
     this.sql.exec("DELETE FROM tasks"); // tasks_fts cascades via AFTER DELETE trigger
     this.sql.exec("DELETE FROM lists");
     this.sql.exec("DELETE FROM sync_state");

@@ -391,10 +391,12 @@ the cache instantly via write-through — the scan only catches My Day changes m
 Do clients. Right after deploy (or a re-baseline), `list_my_day_tasks` may return `count: 0` with
 `stale: true` until the first scan completes (within a cycle or two).
 
-**Timezone.** `My Day` membership is a local calendar date. When you call a My Day tool
-without an explicit `date`, "today" is computed in the Worker's configured **`TIMEZONE`**
-(an IANA name like `America/New_York`), **not UTC** — so set `TIMEZONE` to your own zone,
-or pass an explicit `YYYY-MM-DD` to target a specific day.
+**Timezone.** Set **`TIMEZONE`** (an IANA name like `America/New_York`) to your own zone. The
+server reads a time you give it without a `Z` or UTC offset as local time in that zone: a
+`reminder` on `create_task` / `update_task`, datetime bounds and `created_after` in
+`query_tasks`, and "today" for the My Day tools when you don't pass a `date`. Due, start and
+completion are calendar dates in To Do — Graph drops any time of day — so `due: "2026-10-20"`
+means the 20th in every zone.
 
 **Checklist-item cache — opt-in (`ENABLE_CHECKLIST_CACHE`, default `"false"`).** Set it to
 `"true"` to mirror task checklist items into a queryable table, enabling `search_checklist_items`

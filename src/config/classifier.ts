@@ -1,5 +1,7 @@
 import type { ListsConfig } from "./schemas";
 
+const MAX_LIST_NAME_CHARS = 256;
+
 // Strip emoji (Extended_Pictographic), skin-tone modifiers (Emoji_Modifier,
 // U+1F3FB–U+1F3FF), variation selectors (U+FE0F), and Zero-Width Joiners
 // (U+200D) from a display name, then trim whitespace. This normalizes names
@@ -28,7 +30,8 @@ export function classifyList(
     const pinned = config.overrides[listId];
     if (pinned) return pinned; // ID pin wins — survives renames
   }
-  const normalized = stripEmoji(displayName);
+  // Bound regex work: a To Do list name is short, so anything past this is noise.
+  const normalized = stripEmoji(displayName).slice(0, MAX_LIST_NAME_CHARS);
   for (const p of config.patterns) {
     if (new RegExp(p.pattern, p.flags).test(normalized)) return p.type;
   }

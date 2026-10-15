@@ -74,3 +74,16 @@ describe("handleWebhook", () => {
     expect(res!.status).toBe(202);
   });
 });
+
+describe("handleWebhook body limit", () => {
+  it("refuses a body over the notification cap without parsing it", async () => {
+    const { ctx } = ctxStub();
+    const big = JSON.stringify({ value: [], pad: "x".repeat(70 * 1024) });
+    const res = await handleWebhook(
+      new Request("https://x/webhook", { method: "POST", body: big }),
+      env,
+      ctx,
+    );
+    expect(res?.status).toBe(413);
+  });
+});

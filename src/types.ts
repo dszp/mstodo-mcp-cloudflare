@@ -27,8 +27,13 @@ declare global {
   }
 }
 
+// Stored (encrypted) in each MCP grant by completeAuthorization; McpAgent sees
+// it as this.props. `epoch` and `authorized_at` are checked on every tool call
+// and every refresh — see grantRefusal() in auth/oauth.ts.
 export interface Props extends Record<string, unknown> {
   user: string;
+  epoch: string;
+  authorized_at: number; // epoch ms
 }
 
 export {};

@@ -186,3 +186,31 @@ describe("handleUpload attach flow", () => {
     expect(calls.some((c) => c.method === "POST")).toBe(false);
   });
 });
+
+describe("handleUpload pre-parse checks", () => {
+  it("refuses a declared length over the batch cap", async () => {
+    const res = await handleUpload(
+      new Request("https://x/upload", {
+        method: "POST",
+        headers: { "content-type": "multipart/form-data; boundary=b", "content-length": String(200 * 1024 * 1024) },
+        body: "--b--",
+      }),
+      env,
+    );
+    expect(res?.status).toBe(413);
+  });
+
+  it("rejects an invalid query-string token before reading the body", async () => {
+    const res = await handleUpload(
+      new Request("https://x/upload?t=not-a-token", {
+        method: "POST",
+        headers: { "content-type": "multipart/form-data; boundary=b" },
+        body: "this is not valid multipart",
+      }),
+      env,
+    );
+    // A body parse would have produced 400 invalid_form; the token check runs first.
+    expect(res?.status).not.toBe(400);
+    expect(res?.status).toBeGreaterThanOrEqual(401);
+  });
+});

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readBounded } from "../util/body";
 import { log } from "../log";
 import { ownerIndex } from "../upload/handler";
 import { taskSubscriptionsEnabled } from "./gate";
@@ -33,6 +34,8 @@ const NotificationBodySchema = z.object({ value: z.array(NotificationItemSchema)
 function text(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
 }
+const MAX_NOTIFICATION_BYTES = 64 * 1024;
+
 function ack(status: number): Response {
   return new Response(null, { status });
 }
@@ -55,10 +58,17 @@ export async function handleWebhook(
 
   if (req.method !== "POST") return ack(405);
 
-  // (2) Real notification — parse, ack immediately, defer the rest.
+  // (2) Real notification — parse, ack immediately, defer the rest. Basic
+  // (non-rich) notifications are a few hundred bytes each; anything near the cap
+  // isn't from Graph, so don't buffer it.
+  const body = await readBounded(req, MAX_NOTIFICATION_BYTES);
+  if (body === null) {
+    log.info("webhook_body_too_large", {});
+    return ack(413);
+  }
   let parsed: z.infer<typeof NotificationBodySchema> | null = null;
   try {
-    parsed = NotificationBodySchema.parse(await req.json());
+    parsed = NotificationBodySchema.parse(JSON.parse(body));
   } catch {
     // Our parse failure must not make Graph retry for 4h. Ack and drop.
     log.info("webhook_unparseable");

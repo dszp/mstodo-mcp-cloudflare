@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] – 2026-10-15
+
+Security hardening from an external review: per-client consent before Microsoft sign-in, revocable MCP
+grants, detection of Microsoft revocation and Conditional Access, encrypted token storage, and
+date handling corrected against live Graph behavior.
+
+### Added
+- **`revoke_all_connections` tool.** Disconnects every MCP client at once, including the one
+  calling it; each reconnects and approves access again. Microsoft sign-in and the task cache are
+  kept.
+
+### Changed
+- **Dependencies:** `@cloudflare/workers-oauth-provider` 0.5.0 → 1.2.3, `agents` 0.12.4 → 0.28.1,
+  `@modelcontextprotocol/sdk` 1.29.0 → 1.32.1 (clears GHSA-6qxp-vccf-f47h, which affects the SDK's
+  OAuth *client* and didn't reach this server), `zod` 4.4.3 → 4.6.7.
+- **Tooling:** `wrangler` 4.95.0 → 4.150.0 (adds `wrangler login --device`, which works over
+  SSH where the localhost callback can't be reached), `@cloudflare/vitest-pool-workers` → 0.23.0.
+- **Tests:** the download-token scope check no longer fails when a random id happens to contain
+  the scope string, and a test asserts every registered tool has an annotations entry.
+
+### Fixed
+- **`get_task` returns `@odata.etag`**, so `update_task`'s `if_match` can be used as documented.
+  It was stripped before.
+- **Reminders are read in the owner's `TIMEZONE`.** A `reminder` without a `Z` or offset was sent
+  to Graph as UTC, so a 9:00 reminder fired at 5:00 EDT. It's now converted from local time. `due`
+  and `start` are dates in To Do — Graph keeps only the date part (verified live) — so they're sent
+  as the owner's intended date, and a value with an offset is placed on the owner's local calendar
+  first.
+- **`query_tasks` date filters match how due and completion dates are stored.** The To Do app
+  stores a due date as local midnight (`04:00Z` in New York) and Graph writes store UTC midnight,
+  so `due_before: "2026-10-20"` excluded app-set tasks due on the 20th. Date-only bounds on
+  `due_*` / `completed_*` now cover UTC midnight ± 12 hours, which matches both conventions;
+  `created_after` and datetime bounds are read in local time.
+
+### Security
+- **Per-client consent before Microsoft sign-in.** `/authorize` now shows a consent page that
+  names the requesting MCP client and the host its access will be sent to, and starts the
+  Microsoft sign-in only after the owner approves. Previously any dynamically registered client
+  received a full grant as soon as the owner completed a (often silent) Microsoft sign-in — the MCP
+  "confused deputy" problem. Built on `workers-oauth-provider`'s consent and upstream helpers, so
+  the page can't be framed, the form can't be forged, and Microsoft's `state` is bound to the
+  browser that approved. "Don't ask again" remembers a client for 30 days in that browser.
+- **Revocable MCP grants.** Each grant carries the auth epoch it was issued under; every `/mcp`
+  request (answered `401 invalid_token` when refused) and every token refresh checks it. New `revoke_all_connections` tool disconnects every client at
+  once. The identity-change wipe now revokes all grants too (it used to leave them working against
+  the new account's data).
+- **One auth gate for every tool.** The cache-only tools (`query_tasks`, `search_tasks`,
+  `search_checklist_items`, the config tools, …) previously skipped the token check entirely. All
+  tools now pass the same preflight: valid grant, no pending Microsoft re-auth, tokens present.
+- **Microsoft revocation and Conditional Access are detected.** A refresh refused with
+  `invalid_grant` / `interaction_required` / `consent_required`, or a Graph/Exchange 401 carrying a
+  CAE `insufficient_claims` challenge, marks the server as needing re-auth: every tool returns
+  `reauth_required`, background sync pauses, and the MCP refresh is refused so clients reconnect.
+  The claims challenge is passed to Entra on that sign-in. Transient failures (5xx, throttling)
+  don't trigger it, and a refusal that applies only to the Exchange Online token disables My Day
+  rather than the whole server.
+- **MCP token lifetimes set explicitly.** Access tokens 1 hour; refresh grants start at 30 days and
+  slide to 14 days after each use; a 90-day maximum regardless of use.
+- **Microsoft tokens encrypted at rest** in KV (AES-256-GCM, key derived from `MS_CLIENT_SECRET`
+  via HKDF, ciphertext bound to its key name). Existing plaintext records are re-sealed on first
+  read.
+- **Pre-parse limits on public endpoints.** `/upload` checks the declared size and the query-string
+  link token before buffering the body; `/webhook` reads at most 64 KB.
+- **Regex screening.** `set_link_rules` / `set_list_config` refuse patterns over 256 characters or
+  with nested repeats (`(a+)+`); the list classifier reads at most 256 characters of a name.
+- **Less in logs.** Failed tool calls log only their reason code (error payloads could carry Graph
+  error bodies and echoed input); a rejected sign-in logs only the email domain; identity-change
+  and sign-in lines log account ids, not names or addresses.
+
+### Upgrade notes
+- **Every MCP client reconnects once.** Grants issued before this release carry no auth epoch and
+  are refused. Reconnect each connector after deploying; you'll see the new consent page.
+- **Check the OAuth resource before deploying.** The OAuth provider 1.x binds every grant to a
+  canonical resource, configured here as `<the Worker's origin>/mcp`. If existing grants carry a
+  different value, clients get `invalid_target` on refresh instead of a clean re-auth. Check with
+  `curl -s https://<host>/.well-known/oauth-protected-resource/mcp | jq -r .resource` against the
+  running version.
+- **Rotating `MS_CLIENT_SECRET` now also rotates the token-encryption key.** Reconnect once after a
+  rotation.
+
 ## [0.15.0] – 2026-06-22
 
 ### Added
