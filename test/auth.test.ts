@@ -50,11 +50,16 @@ describe("token sealing", () => {
   });
 
   it("stores tokens sealed, never as plaintext JSON", async () => {
-    await storeTokens(E, TOKENS);
+    // A long sentinel: a short token like "rt" turns up by chance in random
+    // base64 ciphertext (~1 run in 10), which made this test flaky.
+    const sentinel = "refresh-token-sentinel-6f2c9a41";
+    const tokens = { ...TOKENS, refresh_token: sentinel };
+    await storeTokens(E, tokens);
     const raw = (await env.TODO_CACHE.get(TOKENS_KEY))!;
     expect(isSealed(raw)).toBe(true);
-    expect(raw).not.toContain("rt");
-    expect(await loadTokens(E)).toEqual(TOKENS);
+    expect(raw).not.toContain(sentinel);
+    expect(raw).not.toContain("refresh_token");
+    expect(await loadTokens(E)).toEqual(tokens);
   });
 
   it("migrates a legacy plaintext record to sealed on first read", async () => {
