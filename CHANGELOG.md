@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Dependency hygiene:** in-range updates for `fast-uri`, `ip-address`, `qs`, `body-parser`,
+  `proxy-addr`, `@hono/node-server`, `undici`, `vitest`, `postcss`, `sharp` and `source-map-js`,
+  clearing most open Dependabot alerts. None of these reached the Worker's request path: the
+  "runtime" ones arrive through the MCP SDK's Express server, which this Worker doesn't use.
+  What's left (`miniflare`, `sharp`, `undici` inside `wrangler`) is build tooling pinned by the
+  current wrangler release.
+
 ## [0.16.0] – 2026-10-15
 
 Security hardening from an external review: per-client consent before Microsoft sign-in, revocable MCP
