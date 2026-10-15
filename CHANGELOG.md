@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "confused deputy" problem. Built on `workers-oauth-provider`'s consent and upstream helpers, so
   the page can't be framed, the form can't be forged, and Microsoft's `state` is bound to the
   browser that approved. "Don't ask again" remembers a client for 30 days in that browser.
-- **Revocable MCP grants.** Each grant carries the auth epoch it was issued under; every tool call
-  and every token refresh checks it. New `revoke_all_connections` tool disconnects every client at
+- **Revocable MCP grants.** Each grant carries the auth epoch it was issued under; every `/mcp`
+  request (answered `401 invalid_token` when refused) and every token refresh checks it. New `revoke_all_connections` tool disconnects every client at
   once. The identity-change wipe now revokes all grants too (it used to leave them working against
   the new account's data).
 - **One auth gate for every tool.** The cache-only tools (`query_tasks`, `search_tasks`,
@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CAE `insufficient_claims` challenge, marks the server as needing re-auth: every tool returns
   `reauth_required`, background sync pauses, and the MCP refresh is refused so clients reconnect.
   The claims challenge is passed to Entra on that sign-in. Transient failures (5xx, throttling)
-  don't trigger it.
+  don't trigger it, and a refusal that applies only to the Exchange Online token disables My Day
+  rather than the whole server.
 - **MCP token lifetimes set explicitly.** Access tokens 1 hour; refresh grants start at 30 days and
   slide to 14 days after each use; a 90-day maximum regardless of use.
 - **Microsoft tokens encrypted at rest** in KV (AES-256-GCM, key derived from `MS_CLIENT_SECRET`

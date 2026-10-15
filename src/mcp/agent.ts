@@ -6,7 +6,7 @@ import type { Props } from "../types";
 import { errResponse, instrument, type McpResponse } from "../observability/instrument";
 import { log } from "../log";
 import { fetchMe, loadIdentity, loadTokens, myDayEnabled, REFRESH_SKEW_MS } from "../auth/microsoft";
-import { grantRefusal, refusalDescription } from "../auth/grant";
+import { reauthPending, refusalDescription } from "../auth/grant";
 import { isReauthRequired } from "../auth/reauth";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import {
@@ -513,7 +513,14 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     // re-auth apply to the whole surface: a revoked grant, or a Microsoft
     // session that has to sign in again, stops cached task data being served.
     const gated = (async (...args: unknown[]) => {
-      const denied = await this.#authPreflight(name);
+      let denied: McpResponse | null;
+      try {
+        denied = await this.#authPreflight(name);
+      } catch (e) {
+        // Keep the tool layer's contract: nothing unexpected escapes as a throw.
+        log.error("tool_preflight_failed", { name, message: e instanceof Error ? e.message : String(e) });
+        return errResponse("unexpected_error", { message: "Authorization check failed; retry shortly." });
+      }
       if (denied) return denied;
       return (cb as (...a: unknown[]) => unknown)(...args);
     }) as unknown as ToolCallback<InputArgs>;
@@ -536,13 +543,15 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     );
   }
 
-  // The per-call auth gate (see #tool). Order matters for the message: a dead
-  // grant is reported as such even when Microsoft access is also gone.
+  // The per-call auth gate (see #tool). The grant itself (epoch, age) is
+  // checked per HTTP request in auth/oauth.ts, where the current token's props
+  // are available; this.props here is the session's FIRST token and goes stale.
+  // What's left is state that doesn't depend on the caller: Microsoft re-auth
+  // pending (it can be set mid-session) and tokens present.
   async #authPreflight(tool: string): Promise<McpResponse | null> {
-    const refusal = await grantRefusal(this.env, this.props);
-    if (refusal) {
-      log.warn("tool_denied", { name: tool, reason: refusal });
-      return errResponse(refusal, { hint: refusalDescription(refusal) });
+    if (await reauthPending(this.env)) {
+      log.warn("tool_denied", { name: tool, reason: "reauth_required" });
+      return errResponse("reauth_required", { hint: refusalDescription("reauth_required") });
     }
     if (!(await loadTokens(this.env))) {
       return errResponse("not_authenticated", {

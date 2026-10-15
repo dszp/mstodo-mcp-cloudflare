@@ -1,4 +1,9 @@
-import { AuthorizationError, type AuthRequest } from "@cloudflare/workers-oauth-provider";
+import {
+  AuthorizationError,
+  authorizationErrorRedirect,
+  type AuthRequest,
+} from "@cloudflare/workers-oauth-provider";
+import { readBounded } from "../util/body";
 import { log } from "../log";
 import { OWNER_DO_NAME } from "../cache/sql";
 import { consentRememberSecret } from "./crypto";
@@ -112,11 +117,11 @@ async function handleAuthorize(req: Request, env: Env): Promise<Response> {
 }
 
 async function handleConsentDecision(req: Request, env: Env): Promise<Response> {
-  const declared = Number(req.headers.get("content-length") ?? "0");
-  if (!Number.isFinite(declared) || declared > MAX_CONSENT_FORM_BYTES) {
+  const body = await readBounded(req, MAX_CONSENT_FORM_BYTES);
+  if (body === null) {
     return errorPage("Request too large", "The consent form submission was too large.", 413);
   }
-  const form = await req.formData();
+  const form = new URLSearchParams(body);
   const handle = String(form.get("handle") ?? "");
   const oauth = env.OAUTH_PROVIDER;
 
@@ -165,11 +170,15 @@ async function handleCallback(req: Request, env: Env, url: URL): Promise<Respons
   const { request: authRequest, data, headers } =
     await env.OAUTH_PROVIDER.finishUpstream<UpstreamData>(req);
 
+  // Microsoft refused or the owner cancelled there. The upstream record is
+  // already consumed, so answer the MCP client now (access_denied, with its
+  // state and iss) instead of leaving its authorization hanging.
   const oauthError = url.searchParams.get("error");
   if (oauthError) {
     const desc = url.searchParams.get("error_description") ?? "";
     log.warn("oauth_callback_error", { error: oauthError, description: desc.slice(0, 200) });
-    return errorPage("Microsoft sign-in failed", `${oauthError}: ${desc}`, 400);
+    headers.set("location", authorizationErrorRedirect(authRequest, "access_denied"));
+    return new Response(null, { status: 302, headers });
   }
   const code = url.searchParams.get("code");
   if (!code) {

@@ -395,15 +395,18 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
       } catch (e) {
         // AADSTS65001 = the owner consented to Graph but not the EXO resource.
         // Latch unavailable so My Day tools degrade cleanly instead of retrying.
+        const reauth = reauthReasonFromTokenError(e);
+        // An EXO-only refusal (AADSTS65001 unconsented scope, or a Conditional
+        // Access policy that targets Exchange Online but not Graph) disables My
+        // Day, not the whole server: Graph access is still fine, and re-authorizing
+        // wouldn't help if the policy can't be met for EXO.
         if (
           resource === "substrate" &&
-          e instanceof TokenExchangeError &&
-          e.detail.includes("AADSTS65001")
+          (reauth || (e instanceof TokenExchangeError && e.detail.includes("AADSTS65001")))
         ) {
           this.#substrateUnavailable = true;
           throw new Error("my_day_unavailable");
         }
-        const reauth = reauthReasonFromTokenError(e);
         if (reauth && gen === this.#identityGeneration) {
           await this.markReauthRequired(reauth);
           throw new ReauthRequiredError(reauth);

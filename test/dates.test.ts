@@ -17,6 +17,16 @@ describe("zonedWallTimeToUtc", () => {
     expect(zonedWallTimeToUtc("2026-11-01T12:00:00", NY)).toBe(Date.parse("2026-11-01T17:00:00Z"));
   });
 
+  it("moves a wall time in the spring-forward gap to after the jump", () => {
+    // 2026-03-08 02:30 doesn't exist in New York; it reads as 03:30 EDT.
+    expect(zonedWallTimeToUtc("2026-03-08T02:30:00", NY)).toBe(Date.parse("2026-03-08T07:30:00Z"));
+  });
+
+  it("takes the first occurrence of a repeated fall-back wall time", () => {
+    // 2026-11-01 01:30 happens twice; the first is 01:30 EDT.
+    expect(zonedWallTimeToUtc("2026-11-01T01:30:00", NY)).toBe(Date.parse("2026-11-01T05:30:00Z"));
+  });
+
   it("treats UTC as identity", () => {
     expect(zonedWallTimeToUtc("2026-10-20T09:00:00", "UTC")).toBe(Date.parse("2026-10-20T09:00:00Z"));
   });

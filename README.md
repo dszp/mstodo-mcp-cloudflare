@@ -135,8 +135,8 @@ worth stating in one place:
   `/authorize` link could hand a grant to someone else's client, because Microsoft sign-in is often
   silent (the MCP "confused deputy" problem). The page can't be framed or replayed from another
   browser. Approving with **Don't ask again** skips it for that client in that browser for 30 days.
-- **Revocable grants.** Every MCP grant carries the auth epoch it was issued under, and every tool
-  call and token refresh checks it. Calling `revoke_all_connections`, or signing in as a different
+- **Revocable grants.** Every MCP grant carries the auth epoch it was issued under, and every MCP
+  request and token refresh checks it. Calling `revoke_all_connections`, or signing in as a different
   Microsoft account, changes the epoch and disconnects every client at once. Grants also expire
   after 14 days unused, and after 90 days regardless.
 - **Microsoft access gates cached data too.** If Microsoft refuses the stored refresh token

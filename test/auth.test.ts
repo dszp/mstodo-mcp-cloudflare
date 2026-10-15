@@ -13,7 +13,7 @@ import {
   type StoredTokens,
 } from "../src/auth/microsoft";
 import { parseClaimsChallenge, ReauthRequiredError, isReauthRequired } from "../src/auth/reauth";
-import { grantRefusal, MAX_GRANT_AGE_MS } from "../src/auth/grant";
+import { grantRefusal, refuseMcpRequest, MAX_GRANT_AGE_MS } from "../src/auth/grant";
 import { GraphClient } from "../src/graph/client";
 import { consentPage } from "../src/auth/consent-page";
 import AuthHandler from "../src/auth/handler";
@@ -169,6 +169,36 @@ describe("grantRefusal", () => {
     expect(await grantRefusal(E, props)).toBe("reauth_required");
     await index().clearReauth();
     expect(await grantRefusal(E, props)).toBeNull();
+  });
+});
+
+describe("refuseMcpRequest (HTTP-layer gate)", () => {
+  it("answers 401 invalid_token for a revoked grant so the client re-authorizes", async () => {
+    const { epoch } = await index().authState();
+    await index().revokeAllGrants();
+    const res = await refuseMcpRequest(E, { user: "owner", epoch, authorized_at: Date.now() });
+    expect(res?.status).toBe(401);
+    expect(res?.headers.get("www-authenticate")).toMatch(/error="invalid_token"/);
+  });
+
+  it("lets a current grant through", async () => {
+    const { epoch } = await index().authState();
+    expect(await refuseMcpRequest(E, { user: "owner", epoch, authorized_at: Date.now() })).toBeNull();
+  });
+});
+
+describe("Exchange-only refusal", () => {
+  it("disables My Day without locking the whole server", async () => {
+    await storeTokens(E, TOKENS);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ error: "interaction_required", error_codes: [53000] }), { status: 400 }),
+      ),
+    );
+    const e = await index().forceSubstrateRefresh().then(() => null, (err: unknown) => err);
+    expect(String(e)).toMatch(/my_day_unavailable/);
+    expect((await index().authState()).reauth).toBeNull();
   });
 });
 
@@ -344,6 +374,27 @@ describe("authorize flow", () => {
     expect(typeof props.authorized_at).toBe("number");
     expect(reauth).toBeNull();
     expect(await grantRefusal(E, props)).toBeNull();
+  });
+
+  it("sends a Microsoft-side error back to the client as access_denied", async () => {
+    const res = await AuthHandler.fetch(
+      new Request("https://mcp.test/auth/microsoft/callback?error=access_denied&error_description=cancelled&state=s"),
+      envWith(),
+    );
+    expect(res.status).toBe(302);
+    const loc = new URL(res.headers.get("location")!);
+    expect(loc.origin + loc.pathname).toBe("https://claude.ai/api/mcp/auth_callback");
+    expect(loc.searchParams.get("error")).toBe("access_denied");
+    expect(loc.searchParams.get("state")).toBe("client-state");
+  });
+
+  it("refuses an oversized consent form without buffering it", async () => {
+    const res = await AuthHandler.fetch(
+      new Request("https://mcp.test/authorize", { method: "POST", body: "handle=h1&pad=" + "x".repeat(10_000) }),
+      envWith(),
+    );
+    expect(res.status).toBe(413);
+    expect(calls).toEqual([]);
   });
 
   it("refuses a non-owner before storing anything", async () => {

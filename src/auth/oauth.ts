@@ -2,7 +2,7 @@ import { OAuthError, OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { MSToDoMCP } from "../mcp/agent";
 import { log } from "../log";
 import AuthHandler from "./handler";
-import { grantRefusal, refusalDescription } from "./grant";
+import { grantRefusal, refuseMcpRequest, refusalDescription } from "./grant";
 import type { Props } from "../types";
 
 export const MCP_PATH = "/mcp";
@@ -20,13 +20,28 @@ const REFRESH_TOKEN_IDLE_TTL_SEC = 14 * 86_400;
 // and the same code is deployed under more than one hostname. The resource
 // must equal what existing grants carry (the URL the client connected to), or
 // every connected client is signed out — see the library's migration-1.x.md.
+// serve(path, { binding }) — agents/mcp defaults binding to "MCP_OBJECT", but
+// our DO binding (wrangler.jsonc) is named TODO_INDEX. Without this arg the SDK
+// throws on first /mcp request: env.MCP_OBJECT is undefined.
+const mcpHandler = MSToDoMCP.serve(MCP_PATH, { binding: "TODO_INDEX" });
+
+// The grant check for MCP traffic runs here, on every request, against the
+// props of the token presented on that request (ctx.props). It can't live only
+// in the session Durable Object: McpAgent keeps the props of the token that
+// started the session and never refreshes them. A refused grant gets a 401
+// invalid_token, so the client refreshes — which tokenExchangeCallback then
+// refuses — and starts a fresh authorization.
+const apiHandler = {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext & { props?: unknown }): Promise<Response> {
+    const refused = await refuseMcpRequest(env, ctx.props as Partial<Props> | undefined);
+    return refused ?? mcpHandler.fetch(req, env, ctx);
+  },
+};
+
 export function buildOAuthProvider(origin: string): OAuthProvider<Env> {
   return new OAuthProvider<Env>({
     apiRoute: MCP_PATH,
-    // serve(path, { binding }) — agents/mcp defaults binding to "MCP_OBJECT",
-    // but our DO binding (wrangler.jsonc) is named TODO_INDEX. Without this
-    // arg the SDK throws on first /mcp request: env.MCP_OBJECT is undefined.
-    apiHandler: MSToDoMCP.serve(MCP_PATH, { binding: "TODO_INDEX" }) as never,
+    apiHandler: apiHandler as never,
     defaultHandler: AuthHandler as never,
     authorizeEndpoint: "/authorize",
     tokenEndpoint: "/token",

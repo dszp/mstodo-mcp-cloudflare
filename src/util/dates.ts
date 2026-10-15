@@ -36,9 +36,12 @@ function zoneOffsetMs(utcMs: number, timeZone: string): number {
 }
 
 // The UTC instant at which the wall clock in `timeZone` reads `wall`
-// (YYYY-MM-DDTHH:MM[:SS[.fff]]). Two passes settle the offset across a DST
-// transition; a wall time inside a spring-forward gap resolves to the later
-// offset, which is what calendar apps do.
+// (YYYY-MM-DDTHH:MM[:SS[.fff]]). Tries the zone's offset from a day before and
+// a day after (they differ only around a DST change) and keeps the candidate
+// whose offset is self-consistent. A wall time that happens twice (fall back)
+// resolves to the first occurrence; one that never happens (spring forward)
+// resolves past the jump — 02:30 on the change day reads as 03:30 — which is
+// what calendar apps do.
 export function zonedWallTimeToUtc(wall: string, timeZone: string): number | null {
   const m = NAIVE_DATETIME.exec(wall);
   if (!m) return null;
@@ -49,8 +52,14 @@ export function zonedWallTimeToUtc(wall: string, timeZone: string): number | nul
   if (check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d || h > 23 || mi > 59 || s > 59) {
     return null;
   }
-  const first = asUtc - zoneOffsetMs(asUtc, timeZone);
-  return asUtc - zoneOffsetMs(first, timeZone);
+  const before = zoneOffsetMs(asUtc - 86_400_000, timeZone);
+  const after = zoneOffsetMs(asUtc + 86_400_000, timeZone);
+  const valid = [before, after]
+    .map((offset) => asUtc - offset)
+    .filter((t) => asUtc - zoneOffsetMs(t, timeZone) === t);
+  if (valid.length > 0) return Math.min(...valid);
+  // In the gap: apply the pre-change offset, which lands just past the jump.
+  return asUtc - before;
 }
 
 // Absolute instant for a date/datetime string, or null if unparseable.
