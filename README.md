@@ -129,6 +129,24 @@ worth stating in one place:
   `mail`/`userPrincipalName` must equal the `OWNER_EMAIL` secret, and a non-matching identity is
   **403'd before any token is stored**. A missing or mistyped `OWNER_EMAIL` makes the check fail
   for *everyone* — it locks the owner out, it never opens access.
+- **Per-client consent.** Any MCP client can register itself (dynamic client registration), so
+  `/authorize` shows a consent page naming the client and the address its access will be sent to,
+  and starts the Microsoft sign-in only after you approve. Without it, one click on a crafted
+  `/authorize` link could hand a grant to someone else's client, because Microsoft sign-in is often
+  silent (the MCP "confused deputy" problem). The page can't be framed or replayed from another
+  browser. Approving with **Don't ask again** skips it for that client in that browser for 30 days.
+- **Revocable grants.** Every MCP grant carries the auth epoch it was issued under, and every tool
+  call and token refresh checks it. Calling `revoke_all_connections`, or signing in as a different
+  Microsoft account, changes the epoch and disconnects every client at once. Grants also expire
+  after 14 days unused, and after 90 days regardless.
+- **Microsoft access gates cached data too.** If Microsoft refuses the stored refresh token
+  (revoked in Entra, expired) or a Conditional Access policy demands a fresh sign-in, every tool —
+  including the ones that read only the local cache — returns `reauth_required` until you reconnect.
+  A Conditional Access claims challenge is passed to Microsoft on that sign-in.
+- **Tokens encrypted at rest.** The Microsoft tokens in KV are AES-GCM encrypted with a key derived
+  from the `MS_CLIENT_SECRET` secret, so read access to the KV namespace alone doesn't yield a
+  usable refresh token. Rotating the client secret makes the stored tokens unreadable; reconnect
+  once afterwards.
 - **Host-pinning before authorization.** Every Graph and Substrate URL is pinned to its expected
   host *before* the Bearer token is attached, so a malicious `@odata.nextLink` can't redirect an
   authenticated request and exfiltrate the token. Tokens travel only in the `Authorization`
@@ -136,16 +154,17 @@ worth stating in one place:
 - **One token refresher.** The singleton `TodoIndex` Durable Object is the sole caller of the
   Microsoft token endpoint; concurrent sessions funnel through a single refresh chain, so there
   are no refresh storms and no token-handling logic duplicated across sessions.
-- **Config is owner-only, not an untrusted surface.** The regex rules in `config:lists` /
-  `config:link_rules` are writable only by the authenticated owner (via MCP tools behind the gate
-  above), so user-supplied-regex concerns like ReDoS aren't in the threat model. The link engine
-  additionally bounds work with an 8 KB body cap and a 50 ms budget per task.
+- **Regex config is screened.** The patterns in `config:lists` / `config:link_rules` are writable
+  only through the owner's MCP tools, and `set_link_rules` / `set_list_config` also refuse patterns
+  over 256 characters or with a repeated group that contains another repeat (`(a+)+`), the usual
+  shape of catastrophic backtracking. At run time, link rules read at most 8 KB of a task and the
+  list classifier at most 256 characters of a list name.
 - **Secret-less web surfaces.** `/upload` and `/download` authorize with single-use
   [capability tokens](#web-upload--upload) — an unguessable random id stored in KV under a TTL,
   scoped to one task/attachment — so there is no signing key or shared secret to configure or leak.
 - **Logs carry no secrets.** Query strings (which can hold delta tokens) are redacted, Microsoft
-  error bodies are logged as structured fields rather than raw text, and the only PII in logs is
-  the owner's own address in the identity-change line.
+  error bodies are logged as structured fields rather than raw text, failed tool calls log only
+  their reason code, and a rejected sign-in logs only the other account's email domain.
 
 ## Configuration
 
@@ -237,12 +256,14 @@ npx wrangler kv key delete --binding=TODO_CACHE --remote tokens:owner
 # the next time you sign in — useful when you want to test the wipe).
 npx wrangler kv key delete --binding=TODO_CACHE --remote identity:owner
 
-# Wipe all Claude.ai-side OAuth grants (DCR sessions) — forces every
-# previously-paired Claude.ai client to re-add this MCP from scratch:
+# Wipe all MCP-side OAuth grants (DCR sessions) — forces every
+# previously-paired MCP client to re-add this server from scratch:
 npx wrangler kv key list --binding=OAUTH_KV --remote \
   | jq -r '.[].name' \
   | xargs -I {} npx wrangler kv key delete --binding=OAUTH_KV --remote {}
 ```
+
+To disconnect every MCP client without touching KV, call the `revoke_all_connections` tool from any connected client. It invalidates every grant at once, including the caller's; each client then reconnects and approves access again.
 
 If you also want Microsoft to re-prompt for consent (rather than silently re-issuing tokens because consent is already on file), either revoke the app from the user's account permissions page on the M365 side, or — once we expose the option — pass `&prompt=consent` to `/authorize`.
 
@@ -303,7 +324,7 @@ storing the new tokens, never leaving a half-wiped mix):
    `no_sync`, `sync_flagged_emails`, `config:link_rules`, and `config:attachments` are
    **preserved** (account-independent intent).
 
-`OAUTH_KV` grants are **not** touched by the auto-wipe — your Claude.ai pairing keeps working across an MS-account swap. If you want the Claude.ai client to re-authenticate from scratch too, run the OAUTH_KV wipe in the soft-reset block above.
+The auto-wipe also revokes every MCP grant (it bumps the auth epoch — see [Security model](#security-model)), so an MCP client paired with the previous account can't read the new account's data. Each client reconnects once.
 
 When the auto-wipe fires, a structured log line is emitted:
 

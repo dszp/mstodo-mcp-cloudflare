@@ -44,7 +44,10 @@ export async function instrument(
     const res = await fn();
     const durationMs = Date.now() - started;
     if (res.isError) {
-      log.info("tool", { name, durationMs, ok: false, ...extractFailureFields(res) });
+      // Only the reason code: failure payloads can carry Graph error bodies and
+      // echoed user input (a task title in a 400 detail, an invalid date value).
+      const { reason } = extractFailureFields(res);
+      log.info("tool", { name, durationMs, ok: false, reason });
     } else {
       log.debug("tool", { name, durationMs, ok: true });
     }

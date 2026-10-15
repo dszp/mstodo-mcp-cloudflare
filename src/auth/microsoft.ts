@@ -1,6 +1,7 @@
 import { log } from "../log";
 import { OWNER_DO_NAME } from "../cache/sql";
 import { loadListsConfig, storeListsConfig } from "../config/loader";
+import { isSealed, seal, unseal } from "./crypto";
 
 // Microsoft Entra v2 OAuth — pure helpers. The handler (auth/handler.ts) owns
 // routing + KV state-bag lifecycle; this module owns the protocol shape and
@@ -42,10 +43,6 @@ export function authScopes(env: Env): string {
 // the agent (decides whether to delegate) and the TodoIndex DO (sole refresher).
 export const REFRESH_SKEW_MS = 5 * 60 * 1000;
 
-// State-bag rows under OAUTH_KV — one per in-flight authorize round.
-export const STATE_KEY_PREFIX = "auth:state:";
-export const STATE_TTL_SEC = 600;
-
 export interface StoredTokens {
   access_token: string;
   refresh_token: string;
@@ -60,13 +57,6 @@ export interface TokenResponse {
   expires_in: number;
   access_token: string;
   refresh_token?: string;
-}
-
-export interface AuthStateRow {
-  // Base64-encoded JSON of the workers-oauth-provider parseAuthRequest result.
-  oauth_req_info_b64: string;
-  code_verifier: string;
-  created_at: number;
 }
 
 // PKCE — Entra requires S256 for confidential web apps, but accepts plain.
@@ -89,12 +79,6 @@ export async function computeCodeChallenge(verifier: string): Promise<string> {
   const enc = new TextEncoder().encode(verifier);
   const digest = await crypto.subtle.digest("SHA-256", enc);
   return base64UrlEncode(new Uint8Array(digest));
-}
-
-export function generateStateToken(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return base64UrlEncode(bytes);
 }
 
 const MS_LOGIN_HOST = "login.microsoftonline.com";
@@ -127,7 +111,15 @@ function assertTokenEndpoint(url: string): void {
 
 export function buildAuthorizeUrl(
   env: Env,
-  opts: { redirectUri: string; state: string; codeChallenge: string; prompt?: "consent" | "login" | "select_account" | "none" },
+  opts: {
+    redirectUri: string;
+    state: string;
+    codeChallenge: string;
+    prompt?: "consent" | "login" | "select_account" | "none";
+    // Conditional Access claims challenge (decoded JSON) from a Graph/EXO 401.
+    // Entra needs it on the next sign-in to satisfy the policy that issued it.
+    claims?: string;
+  },
 ): string {
   const u = new URL(`${tenantBase(env)}/authorize`);
   u.searchParams.set("client_id", env.MS_CLIENT_ID);
@@ -139,6 +131,7 @@ export function buildAuthorizeUrl(
   u.searchParams.set("code_challenge", opts.codeChallenge);
   u.searchParams.set("code_challenge_method", "S256");
   if (opts.prompt) u.searchParams.set("prompt", opts.prompt);
+  if (opts.claims) u.searchParams.set("claims", opts.claims);
   return u.toString();
 }
 
@@ -256,29 +249,50 @@ export function tokensFromResponse(
   };
 }
 
+// Tokens are stored sealed (AES-GCM, key derived from MS_CLIENT_SECRET — see
+// auth/crypto.ts), so read access to the KV namespace alone doesn't yield a
+// usable refresh token. A plaintext record written before sealing existed is
+// accepted once and re-stored sealed. A sealed record that no longer decrypts
+// (the client secret was rotated) reads as "no tokens": the owner re-authorizes.
 export async function loadTokens(env: Env): Promise<StoredTokens | null> {
-  const raw = await env.TODO_CACHE.get(TOKENS_KEY, "json");
-  return (raw as StoredTokens | null) ?? null;
+  const raw = await env.TODO_CACHE.get(TOKENS_KEY, "text");
+  if (raw === null) return null;
+  if (isSealed(raw)) {
+    try {
+      return JSON.parse(await unseal(env, raw, TOKENS_KEY)) as StoredTokens;
+    } catch {
+      log.warn("tokens_unseal_failed", {
+        hint: "Stored Microsoft tokens no longer decrypt (MS_CLIENT_SECRET rotated?). Re-run /authorize.",
+      });
+      return null;
+    }
+  }
+  const legacy = JSON.parse(raw) as StoredTokens;
+  await storeTokens(env, legacy);
+  return legacy;
 }
 
 export async function storeTokens(env: Env, tokens: StoredTokens): Promise<void> {
-  await env.TODO_CACHE.put(TOKENS_KEY, JSON.stringify(tokens));
+  await env.TODO_CACHE.put(TOKENS_KEY, await seal(env, JSON.stringify(tokens), TOKENS_KEY));
 }
 
-// State-bag helpers — auth/handler.ts persists oauthReqInfo + codeVerifier
-// across the Microsoft round-trip. Keyed by the opaque state token sent to
-// Microsoft. One-shot: callback consumes and deletes.
-export async function putAuthState(env: Env, stateToken: string, row: AuthStateRow): Promise<void> {
-  await env.OAUTH_KV.put(STATE_KEY_PREFIX + stateToken, JSON.stringify(row), {
-    expirationTtl: STATE_TTL_SEC,
-  });
-}
-
-export async function takeAuthState(env: Env, stateToken: string): Promise<AuthStateRow | null> {
-  const key = STATE_KEY_PREFIX + stateToken;
-  const row = await env.OAUTH_KV.get(key, "json");
-  if (row) await env.OAUTH_KV.delete(key);
-  return (row as AuthStateRow | null) ?? null;
+// Entra token-endpoint errors that mean the refresh token can't be used again
+// without the owner signing in: revoked or expired grant (invalid_grant), a
+// Conditional Access requirement such as MFA or a compliant device
+// (interaction_required), or withdrawn consent (consent_required). Anything
+// else — 5xx, throttling, network — is transient and must not force re-auth.
+export function reauthReasonFromTokenError(e: unknown): string | null {
+  if (!(e instanceof TokenExchangeError)) return null;
+  let parsed: { error?: unknown; error_codes?: unknown };
+  try {
+    parsed = JSON.parse(e.detail) as typeof parsed;
+  } catch {
+    return null;
+  }
+  const code = typeof parsed.error === "string" ? parsed.error : "";
+  if (!["invalid_grant", "interaction_required", "consent_required"].includes(code)) return null;
+  const aadsts = Array.isArray(parsed.error_codes) ? parsed.error_codes.join(",") : "";
+  return aadsts ? `${code} (AADSTS${aadsts})` : code;
 }
 
 // Owner-identity gate. The /me response shape varies — personal-MSA-in-tenant
@@ -383,9 +397,10 @@ export async function storeIdentity(env: Env, ident: OwnerIdentity): Promise<voi
 // that state spans two stores: the TODO_CACHE KV keys (tokens + identity) and
 // the TodoIndex DO (the previous identity's tasks/lists/sync cursors — these
 // replaced the old lists:all / tasks:{listId} / etag:{listId} KV keys). Both
-// are cleared here so two accounts' data can never mix. OAUTH_KV grants
-// (Claude.ai-side DCR sessions) are NOT touched here — see README "Reset"
-// section for manual cleanup.
+// are cleared here so two accounts' data can never mix. resetIdentity() also
+// bumps the auth epoch, which invalidates every outstanding MCP grant (each
+// grant carries the epoch it was issued under — see auth/oauth.ts), so an MCP
+// client paired with the previous account can't read the new account's data.
 //
 // Ordering is load-bearing (H3, fail-closed):
 //   1. Wipe the DO first. If resetIdentity() throws, nothing else has run, so

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { log } from "../log";
+import { type ClaimsChallengeSink, parseClaimsChallenge, ReauthRequiredError } from "../auth/reauth";
 
 // Phase 2 step 3 — typed Microsoft Graph wrapper.
 // Phase 3 step 1 — generalized to support mutations (POST, PATCH, DELETE).
@@ -8,7 +9,9 @@ import { log } from "../log";
 //   - Attach Bearer tokens via an injected TokenProvider (decouples GraphClient
 //     from the McpAgent class — the agent implements this interface).
 //   - On 401, force one refresh + retry once. Single-flight discipline lives on
-//     the TokenProvider (the McpAgent), not here.
+//     the TokenProvider (the McpAgent), not here. A 401 that carries a
+//     Conditional Access claims challenge is NOT retried: a refresh can't satisfy
+//     it, so the challenge goes to the provider and ReauthRequiredError is thrown.
 //   - On 429, honor Retry-After (clamped to a Worker-friendly ceiling) and retry
 //     once. Beyond the budget, surface as GraphError(429).
 //   - On 5xx and any other non-2xx/304, throw GraphError carrying the status +
@@ -22,7 +25,7 @@ import { log } from "../log";
 //     optional If-Match), deleteResource (DELETE, returns 204, optional If-Match).
 //     Content-Type: application/json is added automatically when a body is present.
 
-export interface TokenProvider {
+export interface TokenProvider extends ClaimsChallengeSink {
   // Return a valid access token, refreshing proactively if near expiry.
   // Throws if no tokens are stored (e.g. owner has never visited /authorize).
   getAccessToken(): Promise<string>;
@@ -184,6 +187,12 @@ export class GraphClient {
         headers["content-type"] = "application/json";
       }
       const res = await fetch(url, { method, headers, body });
+      const claims = parseClaimsChallenge(res);
+      if (claims) {
+        log.warn("graph_claims_challenge", { url: redactUrl(url) });
+        await this.tokens.reportClaimsChallenge?.(claims);
+        throw new ReauthRequiredError("claims_challenge");
+      }
       if (res.status === 401 && !retried401) {
         retried401 = true;
         log.warn("graph_401_refresh", { url: redactUrl(url) });

@@ -1,4 +1,8 @@
+import { AuthorizationError, type AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { log } from "../log";
+import { OWNER_DO_NAME } from "../cache/sql";
+import { consentRememberSecret } from "./crypto";
+import { consentPage, errorPage } from "./consent-page";
 import {
   buildAnchorMailbox,
   buildAuthorizeUrl,
@@ -7,50 +11,83 @@ import {
   exchangeCode,
   fetchMe,
   generateCodeVerifier,
-  generateStateToken,
   isOwner,
   loadIdentity,
-  putAuthState,
   storeIdentity,
   storeTokens,
-  takeAuthState,
   tokensFromResponse,
   wipeIdentityScopedState,
   TokenExchangeError,
-  type AuthStateRow,
 } from "./microsoft";
+
+// The authorization flow, in three requests:
+//
+//   GET  /authorize                — validate the MCP client's request and show
+//                                    the per-client consent page (skipped when
+//                                    this browser approved this client before).
+//   POST /authorize                — the owner approved: only now start the
+//                                    Microsoft sign-in.
+//   GET  /auth/microsoft/callback  — exchange Microsoft's code, apply the
+//                                    OWNER_EMAIL gate, issue the MCP grant.
+//
+// Consent before the upstream redirect is the MCP confused-deputy mitigation:
+// dynamic registration lets anyone register a client, and Microsoft sign-in is
+// often silent, so without this page one click on a crafted /authorize link
+// would hand a full grant to whatever redirect URI the registrant chose. The
+// library's consent/upstream helpers bind each step to this browser with a
+// __Host- cookie and keep the authorization request server-side, so neither the
+// form nor Microsoft's `state` can be replayed from elsewhere.
 
 const AUTHORIZE_PATH = "/authorize";
 const CALLBACK_PATH = "/auth/microsoft/callback";
+// The consent form is a handle, a decision and a checkbox.
+const MAX_CONSENT_FORM_BYTES = 8 * 1024;
 
-function html(body: string, status = 200): Response {
-  return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
-}
-
-function escapeHtml(s: string): string {
-  const map: Record<string, string> = {
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  };
-  return s.replace(/[&<>"']/g, (c) => map[c]);
+interface UpstreamData {
+  verifier: string;
 }
 
 function callbackUrlFor(req: Request): string {
   return `${new URL(req.url).origin}${CALLBACK_PATH}`;
 }
 
+function ownerIndex(env: Env) {
+  return env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName(OWNER_DO_NAME));
+}
+
+// Remembered consent is per browser; the subject is fixed because this server
+// has exactly one user, and the owner isn't known until after Microsoft sign-in.
+async function rememberOptions(env: Env) {
+  return { secret: await consentRememberSecret(env), subject: "owner" };
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
-
-    if (url.pathname === AUTHORIZE_PATH && req.method === "GET") {
-      return handleAuthorize(req, env);
-    }
-    if (url.pathname === CALLBACK_PATH && req.method === "GET") {
-      return handleCallback(req, env, url);
+    try {
+      if (url.pathname === AUTHORIZE_PATH && req.method === "GET") {
+        return await handleAuthorize(req, env);
+      }
+      if (url.pathname === AUTHORIZE_PATH && req.method === "POST") {
+        return await handleConsentDecision(req, env);
+      }
+      if (url.pathname === CALLBACK_PATH && req.method === "GET") {
+        return await handleCallback(req, env, url);
+      }
+    } catch (e) {
+      // AuthorizationError with redirectTo: the client and its redirect URI were
+      // validated, so the error can go back to the client. Without it, the
+      // request isn't trusted enough to redirect anywhere: render it here.
+      if (e instanceof AuthorizationError) {
+        log.warn("authorize_error", { code: e.code, description: e.description });
+        if (e.redirectTo) return Response.redirect(e.redirectTo, 302);
+        return errorPage(
+          "Sign-in couldn't continue",
+          `${e.description} Start connecting again from your MCP client.`,
+          400,
+        );
+      }
+      throw e;
     }
 
     log.debug("auth_path_unknown", { method: req.method, path: url.pathname });
@@ -59,73 +96,98 @@ export default {
 };
 
 async function handleAuthorize(req: Request, env: Env): Promise<Response> {
-  const oauthReqInfo = await env.OAUTH_PROVIDER.parseAuthRequest(req);
+  const oauth = env.OAUTH_PROVIDER;
+  const authRequest = await oauth.parseAuthRequest(req);
 
-  // Phase-0.5a advisor carry-forward #2 — sanity-check that the parsed shape
-  // round-trips losslessly through base64(JSON). If `lossless` ever logs false,
-  // some field is a non-JSON-serializable instance (Headers/URL/etc) and
-  // completeAuthorization will reject the round-tripped value at the callback.
-  const oauthReqInfoB64 = btoa(JSON.stringify(oauthReqInfo));
-  const roundTrip = JSON.parse(atob(oauthReqInfoB64));
-  log.debug("oauth_req_round_trip", {
-    keys: Object.keys(oauthReqInfo),
-    lossless: JSON.stringify(oauthReqInfo) === JSON.stringify(roundTrip),
+  if (await oauth.isConsentRemembered(req, authRequest, await rememberOptions(env))) {
+    log.info("consent_remembered", { client_id: authRequest.clientId });
+    return startMicrosoftSignIn(req, env, authRequest, new Headers());
+  }
+
+  // describeConsent first: a failed client lookup then leaves nothing in KV.
+  const details = await oauth.describeConsent(authRequest);
+  const consent = await oauth.beginConsent(authRequest);
+  consent.headers.set("content-type", "text/html; charset=utf-8");
+  return new Response(consentPage(details, consent.handle), { headers: consent.headers });
+}
+
+async function handleConsentDecision(req: Request, env: Env): Promise<Response> {
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (!Number.isFinite(declared) || declared > MAX_CONSENT_FORM_BYTES) {
+    return errorPage("Request too large", "The consent form submission was too large.", 413);
+  }
+  const form = await req.formData();
+  const handle = String(form.get("handle") ?? "");
+  const oauth = env.OAUTH_PROVIDER;
+
+  if (form.get("decision") !== "approve") {
+    const denied = await oauth.denyConsent(req, handle);
+    log.info("consent_denied", { client_id: denied.request.clientId });
+    return new Response(null, { status: 302, headers: denied.headers });
+  }
+
+  const approved = await oauth.approveConsent(
+    req,
+    handle,
+    form.get("remember") === "1" ? { remember: await rememberOptions(env) } : {},
+  );
+  log.info("consent_approved", { client_id: approved.request.clientId });
+  return startMicrosoftSignIn(req, env, approved.request, approved.headers);
+}
+
+async function startMicrosoftSignIn(
+  req: Request,
+  env: Env,
+  authRequest: AuthRequest,
+  headers: Headers,
+): Promise<Response> {
+  const verifier = generateCodeVerifier();
+  const upstream = await env.OAUTH_PROVIDER.beginUpstream(authRequest, {
+    data: { verifier } satisfies UpstreamData,
+    headers,
   });
-
-  const codeVerifier = generateCodeVerifier();
-  const codeChallenge = await computeCodeChallenge(codeVerifier);
-  const stateToken = generateStateToken();
-  const stateRow: AuthStateRow = {
-    oauth_req_info_b64: oauthReqInfoB64,
-    code_verifier: codeVerifier,
-    created_at: Date.now(),
-  };
-  await putAuthState(env, stateToken, stateRow);
-
+  // A pending Conditional Access claims challenge has to ride on the next
+  // Microsoft sign-in, or Entra issues tokens that fail the same way.
+  const { reauth } = await ownerIndex(env).authState();
   const authorizeUrl = buildAuthorizeUrl(env, {
     redirectUri: callbackUrlFor(req),
-    state: stateToken,
-    codeChallenge,
+    state: upstream.state,
+    codeChallenge: await computeCodeChallenge(verifier),
+    claims: reauth?.claims,
   });
-  log.debug("authorize_redirect", { stateTokenPrefix: stateToken.slice(0, 8) });
-  return Response.redirect(authorizeUrl, 302);
+  upstream.headers.set("location", authorizeUrl);
+  return new Response(null, { status: 302, headers: upstream.headers });
 }
 
 async function handleCallback(req: Request, env: Env, url: URL): Promise<Response> {
-  const code = url.searchParams.get("code");
-  const stateToken = url.searchParams.get("state");
-  const oauthError = url.searchParams.get("error");
+  // Recover the approved MCP request and our PKCE verifier. Refused unless this
+  // browser holds the binding cookie set when the sign-in started (one use).
+  const { request: authRequest, data, headers } =
+    await env.OAUTH_PROVIDER.finishUpstream<UpstreamData>(req);
 
+  const oauthError = url.searchParams.get("error");
   if (oauthError) {
     const desc = url.searchParams.get("error_description") ?? "";
     log.warn("oauth_callback_error", { error: oauthError, description: desc.slice(0, 200) });
-    return html(
-      `<h1>Microsoft sign-in failed</h1><p><code>${escapeHtml(oauthError)}</code>: ${escapeHtml(desc)}</p>`,
-      400,
-    );
+    return errorPage("Microsoft sign-in failed", `${oauthError}: ${desc}`, 400);
   }
-  if (!code || !stateToken) {
-    log.warn("oauth_callback_missing_params", { hasCode: !!code, hasState: !!stateToken });
-    return html("<h1>Invalid callback</h1>", 400);
-  }
-
-  const state = await takeAuthState(env, stateToken);
-  if (!state) {
-    log.warn("oauth_state_expired_or_missing", { stateTokenPrefix: stateToken.slice(0, 8) });
-    return html("<h1>State expired or unknown</h1><p>Restart the authorization flow.</p>", 400);
+  const code = url.searchParams.get("code");
+  if (!code) {
+    log.warn("oauth_callback_missing_code", {});
+    return errorPage("Invalid callback", "Microsoft didn't return an authorization code.", 400);
   }
 
   let token;
   try {
     token = await exchangeCode(env, {
       code,
-      codeVerifier: state.code_verifier,
+      codeVerifier: data.verifier,
       redirectUri: callbackUrlFor(req),
     });
   } catch (e) {
     if (e instanceof TokenExchangeError) {
       log.warn("code_exchange_failed", { reason: e.reason });
-      return html(`<h1>Token exchange failed</h1><p><code>${escapeHtml(e.reason)}</code></p>`, 502);
+      return errorPage("Token exchange failed", e.reason, 502);
     }
     throw e;
   }
@@ -133,51 +195,42 @@ async function handleCallback(req: Request, env: Env, url: URL): Promise<Respons
   // OWNER_EMAIL gate — runs AFTER code exchange (we need an access_token to
   // hit /me) but BEFORE storeTokens / completeAuthorization. A non-owner that
   // consented at Microsoft must not leave any persistent state in the Worker
-  // and must not receive a Claude.ai-side token.
+  // and must not receive an MCP grant.
   let me;
   try {
     me = await fetchMe(token.access_token);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log.warn("me_fetch_failed", { message });
-    return html("<h1>Identity probe failed</h1><p>Could not contact Microsoft Graph.</p>", 502);
+    return errorPage("Identity probe failed", "Could not contact Microsoft Graph.", 502);
   }
   if (!isOwner(env, me)) {
-    log.warn("owner_gate_rejected", {
-      attempted_mail: me.mail,
-      attempted_upn: me.userPrincipalName,
-    });
-    return html(
-      `<h1>Not authorized</h1>
-       <p>This MCP server is configured for a single owner. Signed in as
-       <code>${escapeHtml(me.userPrincipalName)}</code>.</p>`,
+    // Log only the domain: the full address belongs to someone who isn't the
+    // owner and has no reason to be in this Worker's logs.
+    const attempted = me.mail ?? me.userPrincipalName ?? "";
+    log.warn("owner_gate_rejected", { attempted_domain: attempted.split("@")[1] ?? null });
+    return errorPage(
+      "Not authorized",
+      `This MCP server is configured for a single owner. You signed in as ${me.userPrincipalName}.`,
       403,
     );
   }
 
   // Identity-change auto-wipe: if the underlying Microsoft account differs
-  // from the previously seen one, the per-identity cache (tokens, eventually
-  // lists/tasks/delta — see microsoft.ts wipeIdentityScopedState) is from a
-  // different person's data. Wipe before storing the new tokens so we never
-  // mix two accounts' state. Note: this only wipes TODO_CACHE; OAUTH_KV
-  // grants (Claude.ai-side DCR sessions) are left alone — see README for
-  // manual cleanup if you want a fresh Claude.ai pairing.
+  // from the previously seen one, the per-identity cache is from a different
+  // person's data. Wipe before storing the new tokens so two accounts' state
+  // never mixes. The wipe also bumps the auth epoch, which revokes every MCP
+  // grant paired with the previous account.
+  const index = ownerIndex(env);
   const prevIdentity = await loadIdentity(env);
   const identityChanged = prevIdentity !== null && prevIdentity.id !== me.id;
   if (identityChanged) {
-    log.warn("identity_change_wipe", {
-      prev_id: prevIdentity.id,
-      prev_mail: prevIdentity.mail,
-      new_id: me.id,
-      new_mail: me.mail,
-      hint: "Per-identity TODO_CACHE wiped. Claude.ai grants in OAUTH_KV remain — clear manually via README §Reset if you want fresh DCR sessions.",
-    });
+    log.warn("identity_change_wipe", { prev_id: prevIdentity.id, new_id: me.id });
     await wipeIdentityScopedState(env);
   }
 
   const now = Date.now();
-  const stored = tokensFromResponse(token, token.refresh_token ?? "", now);
-  await storeTokens(env, stored);
+  await storeTokens(env, tokensFromResponse(token, token.refresh_token ?? "", now));
 
   // x-anchormailbox (OID:{oid}@{tid}) for the Substrate My Day endpoint. oid =
   // Graph /me.id; tid is not in /me, so read it from our own access token's
@@ -196,20 +249,19 @@ async function handleCallback(req: Request, env: Env, url: URL): Promise<Respons
     last_seen: now,
     anchorMailbox,
   });
-  log.info("owner_authenticated", {
-    id: me.id,
-    displayName: me.displayName,
-    identity_changed: identityChanged,
-  });
 
-  const oauthReqInfo = JSON.parse(atob(state.oauth_req_info_b64));
+  // Fresh Microsoft tokens satisfy any pending re-auth; resume syncing.
+  await index.clearReauth();
+  const { epoch } = await index.authState();
+  log.info("owner_authenticated", { id: me.id, identity_changed: identityChanged });
+
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-    request: oauthReqInfo,
+    request: authRequest,
     userId: "owner",
     metadata: { label: "owner" },
-    scope: oauthReqInfo.scope,
-    props: { user: "owner" },
+    scope: authRequest.scope,
+    props: { user: "owner", epoch, authorized_at: now },
   });
-
-  return Response.redirect(redirectTo, 302);
+  headers.set("location", redirectTo);
+  return new Response(null, { status: 302, headers });
 }

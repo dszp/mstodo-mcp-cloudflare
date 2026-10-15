@@ -32,6 +32,8 @@ import {
 // PER_FILE_MAX_BYTES (Graph's 25 MiB ceiling); this bounds a multi-file batch so
 // the Worker doesn't buffer an unreasonable amount in memory.
 const TOTAL_BATCH_MAX_BYTES = 60 * 1024 * 1024;
+// Multipart boundaries, part headers and the `t` field on top of the file bytes.
+const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 
 // Above this *raw uploaded* size, exact-content dedup would mean downloading the
 // whole existing attachment to hash it — impractical. Larger uploads fall back to
@@ -134,6 +136,24 @@ export async function handleUpload(req: Request, env: Env): Promise<Response | n
   const contentType = req.headers.get("content-type")?.trimStart().toLowerCase() ?? "";
   if (!contentType.startsWith("multipart/form-data")) {
     return json({ ok: false, reason: "unsupported_content_type" }, 415);
+  }
+
+  // Refuse oversized or unauthenticated bodies BEFORE buffering them:
+  // formData() reads the whole request into memory. A declared length must fit
+  // the largest legal batch plus multipart framing (a body sent without one is
+  // still bounded by the platform's request limit), and when the link token
+  // rides in the query string (as the upload page sends it) it is checked first.
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (declared > TOTAL_BATCH_MAX_BYTES + MULTIPART_OVERHEAD_BYTES) {
+    return json({ ok: false, reason: "too_large_batch", max: TOTAL_BATCH_MAX_BYTES }, 413);
+  }
+  const queryToken = url.searchParams.get("t");
+  if (queryToken) {
+    const early = await lookupUploadCapability(env, queryToken);
+    if (!early.ok) {
+      log.info("upload_auth_failed", { reason: early.reason });
+      return json({ ok: false, reason: early.reason }, statusForReason(early.reason));
+    }
   }
 
   let form: FormData;

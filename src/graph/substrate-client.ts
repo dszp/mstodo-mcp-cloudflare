@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { log } from "../log";
+import { type ClaimsChallengeSink, parseClaimsChallenge, ReauthRequiredError } from "../auth/reauth";
 
 // Microsoft To Do "My Day" — thin client for the undocumented Substrate endpoint
 // (https://substrate.office.com/todob2/api/v1/). My Day membership is driven by
@@ -15,7 +16,7 @@ import { log } from "../log";
 // the Outlook REST shape (PascalCase: Id, Subject, CommittedDay, …), distinct
 // from Graph's camelCase todoTask, so we model it separately and leniently.
 
-export interface SubstrateTokenProvider {
+export interface SubstrateTokenProvider extends ClaimsChallengeSink {
   // A valid EXO-audience (https://outlook.office.com) access token, minted on
   // demand. Throws "my_day_unavailable" if the EXO scope isn't consented.
   getSubstrateAccessToken(): Promise<string>;
@@ -384,6 +385,13 @@ export class SubstrateClient {
       if (body !== undefined) headers["content-type"] = "application/json";
 
       const res = await fetch(url, { method, headers, body });
+      // Conditional Access challenge: a re-mint can't satisfy it (see GraphClient).
+      const claims = parseClaimsChallenge(res);
+      if (claims) {
+        log.warn("substrate_claims_challenge", { url: redactSubstrateUrl(url) });
+        await this.tokens.reportClaimsChallenge?.(claims);
+        throw new ReauthRequiredError("claims_challenge");
+      }
       if (res.status === 401 && !retried401) {
         retried401 = true;
         log.warn("substrate_401_refresh", { url: redactSubstrateUrl(url) });

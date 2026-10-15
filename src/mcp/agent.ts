@@ -6,6 +6,8 @@ import type { Props } from "../types";
 import { errResponse, instrument, type McpResponse } from "../observability/instrument";
 import { log } from "../log";
 import { fetchMe, loadIdentity, loadTokens, myDayEnabled, REFRESH_SKEW_MS } from "../auth/microsoft";
+import { grantRefusal, refusalDescription } from "../auth/grant";
+import { isReauthRequired } from "../auth/reauth";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import {
   SubstrateClient,
@@ -25,7 +27,7 @@ import {
 import type { TodoIndex } from "../cache/index-do";
 import { mapPool } from "../graph/concurrency";
 import { VERSION } from "../version";
-import { parseDateInput } from "../util/dates";
+import { parseDateInput, toGraphDateTime } from "../util/dates";
 import {
   createDownloadCapability,
   createUploadCapability,
@@ -54,6 +56,7 @@ import { runLinkRules, type LinkRuleMatch } from "../config/link-rules-engine";
 import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema, ListsConfigSchema } from "../config/schemas";
 import { classifyList, pinClassifications, stripEmoji } from "../config/classifier";
 import { resolveListId } from "../config/aliases";
+import { patternProblem } from "../config/regex-safety";
 import { resolveListScope, resolveStatusFilter } from "../config/query-scope";
 import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
 import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
@@ -74,6 +77,49 @@ const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
 // runs UTC, so when the caller omits `date` we compute "today" in the Worker's
 // configured TIMEZONE (an IANA name). en-CA formats as YYYY-MM-DD.
 const MY_DAY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Graph dateTimeTimeZone fields for the task date params. undefined = not
+// supplied (omitted), null = clear (sent as null). Naive values are read in the
+// owner's TIMEZONE — see util/dates.ts.
+const GRAPH_DATE_KEYS = {
+  due: "dueDateTime",
+  reminder: "reminderDateTime",
+  start: "startDateTime",
+} as const;
+
+function graphDateFields(
+  timeZone: string,
+  input: Partial<Record<keyof typeof GRAPH_DATE_KEYS, string | null | undefined>>,
+): { ok: true; fields: Record<string, unknown> } | { ok: false; response: McpResponse } {
+  const fields: Record<string, unknown> = {};
+  for (const [param, key] of Object.entries(GRAPH_DATE_KEYS)) {
+    const value = input[param as keyof typeof GRAPH_DATE_KEYS];
+    if (value === undefined) continue;
+    if (value === null) {
+      fields[key] = null;
+      continue;
+    }
+    const converted = toGraphDateTime(value, timeZone);
+    if (!converted) {
+      return {
+        ok: false,
+        response: errResponse("invalid_date", {
+          field: param,
+          value,
+          hint: "Use ISO 8601: a date (2026-10-20), a local date/time (2026-10-20T09:00), or one with an offset (2026-10-20T09:00:00-04:00).",
+        }),
+      };
+    }
+    fields[key] = converted;
+  }
+  return { ok: true, fields };
+}
+
+function reauthResponse(): McpResponse {
+  return errResponse("reauth_required", {
+    hint: "Microsoft needs you to sign in again (revoked access or a Conditional Access requirement). Reconnect the MCP server.",
+  });
+}
+
 function todayInTimeZone(timeZone: string): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone,
@@ -186,11 +232,13 @@ function tasksResponse(args: {
 // Detailed task shape — get_task's response. Returns the body + every
 // expansion (checklistItems, linkedResources, attachments) plus recurrence
 // and bodyLastModifiedDateTime, none of which list_tasks's summarizeTask
-// includes. Strips @odata.etag (cache concern); all other passthrough
-// extras from TodoTaskSchema are dropped by virtue of explicit selection.
+// includes. Keeps @odata.etag so a caller can pass it back as update_task's
+// if_match; all other passthrough extras from TodoTaskSchema are dropped by
+// virtue of explicit selection.
 function detailedTask(t: TodoTask) {
   return {
     id: t.id,
+    "@odata.etag": t["@odata.etag"],
     title: t.title,
     body: t.body,
     bodyLastModifiedDateTime: t.bodyLastModifiedDateTime,
@@ -424,6 +472,7 @@ const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   delete_linked_resource: { title: "Delete linked resource", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   remove_attachment: { title: "Remove attachment", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   recreate_subscriptions: { title: "Recreate subscriptions", readOnlyHint: false, destructiveHint: true },
+  revoke_all_connections: { title: "Revoke all connections", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   // Writes (non-destructive)
   create_task: { title: "Create task", readOnlyHint: false, destructiveHint: false },
   update_task: { title: "Update task", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
@@ -459,6 +508,15 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     config: { description: string; inputSchema: InputArgs },
     cb: ToolCallback<InputArgs>,
   ): RegisteredTool {
+    // Every tool passes the same auth gate before its handler runs, including
+    // the cache-only tools that never call Graph. That makes revocation and
+    // re-auth apply to the whole surface: a revoked grant, or a Microsoft
+    // session that has to sign in again, stops cached task data being served.
+    const gated = (async (...args: unknown[]) => {
+      const denied = await this.#authPreflight(name);
+      if (denied) return denied;
+      return (cb as (...a: unknown[]) => unknown)(...args);
+    }) as unknown as ToolCallback<InputArgs>;
     // Emit all three core hints on EVERY tool. ChatGPT requires
     // readOnlyHint+destructiveHint+openWorldHint present (and is strict about
     // openWorldHint); Claude wants at least one. Base defaults — non-read-only,
@@ -474,8 +532,24 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           ...TOOL_ANNOTATIONS[name],
         },
       },
-      cb,
+      gated,
     );
+  }
+
+  // The per-call auth gate (see #tool). Order matters for the message: a dead
+  // grant is reported as such even when Microsoft access is also gone.
+  async #authPreflight(tool: string): Promise<McpResponse | null> {
+    const refusal = await grantRefusal(this.env, this.props);
+    if (refusal) {
+      log.warn("tool_denied", { name: tool, reason: refusal });
+      return errResponse(refusal, { hint: refusalDescription(refusal) });
+    }
+    if (!(await loadTokens(this.env))) {
+      return errResponse("not_authenticated", {
+        hint: "Reconnect the MCP server to sign in to Microsoft.",
+      });
+    }
+    return null;
   }
 
   async init() {
@@ -520,6 +594,26 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             const message = e instanceof Error ? e.message : String(e);
             return errResponse("graph_me_failed", { message });
           }
+        }),
+    );
+
+    this.#tool(
+      "revoke_all_connections",
+      {
+        description:
+          "Disconnect every MCP client connected to this server, including the one making this call. " +
+          "Each client has to reconnect and approve access again. Use when a connection might not be the owner's, " +
+          "or after removing an MCP client. Microsoft sign-in and the task cache are kept.",
+        inputSchema: {},
+      },
+      async (): Promise<McpResponse> =>
+        instrument("revoke_all_connections", async () => {
+          await this.#index().revokeAllGrants();
+          return jsonResult({
+            ok: true,
+            revoked: true,
+            hint: "Every MCP connection, including this one, now has to reconnect.",
+          });
         }),
     );
 
@@ -826,18 +920,18 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .string()
             .optional()
             .describe(
-              "Due date/time as ISO 8601 string (e.g. '2026-05-30' or '2026-05-30T10:00:00'). Stored in UTC.",
+              "Due date as ISO 8601 (e.g. '2026-05-30'). A value without Z or a UTC offset is read as the owner's local time (TIMEZONE).",
             ),
           reminder: z
             .string()
             .optional()
             .describe(
-              "Reminder date/time as ISO 8601 string. Stored in UTC. Set isReminderOn to true to activate.",
+              "Reminder date/time as ISO 8601 (e.g. '2026-05-30T09:00'). A value without Z or a UTC offset is read as the owner's local time (TIMEZONE). Set isReminderOn to true to activate.",
             ),
           start: z
             .string()
             .optional()
-            .describe("Start date/time as ISO 8601 string. Stored in UTC."),
+            .describe("Start date/time as ISO 8601. A value without Z or a UTC offset is read as the owner's local time (TIMEZONE)."),
           importance: z
             .enum(["low", "normal", "high"])
             .optional()
@@ -874,12 +968,10 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks`;
 
           // Build Graph request body — only include fields explicitly provided.
-          const graphBody: Record<string, unknown> = { title };
+          const dates = graphDateFields(this.env.TIMEZONE, { due, reminder, start });
+          if (!dates.ok) return dates.response;
+          const graphBody: Record<string, unknown> = { title, ...dates.fields };
           if (body !== undefined) graphBody.body = { content: body, contentType: "text" };
-          if (due !== undefined) graphBody.dueDateTime = { dateTime: due, timeZone: "UTC" };
-          if (reminder !== undefined)
-            graphBody.reminderDateTime = { dateTime: reminder, timeZone: "UTC" };
-          if (start !== undefined) graphBody.startDateTime = { dateTime: start, timeZone: "UTC" };
           if (importance !== undefined) graphBody.importance = importance;
           if (status !== undefined) graphBody.status = status;
           if (isReminderOn !== undefined) graphBody.isReminderOn = isReminderOn;
@@ -933,17 +1025,17 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
             .string()
             .nullable()
             .optional()
-            .describe("New due date/time (ISO 8601, UTC). Pass null to clear."),
+            .describe("New due date (ISO 8601). A value without Z or a UTC offset is read as the owner's local time (TIMEZONE). Pass null to clear."),
           reminder: z
             .string()
             .nullable()
             .optional()
-            .describe("New reminder date/time (ISO 8601, UTC). Pass null to clear."),
+            .describe("New reminder date/time (ISO 8601). A value without Z or a UTC offset is read as the owner's local time (TIMEZONE). Pass null to clear."),
           start: z
             .string()
             .nullable()
             .optional()
-            .describe("New start date/time (ISO 8601, UTC). Pass null to clear."),
+            .describe("New start date/time (ISO 8601). A value without Z or a UTC offset is read as the owner's local time (TIMEZONE). Pass null to clear."),
           completed_date: z
             .string()
             .nullable()
@@ -1003,17 +1095,14 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
 
           // Only include fields the caller explicitly supplied. Null datetimes
           // are passed through as-is so Graph clears the field server-side.
-          const graphBody: Record<string, unknown> = {};
+          const dates = graphDateFields(this.env.TIMEZONE, { due, reminder, start });
+          if (!dates.ok) return dates.response;
+          const graphBody: Record<string, unknown> = { ...dates.fields };
           if (title !== undefined) graphBody.title = title;
           if (body !== undefined) graphBody.body = { content: body, contentType: "text" };
-          if (due !== undefined)
-            graphBody.dueDateTime = due !== null ? { dateTime: due, timeZone: "UTC" } : null;
-          if (reminder !== undefined)
-            graphBody.reminderDateTime =
-              reminder !== null ? { dateTime: reminder, timeZone: "UTC" } : null;
-          if (start !== undefined)
-            graphBody.startDateTime =
-              start !== null ? { dateTime: start, timeZone: "UTC" } : null;
+          // completed_date stays a UTC date: To Do keeps completion at date
+          // granularity, and converting local midnight to UTC would move the
+          // date back a day for any zone east of UTC.
           if (completed_date !== undefined) {
             graphBody.completedDateTime =
               completed_date !== null ? { dateTime: completed_date, timeZone: "UTC" } : null;
@@ -2520,23 +2609,16 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       },
       async ({ rules }): Promise<McpResponse> =>
         instrument("set_link_rules", async () => {
-          // Validate every pattern compiles as a RegExp before writing to KV.
+          // Validate every pattern (compiles, bounded, no nested repeats) before writing to KV.
           const invalid: Array<{ id: string; pattern: string; error: string }> = [];
           for (const rule of rules) {
-            try {
-              new RegExp(rule.pattern, rule.flags);
-            } catch (e) {
-              invalid.push({
-                id: rule.id,
-                pattern: rule.pattern,
-                error: e instanceof Error ? e.message : String(e),
-              });
-            }
+            const error = patternProblem(rule.pattern, rule.flags);
+            if (error) invalid.push({ id: rule.id, pattern: rule.pattern, error });
           }
           if (invalid.length > 0) {
             return errResponse("invalid_link_rules", {
               invalid,
-              hint: "Fix the pattern(s) and retry. Patterns must be valid JS RegExp source strings.",
+              hint: "Fix the pattern(s) and retry. Each pattern must be a valid JS RegExp source string of at most 256 characters with no repeated group that contains another repeat.",
             });
           }
 
@@ -2839,16 +2921,13 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           if (patterns !== undefined) {
             const invalid: Array<{ pattern: string; flags: string; error: string }> = [];
             for (const p of patterns) {
-              try {
-                new RegExp(p.pattern, p.flags);
-              } catch (e) {
-                invalid.push({ pattern: p.pattern, flags: p.flags, error: e instanceof Error ? e.message : String(e) });
-              }
+              const error = patternProblem(p.pattern, p.flags);
+              if (error) invalid.push({ pattern: p.pattern, flags: p.flags, error });
             }
             if (invalid.length > 0) {
               return errResponse("invalid_list_patterns", {
                 invalid,
-                hint: "Fix the pattern(s) and retry. Patterns must be valid JS RegExp source strings.",
+                hint: "Fix the pattern(s) and retry. Each pattern must be a valid JS RegExp source string of at most 256 characters with no repeated group that contains another repeat.",
               });
             }
           }
@@ -3052,12 +3131,13 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           const dates: Record<string, number> = {};
           for (const [field, value] of dateInputs) {
             if (value === undefined) continue;
-            const ms = parseDateInput(value);
+            // A date-only *_before bound covers the whole local day.
+            const ms = parseDateInput(value, this.env.TIMEZONE, field.endsWith("_before") ? "end" : "start");
             if (ms === null) {
               return errResponse("invalid_date", {
                 field,
                 value,
-                hint: "Use ISO 8601 (2026-06-01[T10:00:00Z]) or a relative offset (+7d, -30d, -12h).",
+                hint: "Use ISO 8601 (2026-06-01, or 2026-06-01T10:00 in local time) or a relative offset (+7d, -30d, -12h).",
               });
             }
             dates[field] = ms;
@@ -4327,15 +4407,11 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
     fn: (graph: GraphClient) => Promise<McpResponse>,
   ): Promise<McpResponse> {
     return instrument(tool, async () => {
-      const stored = await loadTokens(this.env);
-      if (!stored) {
-        return errResponse("not_authenticated", {
-          hint: "Visit /authorize via the Claude.ai MCP connector to sign in to Microsoft.",
-        });
-      }
+      // Tokens were checked by the #tool preflight.
       try {
         return await fn(new GraphClient(this));
       } catch (e) {
+        if (isReauthRequired(e)) return reauthResponse();
         if (e instanceof GraphError) {
           return errResponse(`graph_${e.status}`, { detail: e.detail ?? "" });
         }
@@ -4361,23 +4437,11 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
           hint: "Set ENABLE_MY_DAY=true on the Worker and re-run /authorize to consent the Exchange Online Tasks scope.",
         });
       }
-      const stored = await loadTokens(this.env);
-      if (!stored) {
-        return errResponse("not_authenticated", {
-          hint: "Visit /authorize via the Claude.ai MCP connector to sign in to Microsoft.",
-        });
-      }
-      const ident = await loadIdentity(this.env);
-      const sub = new SubstrateClient(
-        {
-          getSubstrateAccessToken: () => this.#index().getSubstrateAccessToken(),
-          forceSubstrateRefresh: () => this.#index().forceSubstrateRefresh(),
-        },
-        ident?.anchorMailbox ?? null,
-      );
+      const sub = await this.#buildSubstrateClient();
       try {
         return await fn(sub);
       } catch (e) {
+        if (isReauthRequired(e)) return reauthResponse();
         // The DO throws a plain Error("my_day_unavailable") across RPC when the
         // EXO scope isn't consented (AADSTS65001). RPC flattens it to a message.
         if (e instanceof Error && e.message.includes("my_day_unavailable")) {
@@ -4416,6 +4480,7 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
       {
         getSubstrateAccessToken: () => this.#index().getSubstrateAccessToken(),
         forceSubstrateRefresh: () => this.#index().forceSubstrateRefresh(),
+        reportClaimsChallenge: (claims) => this.#index().markReauthRequired("claims_challenge", claims),
       },
       ident?.anchorMailbox ?? null,
     );
@@ -4652,6 +4717,11 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
 
   async forceRefresh(): Promise<string> {
     return this.#index().refreshToken();
+  }
+
+  // ClaimsChallengeSink — GraphClient calls this on a Conditional Access 401.
+  async reportClaimsChallenge(claims: string): Promise<void> {
+    await this.#index().markReauthRequired("claims_challenge", claims);
   }
 
   // Run link rules against a task and POST the single match (if any) as a
