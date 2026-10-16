@@ -183,8 +183,8 @@ limit like a Worker's. A request over its cap gets HTTP `413`:
 | `/register`, `/token`, `/authorize`, `/auth/*`, `/.well-known/*`, `/webhook` | 64 KiB |
 | Everything else | 1 MiB |
 
-An `/upload` POST that carries neither a `?t=` link token nor a `Content-Length` header gets
-HTTP `400`.
+An `/upload` POST without a `?t=` link token gets HTTP `401` before the server reads its body.
+The upload page always sends the token in `?t=`.
 
 Set a body limit in your reverse proxy as well, such as `client_max_body_size` in nginx or
 `request_body { max_size }` in Caddy, sized to the `/upload` cap. Rate limits on `/register`,

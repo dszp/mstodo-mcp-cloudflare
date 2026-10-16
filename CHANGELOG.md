@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `npm run build:node`; setup, backups and the differences from Cloudflare are in
   [docs/NODE-HOSTING.md](./docs/NODE-HOSTING.md). The Node host:
   - caps request bodies per route (413 past the cap, including chunked bodies) and refuses an
-    `/upload` POST that has neither a link token nor a `Content-Length`;
+    `/upload` POST without a `?t=` link token before reading its body;
   - binds `127.0.0.1` unless `HOST` is set (the image sets `0.0.0.0`), and creates its database
     files owner-only (`0600`);
   - requires `SERVICE_BASE_URL` to be an `https` origin (loopback `http` for local testing), with

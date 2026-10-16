@@ -9,6 +9,7 @@ import { installProcessHandlers, withTimeout } from "../src/hosts/node/lifecycle
 import { oauthProviderOptions } from "../src/hosts/shared/oauth";
 import { UPLOAD_BODY_MAX_BYTES } from "../src/core/upload/handler";
 import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
+import { createUploadCapability } from "../src/core/upload/tokens";
 import { ORIGIN } from "./_oauth-client";
 
 const vars = {
@@ -92,18 +93,56 @@ describe("request body caps (Node host)", () => {
     expect(stats.pulls).toBeLessThanOrEqual(8);
   });
 
-  it("refuses an /upload POST with neither ?t= nor Content-Length", async () => {
+  // Core's handler buffers the whole form before it can read a token from the
+  // body; the Node host refuses a token-less POST before touching the body.
+  it.each([
+    ["no ?t=, no Content-Length", "/upload", {}],
+    ["no ?t=, 50 MiB declared", "/upload", { "content-length": String(50 * MiB) }],
+    ["empty ?t=, 50 MiB declared", "/upload?t=", { "content-length": String(50 * MiB) }],
+  ])("refuses a token-less /upload POST without reading the body (%s)", async (_label, path, headers) => {
     const { body, stats } = endlessBody();
     const res = await handler().fetch(
-      new Request(`${ORIGIN}/upload`, {
+      new Request(`${ORIGIN}${path}`, {
         method: "POST",
-        headers: { "content-type": "multipart/form-data; boundary=x" },
+        headers: { "content-type": "multipart/form-data; boundary=x", ...headers },
         body,
         duplex: "half",
       } as RequestInit),
     );
-    expect(res.status).toBe(400);
-    expect(stats.pulls).toBeLessThanOrEqual(1);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ ok: false, reason: "unauthorized" });
+    expect(stats.pulls).toBe(0);
+    expect(stats.cancelled).toBe(false);
+  });
+
+  it("still attaches a file uploaded with a valid link token", async () => {
+    const { env } = buildNodeEnv(openDatabase(":memory:"), vars);
+    await storeTokens(env, {
+      access_token: "a",
+      refresh_token: "r",
+      expires_at: Date.now() + 3_600_000,
+      scope: SCOPES,
+      obtained_at: Date.now(),
+    });
+    const { token } = await createUploadCapability(env, { list_id: "L1", task_id: "T1" });
+    const graph = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const method = input instanceof Request ? input.method : (init?.method ?? "GET");
+      if (url.includes("/attachments") && method === "GET") return Response.json({ value: [] });
+      if (url.includes("/attachments") && method === "POST") {
+        return Response.json({ "@odata.type": "#microsoft.graph.taskFileAttachment", id: "att-1", name: "note.txt", size: 5, contentType: "text/plain" }, { status: 201 });
+      }
+      return new Response("unscripted", { status: 404 });
+    });
+    vi.stubGlobal("fetch", graph);
+    const form = new FormData();
+    form.append("file", new File(["hello"], "note.txt", { type: "text/plain" }));
+    const res = await createHandler(env, { publicOrigin: ORIGIN }).fetch(
+      new Request(`${ORIGIN}/upload?t=${encodeURIComponent(token)}`, { method: "POST", body: form }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true });
+    expect(graph.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(true);
   });
 
   it("leaves a normal request alone", async () => {

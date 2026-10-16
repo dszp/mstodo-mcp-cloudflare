@@ -4,7 +4,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { AlarmScheduler, StateStore } from "../../core/ports";
 import type { IndexCore } from "../../core/index/index-core";
 import { registerTools } from "../../core/mcp/register-tools";
-import { handleUpload } from "../../core/upload/handler";
+import { handleUpload, json } from "../../core/upload/handler";
 import { handleDownload } from "../../core/upload/download-handler";
 import { handleWebhook } from "../../core/subscriptions/webhook-handler";
 import { VERSION } from "../../core/version";
@@ -110,16 +110,14 @@ export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
       return Response.json({ ok: true, service: "mstodo-mcp", version: VERSION, host: "node" });
     }
 
-    // Core's upload handler reads the form before it can see a token in the
-    // body; without ?t= its only pre-read check is the declared length. A POST
-    // with neither is refused before anything reads it.
-    if (
-      url.pathname === "/upload" &&
-      rewritten.method === "POST" &&
-      !url.searchParams.get("t") &&
-      rewritten.headers.get("content-length") === null
-    ) {
-      return Response.json({ ok: false, reason: "length_required" }, { status: 400 });
+    // Core's upload handler buffers the whole form (up to ~61 MiB) before it
+    // can read a token from the body, so a token-less POST would cost that
+    // much memory unauthenticated. The upload page always sends ?t=, which
+    // core checks before reading; a POST without it is refused here with
+    // core's own missing-token answer, before the body is touched. The path
+    // test is core's exact match: other spellings never reach handleUpload.
+    if (url.pathname === "/upload" && rewritten.method === "POST" && !url.searchParams.get("t")) {
+      return json({ ok: false, reason: "unauthorized" }, 401);
     }
 
     const max = bodyCapFor(url.pathname);
