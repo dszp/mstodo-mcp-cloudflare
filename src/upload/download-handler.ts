@@ -9,6 +9,7 @@ import {
   downloadLinksEnabled,
   lookupDownloadCapability,
 } from "./tokens";
+import type { AppEnv } from "../core/ports";
 
 // Public (non-OAuth) binary download endpoint — the inverse of /upload (ROADMAP
 // §9). handleDownload returns a Response for /download or null for any other path
@@ -29,7 +30,7 @@ function contentDisposition(name: string): string {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
-export async function handleDownload(req: Request, env: Env): Promise<Response | null> {
+export async function handleDownload(req: Request, env: AppEnv): Promise<Response | null> {
   const url = new URL(req.url);
   if (url.pathname !== "/download") return null;
 

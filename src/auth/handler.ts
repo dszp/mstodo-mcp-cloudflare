@@ -2,6 +2,7 @@ import {
   AuthorizationError,
   authorizationErrorRedirect,
   type AuthRequest,
+  type OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
 import { readBounded } from "../util/body";
 import { log } from "../log";
@@ -24,6 +25,11 @@ import {
   wipeIdentityScopedState,
   TokenExchangeError,
 } from "./microsoft";
+import type { AppEnv } from "../core/ports";
+
+// Cloudflare-only: OAUTH_PROVIDER is injected by the OAuthProvider runtime. Moves
+// to the Cloudflare host in Task 7/9; core ports do not carry it.
+type HandlerEnv = AppEnv & { OAUTH_PROVIDER: OAuthHelpers };
 
 // The authorization flow, in three requests:
 //
@@ -58,12 +64,12 @@ function callbackUrlFor(req: Request): string {
 
 // Remembered consent is per browser; the subject is fixed because this server
 // has exactly one user, and the owner isn't known until after Microsoft sign-in.
-async function rememberOptions(env: Env) {
+async function rememberOptions(env: AppEnv) {
   return { secret: await consentRememberSecret(env), subject: "owner" };
 }
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: HandlerEnv): Promise<Response> {
     const url = new URL(req.url);
     try {
       if (url.pathname === AUTHORIZE_PATH && req.method === "GET") {
@@ -96,7 +102,7 @@ export default {
   },
 };
 
-async function handleAuthorize(req: Request, env: Env): Promise<Response> {
+async function handleAuthorize(req: Request, env: HandlerEnv): Promise<Response> {
   const oauth = env.OAUTH_PROVIDER;
   const authRequest = await oauth.parseAuthRequest(req);
 
@@ -112,7 +118,7 @@ async function handleAuthorize(req: Request, env: Env): Promise<Response> {
   return new Response(consentPage(details, consent.handle), { headers: consent.headers });
 }
 
-async function handleConsentDecision(req: Request, env: Env): Promise<Response> {
+async function handleConsentDecision(req: Request, env: HandlerEnv): Promise<Response> {
   const body = await readBounded(req, MAX_CONSENT_FORM_BYTES);
   if (body === null) {
     return errorPage("Request too large", "The consent form submission was too large.", 413);
@@ -138,7 +144,7 @@ async function handleConsentDecision(req: Request, env: Env): Promise<Response> 
 
 async function startMicrosoftSignIn(
   req: Request,
-  env: Env,
+  env: HandlerEnv,
   authRequest: AuthRequest,
   headers: Headers,
 ): Promise<Response> {
@@ -160,7 +166,7 @@ async function startMicrosoftSignIn(
   return new Response(null, { status: 302, headers: upstream.headers });
 }
 
-async function handleCallback(req: Request, env: Env, url: URL): Promise<Response> {
+async function handleCallback(req: Request, env: HandlerEnv, url: URL): Promise<Response> {
   // Recover the approved MCP request and our PKCE verifier. Refused unless this
   // browser holds the binding cookie set when the sign-in started (one use).
   const { request: authRequest, data, headers } =

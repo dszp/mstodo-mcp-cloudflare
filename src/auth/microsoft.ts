@@ -2,6 +2,7 @@ import { log } from "../log";
 import { ownerIndex } from "../core/owner-index";
 import { loadListsConfig, storeListsConfig } from "../config/loader";
 import { isSealed, seal, unseal } from "./crypto";
+import type { AppEnv } from "../core/ports";
 
 // Microsoft Entra v2 OAuth — pure helpers. The handler (auth/handler.ts) owns
 // routing + KV state-bag lifecycle; this module owns the protocol shape and
@@ -25,7 +26,7 @@ export const SUBSTRATE_SCOPES = `${EXO_TASKS_SCOPE} offline_access`;
 // Feature flag — read as a string var ("true"/"false"). String() widens the
 // generated literal type so the comparison is well-typed regardless of the
 // committed default in wrangler.jsonc.
-export function myDayEnabled(env: Env): boolean {
+export function myDayEnabled(env: AppEnv): boolean {
   return String(env.ENABLE_MY_DAY ?? "").toLowerCase() === "true";
 }
 
@@ -33,7 +34,7 @@ export function myDayEnabled(env: Env): boolean {
 // the EXO Tasks scope so a SINGLE consent screen covers both resources; the
 // code→token exchange still returns a Graph-audience access token (Graph is
 // listed first), while the refresh token covers both.
-export function authScopes(env: Env): string {
+export function authScopes(env: AppEnv): string {
   return myDayEnabled(env) ? `${SCOPES} ${EXO_TASKS_SCOPE}` : SCOPES;
 }
 
@@ -83,7 +84,7 @@ export async function computeCodeChallenge(verifier: string): Promise<string> {
 
 const MS_LOGIN_HOST = "login.microsoftonline.com";
 
-function tenantBase(env: Env): string {
+function tenantBase(env: AppEnv): string {
   return `https://${MS_LOGIN_HOST}/${encodeURIComponent(env.MS_TENANT_ID)}/oauth2/v2.0`;
 }
 
@@ -110,7 +111,7 @@ function assertTokenEndpoint(url: string): void {
 }
 
 export function buildAuthorizeUrl(
-  env: Env,
+  env: AppEnv,
   opts: {
     redirectUri: string;
     state: string;
@@ -169,7 +170,7 @@ function summarizeMsError(text: string): Record<string, unknown> {
   return { body: text.slice(0, 200) };
 }
 
-async function postToken(env: Env, body: URLSearchParams): Promise<TokenResponse> {
+async function postToken(env: AppEnv, body: URLSearchParams): Promise<TokenResponse> {
   const url = `${tenantBase(env)}/token`;
   assertTokenEndpoint(url); // pin TLS + Entra host before the secret leaves
   const res = await fetch(url, {
@@ -193,7 +194,7 @@ export class TokenExchangeError extends Error {
 }
 
 export async function exchangeCode(
-  env: Env,
+  env: AppEnv,
   opts: { code: string; codeVerifier: string; redirectUri: string },
 ): Promise<TokenResponse> {
   const body = new URLSearchParams({
@@ -214,7 +215,7 @@ export async function exchangeCode(
 // Graph SCOPES; substrate refreshes pass SUBSTRATE_SCOPES. Both rotate the
 // refresh token, so callers MUST serialize these (see TodoIndex sole-refresher).
 export async function refreshTokensForScope(
-  env: Env,
+  env: AppEnv,
   refreshToken: string,
   scope: string,
 ): Promise<TokenResponse> {
@@ -228,7 +229,7 @@ export async function refreshTokensForScope(
   return postToken(env, body);
 }
 
-export async function refreshTokens(env: Env, refreshToken: string): Promise<TokenResponse> {
+export async function refreshTokens(env: AppEnv, refreshToken: string): Promise<TokenResponse> {
   return refreshTokensForScope(env, refreshToken, SCOPES);
 }
 
@@ -254,7 +255,7 @@ export function tokensFromResponse(
 // usable refresh token. A plaintext record written before sealing existed is
 // accepted once and re-stored sealed. A sealed record that no longer decrypts
 // (the client secret was rotated) reads as "no tokens": the owner re-authorizes.
-export async function loadTokens(env: Env): Promise<StoredTokens | null> {
+export async function loadTokens(env: AppEnv): Promise<StoredTokens | null> {
   const raw = await env.TODO_CACHE.get(TOKENS_KEY, "text");
   if (raw === null) return null;
   if (isSealed(raw)) {
@@ -272,7 +273,7 @@ export async function loadTokens(env: Env): Promise<StoredTokens | null> {
   return legacy;
 }
 
-export async function storeTokens(env: Env, tokens: StoredTokens): Promise<void> {
+export async function storeTokens(env: AppEnv, tokens: StoredTokens): Promise<void> {
   await env.TODO_CACHE.put(TOKENS_KEY, await seal(env, JSON.stringify(tokens), TOKENS_KEY));
 }
 
@@ -347,7 +348,7 @@ export function buildAnchorMailbox(oid: string, tid: string): string {
   return `OID:${oid}@${tid}`;
 }
 
-export function isOwner(env: Env, me: MeIdentity): boolean {
+export function isOwner(env: AppEnv, me: MeIdentity): boolean {
   // Fail closed if the gate itself is misconfigured. OWNER_EMAIL is typed as a
   // required string, but a missing/blank secret at runtime must NEVER widen the
   // gate: coalesce undefined and treat empty as "deny everyone" with a loud
@@ -384,11 +385,11 @@ export interface OwnerIdentity {
   anchorMailbox?: string;
 }
 
-export async function loadIdentity(env: Env): Promise<OwnerIdentity | null> {
+export async function loadIdentity(env: AppEnv): Promise<OwnerIdentity | null> {
   return ((await env.TODO_CACHE.get(IDENTITY_KEY, "json")) as OwnerIdentity | null) ?? null;
 }
 
-export async function storeIdentity(env: Env, ident: OwnerIdentity): Promise<void> {
+export async function storeIdentity(env: AppEnv, ident: OwnerIdentity): Promise<void> {
   await env.TODO_CACHE.put(IDENTITY_KEY, JSON.stringify(ident));
 }
 
@@ -411,7 +412,7 @@ export async function storeIdentity(env: Env, ident: OwnerIdentity): Promise<voi
 //      re-detects the change and re-wipes (resetIdentity is idempotent) instead
 //      of silently skipping the wipe (prevIdentity === null) and letting the new
 //      baseline mix with leftover old-account rows.
-export async function wipeIdentityScopedState(env: Env): Promise<void> {
+export async function wipeIdentityScopedState(env: AppEnv): Promise<void> {
   const index = ownerIndex(env);
   await index.resetIdentity();
   await env.TODO_CACHE.delete(TOKENS_KEY);

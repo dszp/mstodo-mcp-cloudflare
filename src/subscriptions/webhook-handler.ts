@@ -3,6 +3,7 @@ import { readBounded } from "../util/body";
 import { log } from "../log";
 import { ownerIndex } from "../core/owner-index";
 import { taskSubscriptionsEnabled } from "./gate";
+import type { AppEnv } from "../core/ports";
 
 // Public (non-OAuth) Graph change-notification receiver (ROADMAP §4). Same
 // null-for-other-paths contract as /upload and /download. Two jobs:
@@ -42,7 +43,7 @@ function ack(status: number): Response {
 
 export async function handleWebhook(
   req: Request,
-  env: Env,
+  env: AppEnv,
   ctx: ExecutionContext,
 ): Promise<Response | null> {
   const url = new URL(req.url);

@@ -19,6 +19,7 @@ import {
   lookupUploadCapability,
   type UploadCapabilityScope,
 } from "./tokens";
+import type { AppEnv } from "../core/ports";
 
 // Public (non-OAuth) binary upload endpoint. handleUpload returns a Response for
 // /upload (GET serves the page, POST attaches the file(s) to the scoped task) or
@@ -101,7 +102,7 @@ export function reasonForGraphError(e: GraphError): { reason: string; detail: st
   return { reason: `graph_${e.status}`, detail };
 }
 
-async function renderGetPage(env: Env, url: URL): Promise<string> {
+async function renderGetPage(env: AppEnv, url: URL): Promise<string> {
   const linkToken = url.searchParams.get("t");
   if (!linkToken) return renderUploadPage({ disabled: true });
 
@@ -119,7 +120,7 @@ async function renderGetPage(env: Env, url: URL): Promise<string> {
   });
 }
 
-export async function handleUpload(req: Request, env: Env): Promise<Response | null> {
+export async function handleUpload(req: Request, env: AppEnv): Promise<Response | null> {
   const url = new URL(req.url);
   if (url.pathname !== "/upload") return null;
 

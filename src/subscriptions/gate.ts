@@ -1,3 +1,4 @@
+import type { AppEnv } from "../core/ports";
 // Feature gate + derived config for Graph change-notification subscriptions
 // (ROADMAP §4). Mirrors the downloadLinksEnabled pattern: ON unless the var is
 // the literal string "false". Subscriptions ride the existing delegated
@@ -5,7 +6,7 @@
 // permission wall.
 
 /** Subscriptions are ON by default; set ENABLE_TASK_SUBSCRIPTIONS="false" to disable. */
-export function taskSubscriptionsEnabled(env: Env): boolean {
+export function taskSubscriptionsEnabled(env: AppEnv): boolean {
   return String(env.ENABLE_TASK_SUBSCRIPTIONS ?? "true").toLowerCase() !== "false";
 }
 
@@ -14,7 +15,7 @@ export function taskSubscriptionsEnabled(env: Env): boolean {
  * Returns null when SERVICE_BASE_URL is missing or not https (Graph requires an
  * https notificationUrl), so the caller can skip subscription creation cleanly.
  */
-export function webhookUrl(env: Env): string | null {
+export function webhookUrl(env: AppEnv): string | null {
   const base = (env.SERVICE_BASE_URL ?? "").trim().replace(/\/+$/, "");
   if (!base) return null;
   let u: URL;
@@ -64,7 +65,7 @@ export const SUBSCRIPTION_RENEW_MARGIN_MS = 12 * 60 * 60_000; // 12 hours
 // up to your list count — for faster initial coverage and renewal headroom.
 export const DEFAULT_MAX_SUBSCRIPTION_OPS_PER_CYCLE = 2;
 
-export function maxSubscriptionOpsPerCycle(env: Env): number {
+export function maxSubscriptionOpsPerCycle(env: AppEnv): number {
   const n = Number(env.MAX_SUBSCRIPTION_OPS_PER_CYCLE);
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_SUBSCRIPTION_OPS_PER_CYCLE;
 }

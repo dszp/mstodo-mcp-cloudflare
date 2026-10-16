@@ -1,3 +1,4 @@
+import type { AppEnv } from "../core/ports";
 // Server-side keys derived from the MS_CLIENT_SECRET Worker secret.
 //
 // Two features need a server-held key: encrypting the Microsoft tokens at rest
@@ -23,7 +24,7 @@ async function hkdfBits(secret: string, info: string, bits: number): Promise<Arr
   );
 }
 
-function requireSecret(env: Env): string {
+function requireSecret(env: AppEnv): string {
   const secret = env.MS_CLIENT_SECRET ?? "";
   if (secret.length === 0) throw new Error("ms_client_secret_missing");
   return secret;
@@ -43,12 +44,12 @@ function fromBase64(s: string): Uint8Array {
 }
 
 // 64 hex chars — the library's remembered-consent cookie wants a 32+ char secret.
-export async function consentRememberSecret(env: Env): Promise<string> {
+export async function consentRememberSecret(env: AppEnv): Promise<string> {
   const bits = new Uint8Array(await hkdfBits(requireSecret(env), "consent-remember-v1", 256));
   return [...bits].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function tokenKey(env: Env): Promise<CryptoKey> {
+async function tokenKey(env: AppEnv): Promise<CryptoKey> {
   const bits = await hkdfBits(requireSecret(env), "token-encryption-v1", 256);
   return crypto.subtle.importKey("raw", bits, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
@@ -62,7 +63,7 @@ export function isSealed(value: string): boolean {
 // AES-256-GCM, random 96-bit IV, stored as "v1:" + base64(iv || ciphertext).
 // `aad` binds the ciphertext to its KV key, so a sealed value can't be moved
 // to a different key and still decrypt.
-export async function seal(env: Env, plaintext: string, aad: string): Promise<string> {
+export async function seal(env: AppEnv, plaintext: string, aad: string): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv, additionalData: enc.encode(aad) },
@@ -76,7 +77,7 @@ export async function seal(env: Env, plaintext: string, aad: string): Promise<st
 }
 
 // Throws on a tampered value or a key that no longer matches (rotated secret).
-export async function unseal(env: Env, sealed: string, aad: string): Promise<string> {
+export async function unseal(env: AppEnv, sealed: string, aad: string): Promise<string> {
   const raw = fromBase64(sealed.slice(SEALED_PREFIX.length));
   const pt = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: raw.slice(0, 12), additionalData: enc.encode(aad) },

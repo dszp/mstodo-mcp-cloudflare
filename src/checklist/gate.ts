@@ -1,3 +1,4 @@
+import type { AppEnv } from "../core/ports";
 // Feature gate + derived config for the checklist-item cache (ROADMAP). Unlike
 // subscriptions / My Day (ON unless "false"), this defaults OFF: it adds a
 // one-time per-task backfill cost (Graph has no hasChecklist boolean and delta
@@ -9,7 +10,7 @@
 // Subscriptions only lower latency; the two pair well but are independent.
 
 /** Checklist cache is OFF by default; set ENABLE_CHECKLIST_CACHE="true" to enable. */
-export function checklistCacheEnabled(env: Env): boolean {
+export function checklistCacheEnabled(env: AppEnv): boolean {
   return String(env.ENABLE_CHECKLIST_CACHE ?? "false").toLowerCase() === "true";
 }
 
@@ -19,7 +20,7 @@ export function checklistCacheEnabled(env: Env): boolean {
 // to drain the backlog in fewer cycles. Mirrors MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE.
 export const DEFAULT_CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE = 8;
 
-export function checklistScanMaxTasksPerCycle(env: Env): number {
+export function checklistScanMaxTasksPerCycle(env: AppEnv): number {
   const n = Number(env.CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE);
   return Number.isFinite(n) && n >= 1
     ? Math.floor(n)

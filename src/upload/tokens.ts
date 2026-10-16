@@ -1,3 +1,4 @@
+import type { AppEnv } from "../core/ports";
 // Short-lived, single-use capability tokens for the web attachment-upload flow.
 //
 // `create_upload_link` stores the destination scope (list_id + task_id, optional
@@ -61,7 +62,7 @@ function randomId(): string {
  * clamped to [60, MAX_TTL_SECONDS].
  */
 export async function createUploadCapability(
-  env: Env,
+  env: AppEnv,
   scope: UploadCapabilityScope,
   ttlSeconds = DEFAULT_TTL_SECONDS,
 ): Promise<UploadCapability> {
@@ -79,7 +80,7 @@ export async function createUploadCapability(
  * `link_invalid`. Does NOT consume — call `consumeUploadCapability` after use.
  */
 export async function lookupUploadCapability(
-  env: Env,
+  env: AppEnv,
   token: string,
 ): Promise<Result<UploadCapabilityScope>> {
   if (!token) return { ok: false, reason: "link_invalid" };
@@ -104,7 +105,7 @@ export async function lookupUploadCapability(
 }
 
 /** Consume a capability so the link cannot be replayed. */
-export async function consumeUploadCapability(env: Env, token: string): Promise<void> {
+export async function consumeUploadCapability(env: AppEnv, token: string): Promise<void> {
   await env.OAUTH_KV.delete(KV_PREFIX + token);
 }
 
@@ -128,7 +129,7 @@ export const MAX_DOWNLOAD_TTL_SECONDS = 5 * 60;
  * public `/download` endpoint (reduces attack surface for deployments that don't
  * need the server-to-server pull). Any value other than "false" leaves it on.
  */
-export function downloadLinksEnabled(env: Env): boolean {
+export function downloadLinksEnabled(env: AppEnv): boolean {
   return String(env.ENABLE_DOWNLOAD_LINKS ?? "true").toLowerCase() !== "false";
 }
 
@@ -163,7 +164,7 @@ export interface DownloadCapability {
  * `ttlSeconds` is clamped to [60, MAX_DOWNLOAD_TTL_SECONDS].
  */
 export async function createDownloadCapability(
-  env: Env,
+  env: AppEnv,
   scope: DownloadCapabilityScope,
   ttlSeconds = DEFAULT_DOWNLOAD_TTL_SECONDS,
 ): Promise<DownloadCapability> {
@@ -181,7 +182,7 @@ export async function createDownloadCapability(
  * consume — call `consumeDownloadCapability` after use.
  */
 export async function lookupDownloadCapability(
-  env: Env,
+  env: AppEnv,
   token: string,
 ): Promise<Result<DownloadCapabilityScope>> {
   if (!token) return { ok: false, reason: "link_invalid" };
@@ -208,6 +209,6 @@ export async function lookupDownloadCapability(
 }
 
 /** Consume a download capability so the link cannot be replayed. */
-export async function consumeDownloadCapability(env: Env, token: string): Promise<void> {
+export async function consumeDownloadCapability(env: AppEnv, token: string): Promise<void> {
   await env.OAUTH_KV.delete(DOWNLOAD_KV_PREFIX + token);
 }

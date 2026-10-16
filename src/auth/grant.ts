@@ -1,6 +1,7 @@
 import { ownerIndex } from "../core/owner-index";
 import { log } from "../log";
 import type { Props } from "../types";
+import type { AppEnv } from "../core/ports";
 
 // A grant's total life, however often it is refreshed.
 export const MAX_GRANT_AGE_MS = 90 * 86_400_000;
@@ -16,7 +17,7 @@ export type GrantRefusal = "grant_revoked" | "grant_expired" | "reauth_required"
 // this.props is the props of the token that first started the session and is
 // never refreshed afterwards, so it can't be used here — the HTTP layer
 // (auth/oauth.ts apiHandler) runs this check with ctx.props instead.
-export async function grantRefusal(env: Env, props: Partial<Props> | undefined): Promise<GrantRefusal | null> {
+export async function grantRefusal(env: AppEnv, props: Partial<Props> | undefined): Promise<GrantRefusal | null> {
   const { epoch, reauth } = await ownerIndex(env).authState();
   if (!props?.epoch || props.epoch !== epoch) return "grant_revoked";
   if (typeof props.authorized_at !== "number" || Date.now() - props.authorized_at > MAX_GRANT_AGE_MS) {
@@ -28,7 +29,7 @@ export async function grantRefusal(env: Env, props: Partial<Props> | undefined):
 
 // The HTTP-layer gate for /mcp: null to let the request through, or the 401
 // invalid_token response for a refused grant (see the apiHandler in oauth.ts).
-export async function refuseMcpRequest(env: Env, props: Partial<Props> | undefined): Promise<Response | null> {
+export async function refuseMcpRequest(env: AppEnv, props: Partial<Props> | undefined): Promise<Response | null> {
   const refusal = await grantRefusal(env, props);
   if (!refusal) return null;
   log.warn("mcp_request_refused", { reason: refusal });
@@ -44,7 +45,7 @@ export async function refuseMcpRequest(env: Env, props: Partial<Props> | undefin
 
 // The part of the gate that doesn't depend on which grant is calling: has
 // Microsoft refused our refresh token or demanded a Conditional Access sign-in?
-export async function reauthPending(env: Env): Promise<boolean> {
+export async function reauthPending(env: AppEnv): Promise<boolean> {
   return (await ownerIndex(env).authState()).reauth !== null;
 }
 
