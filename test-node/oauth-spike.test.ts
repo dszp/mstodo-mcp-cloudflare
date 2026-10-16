@@ -1,10 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { openDatabase, sqlDb } from "../src/hosts/node/sqlite-db";
-import { sqliteKv, type OAuthKvStore } from "../src/hosts/node/sqlite-kv";
-import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
-import type { AppEnv } from "../src/core/ports";
+import { openDatabase } from "../src/hosts/node/sqlite-db";
+import { buildNodeEnv, type NodeEnv } from "../src/hosts/node/env";
 import { refusalDescription } from "../src/core/auth/grant";
 import { TOKENS_KEY } from "../src/core/auth/microsoft";
 import { oauthProviderOptions } from "../src/hosts/shared/oauth";
@@ -19,28 +16,20 @@ import { ORIGIN, REDIRECT_URI, oauthClient, stubMicrosoft } from "./_oauth-clien
 // SQLite-backed KV and an in-process IndexCore. Only the /mcp handler differs:
 // it echoes the grant's epoch instead of serving MCP.
 
-// The env the provider and auth-handler see. The library types env as a free
-// generic (it never constrains OAUTH_KV), so this declaration is where the
-// compiler checks our KV against the surface the library actually calls.
-type SpikeEnv = AppEnv & { OAUTH_KV: OAuthKvStore } & ProviderEnv;
+// The env the provider and auth-handler see: the Node host's env (whose
+// OAUTH_KV type is where the compiler checks our KV against the surface the
+// library calls) plus the helpers the library injects.
+type SpikeEnv = NodeEnv & ProviderEnv;
 
 function nodeEnv() {
-  const db = openDatabase(":memory:");
-  const state = stateStore(db);
-  const env: AppEnv & { OAUTH_KV: OAuthKvStore } = {
+  return buildNodeEnv(openDatabase(":memory:"), {
     TIMEZONE: "America/New_York",
     OWNER_EMAIL: "test-owner@example.com",
     MS_TENANT_ID: "test-tenant",
     MS_CLIENT_ID: "test-client",
     MS_CLIENT_SECRET: "test-secret",
     ENABLE_MY_DAY: "true",
-    OAUTH_KV: sqliteKv(db, "OAUTH_KV"),
-    TODO_CACHE: sqliteKv(db, "TODO_CACHE"),
-    ownerIndex: () => core as never,
-  };
-  const core = new IndexCore({ sql: sqlDb(db), state, alarms: state, env });
-  core.bootstrap();
-  return { env, core };
+  });
 }
 
 function buildProvider() {

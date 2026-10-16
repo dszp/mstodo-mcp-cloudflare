@@ -7,12 +7,14 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "start:node": "node dist/main.mjs",
     "types": "wrangler types",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.2.3",
+    "@hono/node-server": "2.1.5",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "agents": "^0.28.1",
     "zod": "^4.6.7"
