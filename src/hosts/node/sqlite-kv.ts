@@ -24,12 +24,17 @@ export function sqliteKv(
   const sweepStmt = db.prepare("DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?");
 
   // Overloads mirror KeyValueStore.get, so the object below needs no cast.
+  // The implementation also accepts Workers KV's other spellings, because the
+  // OAuth library reads OAUTH_KV through them: get(key) and
+  // get(key, { type: "json" }). Without this, those calls would get the raw
+  // string back where the library expects a parsed object.
   async function get(key: string, type: "text"): Promise<string | null>;
   async function get<T = unknown>(key: string, type: "json"): Promise<T | null>;
-  async function get(key: string, type: "text" | "json"): Promise<unknown> {
+  async function get(key: string, type?: "text" | "json" | { type?: "text" | "json" }): Promise<unknown> {
     const row = getStmt.get(namespace, now(), key) as { value: string } | undefined;
     if (!row) return null;
-    return type === "json" ? JSON.parse(row.value) : row.value;
+    const as = typeof type === "object" ? type.type : type;
+    return as === "json" ? JSON.parse(row.value) : row.value;
   }
 
   return {

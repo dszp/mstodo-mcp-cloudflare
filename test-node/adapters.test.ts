@@ -40,6 +40,14 @@ describe("sqlDb", () => {
 });
 
 describe("sqliteKv", () => {
+  it("accepts the Workers KV get() spellings the OAuth library uses", async () => {
+    const kv = sqliteKv(openDatabase(":memory:"), "ns");
+    await kv.put("k", '{"a":1}');
+    const lib = kv as unknown as { get(key: string, opts?: { type: "json" }): Promise<unknown> };
+    expect(await lib.get("k", { type: "json" })).toEqual({ a: 1 });
+    expect(await lib.get("k")).toBe('{"a":1}');
+  });
+
   it("expires keys by TTL without a sweep", async () => {
     let t = 1_000_000;
     const kv = sqliteKv(openDatabase(":memory:"), "ns", () => t);

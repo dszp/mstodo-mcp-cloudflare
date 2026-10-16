@@ -43,6 +43,15 @@ export default defineConfig({
           include: ["test-node/**/*.test.ts"],
           environment: "node",
           pool: "forks",
+          // node_modules are externalized (loaded by Node, not Vite), which
+          // would bypass the alias below; inline the OAuth library so its
+          // `cloudflare:workers` import goes through it.
+          server: { deps: { inline: ["@cloudflare/workers-oauth-provider"] } },
+        },
+        resolve: {
+          alias: {
+            "cloudflare:workers": new URL("./src/hosts/node/cloudflare-workers-shim.ts", import.meta.url).pathname,
+          },
         },
       },
     ],
