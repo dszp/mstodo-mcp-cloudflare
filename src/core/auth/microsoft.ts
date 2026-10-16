@@ -4,7 +4,7 @@ import { loadListsConfig, storeListsConfig } from "../config/loader";
 import { isSealed, seal, unseal } from "./crypto";
 import type { AppEnv } from "../ports";
 
-// Microsoft Entra v2 OAuth — pure helpers. The handler (src/hosts/cloudflare/auth-handler.ts) owns
+// Microsoft Entra v2 OAuth — pure helpers. The handler (src/hosts/shared/auth-handler.ts) owns
 // routing + KV state-bag lifecycle; this module owns the protocol shape and
 // per-token KV persistence. As of Phase 5 the single-flight refresh discipline
 // lives in the singleton TodoIndex DO (sole refresher); the per-session agent
@@ -320,7 +320,7 @@ export async function fetchMe(accessToken: string): Promise<MeIdentity> {
 // Decode the (UNVERIFIED) claims from a JWT payload segment.
 //
 // SECURITY INVARIANT: this is only ever called on a token WE just received
-// directly from Entra over TLS (src/hosts/cloudflare/auth-handler.ts, on our own freshly-issued
+// directly from Entra over TLS (src/hosts/shared/auth-handler.ts, on our own freshly-issued
 // access_token) to read non-security claims (tid/oid) for the Substrate
 // x-anchormailbox header. It MUST NOT be used to make an authorization decision
 // — the owner gate is isOwner() evaluated against a fresh, authenticated Graph

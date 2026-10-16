@@ -15,13 +15,15 @@ import {
 import { parseClaimsChallenge, ReauthRequiredError, isReauthRequired } from "../src/core/auth/reauth";
 import { grantRefusal, refuseMcpRequest, MAX_GRANT_AGE_MS } from "../src/core/auth/grant";
 import { GraphClient } from "../src/core/graph/client";
-import { consentPage } from "../src/hosts/cloudflare/consent-page";
-import AuthHandler from "../src/hosts/cloudflare/auth-handler";
+import { consentPage } from "../src/hosts/shared/consent-page";
+import { authHandler } from "../src/hosts/shared/auth-handler";
+import { appEnv } from "../src/hosts/cloudflare/env";
 import type { Props } from "../src/core/types";
 import { testAppEnv } from "./_app-env";
 import type { AppEnv } from "../src/core/ports";
 
 const E = testAppEnv();
+const AuthHandler = authHandler(appEnv);
 
 function index() {
   return env.TODO_INDEX_DO.getByName(OWNER_DO_NAME);

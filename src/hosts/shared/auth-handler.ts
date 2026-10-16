@@ -26,11 +26,14 @@ import {
   TokenExchangeError,
 } from "../../core/auth/microsoft";
 import type { AppEnv } from "../../core/ports";
-import { appEnv } from "./env";
 
-// OAUTH_PROVIDER is injected into the Worker env by the OAuthProvider runtime;
+// OAUTH_PROVIDER is injected into the host env by the OAuthProvider runtime;
 // core ports do not carry it, so the handler adds it beside the core env.
 type HandlerEnv = AppEnv & { OAUTH_PROVIDER: OAuthHelpers };
+
+// What the handler needs from the env the library hands it: the helpers the
+// library injected. Everything else comes through the host's toAppEnv.
+export type ProviderEnv = { OAUTH_PROVIDER: OAuthHelpers };
 
 // The authorization flow, in three requests:
 //
@@ -69,40 +72,47 @@ async function rememberOptions(env: AppEnv) {
   return { secret: await consentRememberSecret(env), subject: "owner" };
 }
 
-export default {
-  async fetch(req: Request, workerEnv: Env): Promise<Response> {
-    const env: HandlerEnv = { ...appEnv(workerEnv), OAUTH_PROVIDER: workerEnv.OAUTH_PROVIDER };
-    const url = new URL(req.url);
-    try {
-      if (url.pathname === AUTHORIZE_PATH && req.method === "GET") {
-        return await handleAuthorize(req, env);
-      }
-      if (url.pathname === AUTHORIZE_PATH && req.method === "POST") {
-        return await handleConsentDecision(req, env);
-      }
-      if (url.pathname === CALLBACK_PATH && req.method === "GET") {
-        return await handleCallback(req, env, url);
-      }
-    } catch (e) {
-      // AuthorizationError with redirectTo: the client and its redirect URI were
-      // validated, so the error can go back to the client. Without it, the
-      // request isn't trusted enough to redirect anywhere: render it here.
-      if (e instanceof AuthorizationError) {
-        log.warn("authorize_error", { code: e.code, description: e.description });
-        if (e.redirectTo) return Response.redirect(e.redirectTo, 302);
-        return errorPage(
-          "Sign-in couldn't continue",
-          `${e.description} Start connecting again from your MCP client.`,
-          400,
-        );
-      }
-      throw e;
-    }
+// Shared by both hosts. toAppEnv is the host's Env → AppEnv conversion: on
+// Cloudflare it adds the TodoIndex Durable Object lookup as ownerIndex; on Node
+// the env already is an AppEnv whose ownerIndex returns the in-process index.
+export function authHandler<E extends ProviderEnv>(toAppEnv: (env: E) => AppEnv) {
+  return {
+    fetch: (req: Request, hostEnv: E) =>
+      handleAuthRequest(req, { ...toAppEnv(hostEnv), OAUTH_PROVIDER: hostEnv.OAUTH_PROVIDER }),
+  };
+}
 
-    log.debug("auth_path_unknown", { method: req.method, path: url.pathname });
-    return new Response("not found", { status: 404 });
-  },
-};
+async function handleAuthRequest(req: Request, env: HandlerEnv): Promise<Response> {
+  const url = new URL(req.url);
+  try {
+    if (url.pathname === AUTHORIZE_PATH && req.method === "GET") {
+      return await handleAuthorize(req, env);
+    }
+    if (url.pathname === AUTHORIZE_PATH && req.method === "POST") {
+      return await handleConsentDecision(req, env);
+    }
+    if (url.pathname === CALLBACK_PATH && req.method === "GET") {
+      return await handleCallback(req, env, url);
+    }
+  } catch (e) {
+    // AuthorizationError with redirectTo: the client and its redirect URI were
+    // validated, so the error can go back to the client. Without it, the
+    // request isn't trusted enough to redirect anywhere: render it here.
+    if (e instanceof AuthorizationError) {
+      log.warn("authorize_error", { code: e.code, description: e.description });
+      if (e.redirectTo) return Response.redirect(e.redirectTo, 302);
+      return errorPage(
+        "Sign-in couldn't continue",
+        `${e.description} Start connecting again from your MCP client.`,
+        400,
+      );
+    }
+    throw e;
+  }
+
+  log.debug("auth_path_unknown", { method: req.method, path: url.pathname });
+  return new Response("not found", { status: 404 });
+}
 
 async function handleAuthorize(req: Request, env: HandlerEnv): Promise<Response> {
   const oauth = env.OAUTH_PROVIDER;

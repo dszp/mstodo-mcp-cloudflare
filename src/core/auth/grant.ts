@@ -16,7 +16,7 @@ export type GrantRefusal = "grant_revoked" | "grant_expired" | "reauth_required"
 // Callers must pass the props of the token on THIS request. McpAgent's
 // this.props is the props of the token that first started the session and is
 // never refreshed afterwards, so it can't be used here — each host's /mcp
-// wrapper (on Cloudflare, the apiHandler in src/hosts/cloudflare/oauth.ts)
+// wrapper (the apiHandler in src/hosts/shared/oauth.ts)
 // runs this check with that request's props instead.
 export async function grantRefusal(env: AppEnv, props: Partial<Props> | undefined): Promise<GrantRefusal | null> {
   const { epoch, reauth } = await ownerIndex(env).authState();
