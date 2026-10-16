@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assertGraphUrl, redactUrl, GraphError } from "../src/graph/client";
+import { assertGraphUrl, redactUrl, GraphError } from "../src/core/graph/client";
 
 describe("assertGraphUrl (H1 — Bearer-token host pin)", () => {
   it("accepts the canonical Graph base and resource URLs", () => {

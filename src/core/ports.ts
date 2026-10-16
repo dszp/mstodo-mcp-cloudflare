@@ -63,5 +63,5 @@ export interface AppEnv {
   TODO_CACHE: KeyValueStore;
   OAUTH_KV: KeyValueStore;
   // Host hook: how core reaches the singleton index (see core/owner-index.ts).
-  ownerIndex?: () => IndexBackend;
+  ownerIndex: () => IndexBackend;
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
 import type { KeyValueStore, AppEnv } from "../src/core/ports";
+import { appEnv } from "../src/hosts/cloudflare/env";
 
 describe("ports", () => {
   it("Cloudflare KV satisfies KeyValueStore structurally", async () => {
@@ -10,8 +11,9 @@ describe("ports", () => {
     await kv.delete("ports:test");
   });
 
-  it("the worker Env is assignable to AppEnv", () => {
-    const e: AppEnv = env as unknown as Env; // compile-time assertion
+  it("appEnv(worker Env) is an AppEnv", () => {
+    const e: AppEnv = appEnv(env as unknown as Env); // compile-time assertion
     expect(e.TIMEZONE).toBeTypeOf("string");
+    expect(e.ownerIndex).toBeTypeOf("function");
   });
 });

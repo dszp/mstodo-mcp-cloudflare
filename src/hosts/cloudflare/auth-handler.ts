@@ -4,10 +4,10 @@ import {
   type AuthRequest,
   type OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
-import { readBounded } from "../util/body";
-import { log } from "../log";
-import { ownerIndex } from "../core/owner-index";
-import { consentRememberSecret } from "./crypto";
+import { readBounded } from "../../core/util/body";
+import { log } from "../../core/log";
+import { ownerIndex } from "../../core/owner-index";
+import { consentRememberSecret } from "../../core/auth/crypto";
 import { consentPage, errorPage } from "./consent-page";
 import {
   buildAnchorMailbox,
@@ -24,11 +24,12 @@ import {
   tokensFromResponse,
   wipeIdentityScopedState,
   TokenExchangeError,
-} from "./microsoft";
-import type { AppEnv } from "../core/ports";
+} from "../../core/auth/microsoft";
+import type { AppEnv } from "../../core/ports";
+import { appEnv } from "./env";
 
-// Cloudflare-only: OAUTH_PROVIDER is injected by the OAuthProvider runtime. Moves
-// to the Cloudflare host in Task 7/9; core ports do not carry it.
+// OAUTH_PROVIDER is injected into the Worker env by the OAuthProvider runtime;
+// core ports do not carry it, so the handler adds it beside the core env.
 type HandlerEnv = AppEnv & { OAUTH_PROVIDER: OAuthHelpers };
 
 // The authorization flow, in three requests:
@@ -69,7 +70,8 @@ async function rememberOptions(env: AppEnv) {
 }
 
 export default {
-  async fetch(req: Request, env: HandlerEnv): Promise<Response> {
+  async fetch(req: Request, workerEnv: Env): Promise<Response> {
+    const env: HandlerEnv = { ...appEnv(workerEnv), OAUTH_PROVIDER: workerEnv.OAUTH_PROVIDER };
     const url = new URL(req.url);
     try {
       if (url.pathname === AUTHORIZE_PATH && req.method === "GET") {

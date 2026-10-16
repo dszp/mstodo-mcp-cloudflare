@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { SCOPES, TOKENS_KEY } from "../src/auth/microsoft";
+import { SCOPES, TOKENS_KEY } from "../src/core/auth/microsoft";
 
 function indexStub(name: string) {
   return env.TODO_INDEX_DO.getByName(name);

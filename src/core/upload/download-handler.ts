@@ -3,13 +3,13 @@ import { loadTokens } from "../auth/microsoft";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import { getAttachmentBytes } from "./graph-upload";
 import { json, reasonForGraphError, sanitizeName, statusForReason } from "./handler";
-import { ownerIndex } from "../core/owner-index";
+import { ownerIndex } from "../owner-index";
 import {
   consumeDownloadCapability,
   downloadLinksEnabled,
   lookupDownloadCapability,
 } from "./tokens";
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 
 // Public (non-OAuth) binary download endpoint — the inverse of /upload (ROADMAP
 // §9). handleDownload returns a Response for /download or null for any other path

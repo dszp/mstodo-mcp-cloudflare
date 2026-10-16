@@ -1,11 +1,11 @@
-import { env as rawEnv } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The test pool types env as Cloudflare.Env (no runtime-injected OAUTH_PROVIDER);
 // handleUpload takes the global Env. Cast once for the file (see index-do.test.ts).
-const env = rawEnv as unknown as Env;
-import { handleUpload } from "../src/upload/handler";
-import { createUploadCapability } from "../src/upload/tokens";
+const env = testAppEnv();
+import { handleUpload } from "../src/core/upload/handler";
+import { createUploadCapability } from "../src/core/upload/tokens";
+import { testAppEnv } from "./_app-env";
 
 const TOKENS_KEY = "tokens:owner";
 const SCOPE = { list_id: "L1", task_id: "T1" } as const;

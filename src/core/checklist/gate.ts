@@ -1,4 +1,4 @@
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 // Feature gate + derived config for the checklist-item cache (ROADMAP). Unlike
 // subscriptions / My Day (ON unless "false"), this defaults OFF: it adds a
 // one-time per-task backfill cost (Graph has no hasChecklist boolean and delta

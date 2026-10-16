@@ -3,7 +3,7 @@ import {
   type ChecklistItem,
   type TodoTask,
   type TodoTaskList,
-} from "../../graph/types";
+} from "../graph/types";
 import {
   loadTokens,
   refreshTokensForScope,
@@ -17,13 +17,13 @@ import {
   myDayEnabled,
   reauthReasonFromTokenError,
   type StoredTokens,
-} from "../../auth/microsoft";
-import { ReauthRequiredError, type ReauthState } from "../../auth/reauth";
-import { SubstrateClient, SubstrateError } from "../../graph/substrate-client";
-import { GraphClient, GraphError, type TokenProvider } from "../../graph/client";
-import { followToTerminal, type DeltaRow } from "../../graph/delta";
-import { encodeCursor, decodeCursor } from "../../util/cursor";
-import { log } from "../../log";
+} from "../auth/microsoft";
+import { ReauthRequiredError, type ReauthState } from "../auth/reauth";
+import { SubstrateClient, SubstrateError } from "../graph/substrate-client";
+import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
+import { followToTerminal, type DeltaRow } from "../graph/delta";
+import { encodeCursor, decodeCursor } from "../util/cursor";
+import { log } from "../log";
 import type { AlarmScheduler, AppEnv, SqlDb, SqlValue, StateStore } from "../ports";
 import {
   SCHEMA_DDL,
@@ -41,17 +41,17 @@ import {
   type SyncStatusReport,
 } from "./sql";
 import { applyMigrations } from "./migrations";
-import { loadListsConfig } from "../../config/loader";
-import { shouldSkipSync } from "../../config/sync-policy";
+import { loadListsConfig } from "../config/loader";
+import { shouldSkipSync } from "../config/sync-policy";
 import {
   taskSubscriptionsEnabled,
   webhookUrl,
   SUBSCRIPTION_LIFETIME_MS,
   SUBSCRIPTION_RENEW_MARGIN_MS,
   maxSubscriptionOpsPerCycle,
-} from "../../subscriptions/gate";
-import { checklistCacheEnabled, checklistScanMaxTasksPerCycle } from "../../checklist/gate";
-import { listChecklistItems } from "../../graph/todo-resources";
+} from "../subscriptions/gate";
+import { checklistCacheEnabled, checklistScanMaxTasksPerCycle } from "../checklist/gate";
+import { listChecklistItems } from "../graph/todo-resources";
 import {
   createSubscription,
   renewSubscription,
@@ -61,10 +61,10 @@ import {
   newClientState,
   desiredExpiration,
   type GraphSubscription,
-} from "../../subscriptions/manager";
+} from "../subscriptions/manager";
 
 // Phase 5 — IndexCore (hosted on Cloudflare by the TodoIndex singleton Durable
-// Object, src/cache/index-do.ts): the single source of truth for
+// Object, src/hosts/cloudflare/todo-index-do.ts): the single source of truth for
 // Microsoft To Do state. SQLite `tasks` (+ `tasks_fts` FTS5 mirror) + `lists`
 // roster + `sync_state`. Addressed via ownerIndex(env) from the agent
 // and the Worker scheduled() heartbeat.
@@ -250,7 +250,7 @@ export class IndexCore implements TokenProvider {
   //
   // The epoch is an opaque random value stamped into every MCP grant's props at
   // /authorize. A grant whose epoch doesn't match the current one is dead — the
-  // tool preflight refuses it and its next refresh is rejected (auth/oauth.ts).
+  // tool preflight refuses it and its next refresh is rejected (refuseMcpRequest / grantRefusal in core/auth/grant.ts).
   // Bumping the epoch therefore revokes every outstanding MCP grant at once.
   //
   // The re-auth flag is set when Microsoft refuses a refresh for good or answers
@@ -1724,7 +1724,7 @@ export class IndexCore implements TokenProvider {
   // roster, and every `sync_state` cursor, then cancels any pending alarm so a
   // stale baseline for the previous identity can't run against the new account's
   // tokens. The KV twin (tokens/identity) is cleared by
-  // auth/microsoft.ts wipeIdentityScopedState(), which also calls this.
+  // core/auth/microsoft.ts wipeIdentityScopedState(), which also calls this.
   //
   // Does NOT re-arm: the new identity's tokens are stored right after the wipe,
   // and the next cron heartbeat (or first cold read via the agent's warm path)
@@ -2246,67 +2246,14 @@ export class IndexCore implements TokenProvider {
 
 // Every public method — the RPC surface the Cloudflare shell delegates and
 // core callers use via ownerIndex(). bootstrap() is host lifecycle, not surface.
-export type IndexCoreMethods = Pick<
-  IndexCore,
-  | "alarm"
-  | "authState"
-  | "clearChecklistItems"
-  | "clearMyDayFields"
-  | "clearReauth"
-  | "deleteChecklistItem"
-  | "deleteList"
-  | "deleteSubscriptionRecord"
-  | "deleteTask"
-  | "ensureSyncing"
-  | "findListForTask"
-  | "findSubscription"
-  | "forceRefresh"
-  | "forceSubstrateRefresh"
-  | "getAccessToken"
-  | "getChecklistItems"
-  | "getList"
-  | "getMyDayFields"
-  | "getMyDayScanState"
-  | "getSubscriptions"
-  | "getSubstrateAccessToken"
-  | "getTaskMeta"
-  | "isListSynced"
-  | "listLists"
-  | "markChecklistDirty"
-  | "markMyDayUnavailable"
-  | "markReauthRequired"
-  | "onChangeNotification"
-  | "onLifecycleEvent"
-  | "putSubscription"
-  | "query"
-  | "queryMyDayForDate"
-  | "reconcileSubscriptions"
-  | "recreateSubscriptions"
-  | "refreshToken"
-  | "renewSubscriptions"
-  | "replaceChecklistItems"
-  | "reportClaimsChallenge"
-  | "resetIdentity"
-  | "resync"
-  | "revokeAllGrants"
-  | "runSyncCycle"
-  | "search"
-  | "searchChecklistItems"
-  | "selectDueChecklistTasks"
-  | "setTaskFlags"
-  | "subscriptionStatus"
-  | "syncStatus"
-  | "updateMyDayFields"
-  | "upsertChecklistItem"
-  | "upsertList"
-  | "upsertTask"
->;
+export type IndexCoreMethods = Pick<IndexCore, Exclude<keyof IndexCore, "bootstrap">>;
 
 // Over Durable Object RPC every call is async, so callers see every method as
 // returning a Promise — even ones that are synchronous in-process. Typing the
 // surface this way keeps a Node caller from relying on a sync return value that
 // would be a Promise on Cloudflare. alarm() is excluded: the host's scheduler
 // invokes it, and a Durable Object stub does not expose it over RPC.
+// Return values must stay structured-cloneable: on Cloudflare they cross DO RPC.
 type Promisified<T> = {
   [K in keyof T]: T[K] extends (...a: infer A) => infer R ? (...a: A) => Promise<Awaited<R>> : never;
 };

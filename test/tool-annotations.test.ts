@@ -1,20 +1,20 @@
 import { describe, expect, it } from "vitest";
-// Import the agent SOURCE as a string (Vite ?raw) rather than the module — the
+// Import the tools SOURCE as a string (Vite ?raw) rather than the module — the
 // MCP agent pulls in the SDK -> ajv, which the workers pool can't resolve (see
 // test/_test-worker.ts). A static source check needs only the text, and it tests
 // the real invariant: every tool registered via this.#tool("name") must have a
 // matching entry in the central TOOL_ANNOTATIONS table (otherwise a new tool
 // silently ships with only the bare base-default hints and no title).
-import agentSource from "../src/core/mcp/register-tools.ts?raw";
+import toolsSource from "../src/core/mcp/register-tools.ts?raw";
 
 describe("MCP tool annotations coverage", () => {
   // Tool names registered through the annotation-injecting wrapper.
   const registered = new Set(
-    [...agentSource.matchAll(/#tool\(\s*"([a-z0-9_]+)"/g)].map((m) => m[1]),
+    [...toolsSource.matchAll(/#tool\(\s*"([a-z0-9_]+)"/g)].map((m) => m[1]),
   );
   // Keys of the TOOL_ANNOTATIONS table (each row is `  name: { title: ... }`).
   const annotated = new Set(
-    [...agentSource.matchAll(/^ {2}([a-z0-9_]+): \{ title:/gm)].map((m) => m[1]),
+    [...toolsSource.matchAll(/^ {2}([a-z0-9_]+): \{ title:/gm)].map((m) => m[1]),
   );
 
   it("finds the registered tools and the annotation table", () => {

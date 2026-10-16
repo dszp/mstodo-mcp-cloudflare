@@ -229,7 +229,7 @@ export class GraphClient {
 // graph.microsoft.com base, but server-provided continuation links are followed
 // verbatim; pinning the host keeps the Bearer token from leaking if Graph ever
 // returns (or an attacker injects) a foreign link. The Entra token endpoint is
-// fetched directly in auth/microsoft.ts, not through GraphClient, so it is
+// fetched directly in core/auth/microsoft.ts, not through GraphClient, so it is
 // unaffected by this guard.
 const GRAPH_HOST = "graph.microsoft.com";
 

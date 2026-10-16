@@ -1,7 +1,7 @@
-import { ownerIndex } from "../core/owner-index";
+import { ownerIndex } from "../owner-index";
 import { log } from "../log";
 import type { Props } from "../types";
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 
 // A grant's total life, however often it is refreshed.
 export const MAX_GRANT_AGE_MS = 90 * 86_400_000;
@@ -15,8 +15,9 @@ export type GrantRefusal = "grant_revoked" | "grant_expired" | "reauth_required"
 //
 // Callers must pass the props of the token on THIS request. McpAgent's
 // this.props is the props of the token that first started the session and is
-// never refreshed afterwards, so it can't be used here — the HTTP layer
-// (auth/oauth.ts apiHandler) runs this check with ctx.props instead.
+// never refreshed afterwards, so it can't be used here — each host's /mcp
+// wrapper (on Cloudflare, the apiHandler in src/hosts/cloudflare/oauth.ts)
+// runs this check with that request's props instead.
 export async function grantRefusal(env: AppEnv, props: Partial<Props> | undefined): Promise<GrantRefusal | null> {
   const { epoch, reauth } = await ownerIndex(env).authState();
   if (!props?.epoch || props.epoch !== epoch) return "grant_revoked";

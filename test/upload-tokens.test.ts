@@ -1,15 +1,15 @@
-import { env as rawEnv } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_TTL_SECONDS,
   consumeUploadCapability,
   createUploadCapability,
   lookupUploadCapability,
-} from "../src/upload/tokens";
+} from "../src/core/upload/tokens";
+import { testAppEnv } from "./_app-env";
 
 // The test pool types env as Cloudflare.Env (no runtime-injected OAUTH_PROVIDER);
 // our helpers take the global Env. Cast once for the file (see index-do.test.ts).
-const env = rawEnv as unknown as Env;
+const env = testAppEnv();
 
 const SCOPE = { list_id: "L1", task_id: "T1" } as const;
 

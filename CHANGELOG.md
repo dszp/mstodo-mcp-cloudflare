@@ -14,6 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "runtime" ones arrive through the MCP SDK's Express server, which this Worker doesn't use.
   What's left (`miniflare`, `sharp`, `undici` inside `wrangler`) is build tooling pinned by the
   current wrangler release.
+- **Source split into `src/core/` and `src/hosts/cloudflare/`.** Host-neutral code (tools, index,
+  Graph clients, auth helpers, config) moved under `src/core/`, which a test now keeps free of
+  Cloudflare imports; the Worker entry point, Durable Object classes and OAuth wiring moved under
+  `src/hosts/cloudflare/`. No behavior change: tool names, inputs, outputs, KV keys and Durable
+  Object storage are unchanged.
+
+### Upgrade notes
+- **Update `main` in your `wrangler.jsonc`.** The Worker entry point moved from `src/index.ts` to
+  `src/hosts/cloudflare/worker.ts`. Set `"main": "src/hosts/cloudflare/worker.ts"` (relative to
+  the config file's own folder) before your next `wrangler deploy` or `npm run types`; the old
+  path no longer exists.
 
 ## [0.16.0] – 2026-10-15
 

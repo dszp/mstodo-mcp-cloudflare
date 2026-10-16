@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { resolveListId, type RosterEntry } from "../src/config/aliases";
-import type { ListsConfig } from "../src/config/schemas";
+import { resolveListId, type RosterEntry } from "../src/core/config/aliases";
+import type { ListsConfig } from "../src/core/config/schemas";
 
 const config = (aliases: Record<string, string>): ListsConfig => ({
   patterns: [],

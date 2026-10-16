@@ -1,4 +1,4 @@
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 // Server-side keys derived from the MS_CLIENT_SECRET Worker secret.
 //
 // Two features need a server-held key: encrypting the Microsoft tokens at rest

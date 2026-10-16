@@ -2,18 +2,18 @@ import { z, type ZodRawShape } from "zod";
 import type { McpServer, ToolCallback, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { AppEnv } from "../ports";
-import { errResponse, instrument, type McpResponse } from "../../observability/instrument";
-import { log } from "../../log";
-import { fetchMe, loadIdentity, loadTokens, myDayEnabled, REFRESH_SKEW_MS } from "../../auth/microsoft";
-import { reauthPending, refusalDescription } from "../../auth/grant";
-import { isReauthRequired } from "../../auth/reauth";
-import { GraphClient, GraphError, type TokenProvider } from "../../graph/client";
+import { errResponse, instrument, type McpResponse } from "../observability/instrument";
+import { log } from "../log";
+import { fetchMe, loadIdentity, loadTokens, myDayEnabled, REFRESH_SKEW_MS } from "../auth/microsoft";
+import { reauthPending, refusalDescription } from "../auth/grant";
+import { isReauthRequired } from "../auth/reauth";
+import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import {
   SubstrateClient,
   SubstrateError,
   projectSubstrateTaskDetails,
   compareOrderDateTimeDesc,
-} from "../../graph/substrate-client";
+} from "../graph/substrate-client";
 import {
   epochToIso,
   rowToList,
@@ -23,8 +23,8 @@ import {
   type TaskRow,
 } from "../index/sql";
 import { ownerIndex } from "../owner-index";
-import { mapPool } from "../../graph/concurrency";
-import { parseDateInput, toGraphDate, toGraphDateTime } from "../../util/dates";
+import { mapPool } from "../graph/concurrency";
+import { parseDateInput, toGraphDate, toGraphDateTime } from "../util/dates";
 import {
   createDownloadCapability,
   createUploadCapability,
@@ -34,7 +34,7 @@ import {
   MAX_FILES_CAP,
   type DownloadCapabilityScope,
   type UploadCapabilityScope,
-} from "../../upload/tokens";
+} from "../upload/tokens";
 import {
   AttachmentSchema,
   ChecklistItemSchema,
@@ -47,26 +47,26 @@ import {
   type ChecklistItem,
   type TodoTask,
   type TodoTaskList,
-} from "../../graph/types";
-import { loadAttachmentConfig, loadLinkRules, loadListsConfig, storeAttachmentConfig, storeLinkRules, storeListsConfig } from "../../config/loader";
-import { runLinkRules, type LinkRuleMatch } from "../../config/link-rules-engine";
-import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema, ListsConfigSchema } from "../../config/schemas";
-import { classifyList, pinClassifications, stripEmoji } from "../../config/classifier";
-import { resolveListId } from "../../config/aliases";
-import { patternProblem } from "../../config/regex-safety";
-import { resolveListScope, resolveStatusFilter } from "../../config/query-scope";
-import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../../upload/graph-upload";
-import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "../../mcp/move-task";
-import { computeReorder, msToOrder, orderToMs, type ReorderSpec } from "../../mcp/reorder";
-import { collectMyDayNeighborOrders, findMyDayRowById } from "../../mcp/my-day-order";
-import type { SubstrateTask } from "../../graph/substrate-client";
+} from "../graph/types";
+import { loadAttachmentConfig, loadLinkRules, loadListsConfig, storeAttachmentConfig, storeLinkRules, storeListsConfig } from "../config/loader";
+import { runLinkRules, type LinkRuleMatch } from "../config/link-rules-engine";
+import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema, ListsConfigSchema } from "../config/schemas";
+import { classifyList, pinClassifications, stripEmoji } from "../config/classifier";
+import { resolveListId } from "../config/aliases";
+import { patternProblem } from "../config/regex-safety";
+import { resolveListScope, resolveStatusFilter } from "../config/query-scope";
+import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
+import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
+import { computeReorder, msToOrder, orderToMs, type ReorderSpec } from "./reorder";
+import { collectMyDayNeighborOrders, findMyDayRowById } from "./my-day-order";
+import type { SubstrateTask } from "../graph/substrate-client";
 import {
   createChecklistItem,
   createLinkedResource,
   getFileAttachment,
   listAttachments,
-} from "../../graph/todo-resources";
-import { checklistCacheEnabled } from "../../checklist/gate";
+} from "../graph/todo-resources";
+import { checklistCacheEnabled } from "../checklist/gate";
 
 const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
 
@@ -496,7 +496,7 @@ const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
 };
 
 // What a host hands the tool layer. No grant props: the grant check runs per
-// HTTP request in each host (refuseMcpRequest in auth/grant.ts), because
+// HTTP request in each host (refuseMcpRequest in core/auth/grant.ts), because
 // McpAgent keeps a session's first-token props for the session's lifetime.
 export interface ToolContext {
   env: AppEnv;
@@ -558,8 +558,9 @@ class ToDoTools implements TokenProvider {
   }
 
   // The per-call auth gate (see #tool). The grant itself (epoch, age) is
-  // checked per HTTP request in auth/oauth.ts, where the current token's props
-  // are available; this.props here is the session's FIRST token and goes stale.
+  // checked by each host, which runs refuseMcpRequest on every /mcp request
+  // with that request's token props — McpAgent's this.props is the session's
+  // FIRST token and goes stale, so it can't serve as the grant check.
   // What's left is state that doesn't depend on the caller: Microsoft re-auth
   // pending (it can be set mid-session) and tokens present.
   async #authPreflight(tool: string): Promise<McpResponse | null> {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { runLinkRules } from "../src/config/link-rules-engine";
-import { LinkRulesConfigSchema, type LinkRulesConfig } from "../src/config/schemas";
+import { runLinkRules } from "../src/core/config/link-rules-engine";
+import { LinkRulesConfigSchema, type LinkRulesConfig } from "../src/core/config/schemas";
 
 // Parse through the schema so defaults (flags, fields, application_name,
 // enabled) are applied exactly as they are at runtime.

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { stripEmoji, classifyList, pinClassifications } from "../src/config/classifier";
-import type { ListsConfig } from "../src/config/schemas";
+import { stripEmoji, classifyList, pinClassifications } from "../src/core/config/classifier";
+import type { ListsConfig } from "../src/core/config/schemas";
 
 const cfg = (
   patterns: ListsConfig["patterns"],

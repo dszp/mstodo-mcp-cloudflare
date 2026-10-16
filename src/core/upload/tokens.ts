@@ -1,4 +1,4 @@
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 // Short-lived, single-use capability tokens for the web attachment-upload flow.
 //
 // `create_upload_link` stores the destination scope (list_id + task_id, optional

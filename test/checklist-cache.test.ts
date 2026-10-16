@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import type { TodoIndex } from "../src/cache/index-do";
+import type { TodoIndex } from "../src/hosts/cloudflare/todo-index-do";
 import { LATEST_SCHEMA_VERSION } from "../src/core/index/migrations";
-import { SCOPES, TOKENS_KEY } from "../src/auth/microsoft";
+import { SCOPES, TOKENS_KEY } from "../src/core/auth/microsoft";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}

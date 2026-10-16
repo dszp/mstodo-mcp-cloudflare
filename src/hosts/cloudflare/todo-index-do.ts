@@ -1,8 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
-import { IndexCore, type IndexCoreMethods } from "../core/index/index-core";
+import { IndexCore, type IndexCoreMethods } from "../../core/index/index-core";
+import { appEnv } from "./env";
 
 // Re-exported for existing importers; the implementations live in core.
-export { isScanDue, selectDueScanLists } from "../core/index/index-core";
+export { isScanDue, selectDueScanLists } from "../../core/index/index-core";
 
 // Cloudflare host shell for the singleton index. All logic — the SQLite cache,
 // delta sync, and the sole-refresher token chain — lives in IndexCore over
@@ -14,7 +15,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.#core = new IndexCore({ sql: ctx.storage.sql, state: ctx.storage, alarms: ctx.storage, env });
+    this.#core = new IndexCore({ sql: ctx.storage.sql, state: ctx.storage, alarms: ctx.storage, env: appEnv(env) });
     // Runs once per instance before any request is delivered.
     ctx.blockConcurrencyWhile(async () => this.#core.bootstrap());
   }

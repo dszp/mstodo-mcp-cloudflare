@@ -5,7 +5,7 @@ import {
   msToOrder,
   computeReorder,
   type ReorderSpec,
-} from "../src/mcp/reorder";
+} from "../src/core/mcp/reorder";
 
 // Pure manual-ordering math for reorder_task. OrderDateTime is the To Do
 // manual-sort field (higher = nearer the top). These tests pin the arithmetic

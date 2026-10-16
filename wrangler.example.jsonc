@@ -7,7 +7,7 @@
   // KV namespace IDs). The test pool (vitest.config.ts) reads THIS example so
   // `npm test` works on a fresh clone without secrets.
   "account_id": "<your-cloudflare-account-id>",
-  "main": "src/index.ts",
+  "main": "src/hosts/cloudflare/worker.ts",
   "compatibility_date": "2026-05-01",
   "compatibility_flags": ["nodejs_compat"],
 

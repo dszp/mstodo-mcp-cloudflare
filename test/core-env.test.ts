@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
 import type { AppEnv } from "../src/core/ports";
-import { storeTokens, loadTokens, SCOPES } from "../src/auth/microsoft";
-import { loadListsConfig } from "../src/config/loader";
+import { storeTokens, loadTokens, SCOPES } from "../src/core/auth/microsoft";
+import { loadListsConfig } from "../src/core/config/loader";
 
 function memoryKv() {
   const m = new Map<string, string>();

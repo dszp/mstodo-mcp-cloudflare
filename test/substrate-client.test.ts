@@ -5,7 +5,7 @@ import {
   SubstrateSubtaskSchema,
   extractSubtasks,
   type SubstrateTokenProvider,
-} from "../src/graph/substrate-client";
+} from "../src/core/graph/substrate-client";
 
 // The cross-list move (lossless re-parent) and the My-Day-carry read on the
 // copy/delete fallback are the only new Substrate HTTP shapes move_task adds.

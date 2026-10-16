@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { OWNER_DO_NAME } from "../src/core/index/sql";
-import { seal, unseal, isSealed } from "../src/auth/crypto";
+import { seal, unseal, isSealed } from "../src/core/auth/crypto";
 import {
   TOKENS_KEY,
   IDENTITY_KEY,
@@ -11,15 +11,17 @@ import {
   reauthReasonFromTokenError,
   TokenExchangeError,
   type StoredTokens,
-} from "../src/auth/microsoft";
-import { parseClaimsChallenge, ReauthRequiredError, isReauthRequired } from "../src/auth/reauth";
-import { grantRefusal, refuseMcpRequest, MAX_GRANT_AGE_MS } from "../src/auth/grant";
-import { GraphClient } from "../src/graph/client";
-import { consentPage } from "../src/auth/consent-page";
-import AuthHandler from "../src/auth/handler";
-import type { Props } from "../src/types";
+} from "../src/core/auth/microsoft";
+import { parseClaimsChallenge, ReauthRequiredError, isReauthRequired } from "../src/core/auth/reauth";
+import { grantRefusal, refuseMcpRequest, MAX_GRANT_AGE_MS } from "../src/core/auth/grant";
+import { GraphClient } from "../src/core/graph/client";
+import { consentPage } from "../src/hosts/cloudflare/consent-page";
+import AuthHandler from "../src/hosts/cloudflare/auth-handler";
+import type { Props } from "../src/core/types";
+import { testAppEnv } from "./_app-env";
+import type { AppEnv } from "../src/core/ports";
 
-const E = env as unknown as Env;
+const E = testAppEnv();
 
 function index() {
   return env.TODO_INDEX_DO.getByName(OWNER_DO_NAME);
@@ -69,7 +71,7 @@ describe("token sealing", () => {
   });
 
   it("reads a record sealed under a different secret as no tokens", async () => {
-    const other = { ...E, MS_CLIENT_SECRET: "rotated-secret" } as Env;
+    const other = { ...E, MS_CLIENT_SECRET: "rotated-secret" } as AppEnv;
     await storeTokens(other, TOKENS);
     expect(await loadTokens(E)).toBeNull();
   });
@@ -293,7 +295,7 @@ describe("authorize flow", () => {
   }
 
   let oauth: ReturnType<typeof oauthStub>;
-  const envWith = () => ({ ...E, OAUTH_PROVIDER: oauth }) as unknown as Env;
+  const envWith = () => ({ ...(env as object), OAUTH_PROVIDER: oauth }) as unknown as Env;
 
   beforeEach(() => {
     calls = [];

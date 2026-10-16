@@ -1,9 +1,10 @@
 import { OAuthError, OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { MSToDoMCP } from "../mcp/agent";
-import { log } from "../log";
-import AuthHandler from "./handler";
-import { grantRefusal, refuseMcpRequest, refusalDescription } from "./grant";
-import type { Props } from "../types";
+import { MSToDoMCP } from "./mcp-agent";
+import { log } from "../../core/log";
+import AuthHandler from "./auth-handler";
+import { grantRefusal, refuseMcpRequest, refusalDescription } from "../../core/auth/grant";
+import type { Props } from "../../core/types";
+import { appEnv } from "./env";
 
 export const MCP_PATH = "/mcp";
 
@@ -33,7 +34,7 @@ const mcpHandler = MSToDoMCP.serve(MCP_PATH, { binding: "TODO_INDEX" });
 // refuses — and starts a fresh authorization.
 const apiHandler = {
   async fetch(req: Request, env: Env, ctx: ExecutionContext & { props?: unknown }): Promise<Response> {
-    const refused = await refuseMcpRequest(env, ctx.props as Partial<Props> | undefined);
+    const refused = await refuseMcpRequest(appEnv(env), ctx.props as Partial<Props> | undefined);
     return refused ?? mcpHandler.fetch(req, env, ctx);
   },
 };
@@ -52,7 +53,7 @@ export function buildOAuthProvider(origin: string): OAuthProvider<Env> {
     refreshTokenIdleTTL: REFRESH_TOKEN_IDLE_TTL_SEC,
     tokenExchangeCallback: async ({ grantType, props, env }) => {
       if (grantType !== "refresh_token") return;
-      const refusal = await grantRefusal(env, props as Partial<Props>);
+      const refusal = await grantRefusal(appEnv(env), props as Partial<Props>);
       if (refusal) {
         // invalid_grant makes the library revoke this grant, and makes the MCP
         // client start a fresh authorization instead of retrying.

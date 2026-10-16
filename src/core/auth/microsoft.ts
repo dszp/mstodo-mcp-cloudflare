@@ -1,10 +1,10 @@
 import { log } from "../log";
-import { ownerIndex } from "../core/owner-index";
+import { ownerIndex } from "../owner-index";
 import { loadListsConfig, storeListsConfig } from "../config/loader";
 import { isSealed, seal, unseal } from "./crypto";
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 
-// Microsoft Entra v2 OAuth — pure helpers. The handler (auth/handler.ts) owns
+// Microsoft Entra v2 OAuth — pure helpers. The handler (src/hosts/cloudflare/auth-handler.ts) owns
 // routing + KV state-bag lifecycle; this module owns the protocol shape and
 // per-token KV persistence. As of Phase 5 the single-flight refresh discipline
 // lives in the singleton TodoIndex DO (sole refresher); the per-session agent
@@ -143,7 +143,7 @@ export function buildAuthorizeUrl(
 // emit a raw body that could, in some failure modes, carry token-adjacent
 // detail. Falls back to a short truncated slice when the body isn't JSON we
 // recognize. The full body still rides on TokenExchangeError.detail (in-process
-// only, never logged) so the AADSTS65001 latch in index-do.ts keeps working.
+// only, never logged) so the AADSTS65001 latch in IndexCore keeps working.
 function summarizeMsError(text: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
@@ -251,7 +251,7 @@ export function tokensFromResponse(
 }
 
 // Tokens are stored sealed (AES-GCM, key derived from MS_CLIENT_SECRET — see
-// auth/crypto.ts), so read access to the KV namespace alone doesn't yield a
+// core/auth/crypto.ts), so read access to the KV namespace alone doesn't yield a
 // usable refresh token. A plaintext record written before sealing existed is
 // accepted once and re-stored sealed. A sealed record that no longer decrypts
 // (the client secret was rotated) reads as "no tokens": the owner re-authorizes.
@@ -320,7 +320,7 @@ export async function fetchMe(accessToken: string): Promise<MeIdentity> {
 // Decode the (UNVERIFIED) claims from a JWT payload segment.
 //
 // SECURITY INVARIANT: this is only ever called on a token WE just received
-// directly from Entra over TLS (auth/handler.ts, on our own freshly-issued
+// directly from Entra over TLS (src/hosts/cloudflare/auth-handler.ts, on our own freshly-issued
 // access_token) to read non-security claims (tid/oid) for the Substrate
 // x-anchormailbox header. It MUST NOT be used to make an authorization decision
 // — the owner gate is isOwner() evaluated against a fresh, authenticated Graph
@@ -400,7 +400,7 @@ export async function storeIdentity(env: AppEnv, ident: OwnerIdentity): Promise<
 // replaced the old lists:all / tasks:{listId} / etag:{listId} KV keys). Both
 // are cleared here so two accounts' data can never mix. resetIdentity() also
 // bumps the auth epoch, which invalidates every outstanding MCP grant (each
-// grant carries the epoch it was issued under — see auth/oauth.ts), so an MCP
+// grant carries the epoch it was issued under — see core/auth/grant.ts), so an MCP
 // client paired with the previous account can't read the new account's data.
 //
 // Ordering is load-bearing (H3, fail-closed):

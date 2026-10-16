@@ -3,14 +3,14 @@
 // The TodoIndex DO is the single source of truth for Microsoft To Do state:
 // SQLite `tasks` (+ `tasks_fts` FTS5 mirror) + `lists` roster + `sync_state`
 // (delta tokens / resume cursors). This module holds the schema DDL, the row
-// types, and the Graph-object ⇄ row mappers; the DO class in index-do.ts owns
+// types, and the Graph-object ⇄ row mappers; IndexCore (index-core.ts) owns
 // the connection and the query logic.
 
-import type { ChecklistItem, TodoTask, TodoTaskList } from "../../graph/types";
-import { stripHtml } from "../../util/html";
+import type { ChecklistItem, TodoTask, TodoTaskList } from "../graph/types";
+import { stripHtml } from "../util/html";
 
-// Singleton address for the cross-list index DO. Used everywhere via
-//   ownerIndex(env) (src/core/owner-index.ts)
+// Name the Cloudflare host addresses the singleton index Durable Object by
+// (src/hosts/cloudflare/env.ts). Core reaches the index via ownerIndex(env).
 export const OWNER_DO_NAME = "owner";
 
 // ---------------------------------------------------------------------------

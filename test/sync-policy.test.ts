@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { shouldSkipSync, BUILTIN_NO_SYNC_WELLKNOWN } from "../src/config/sync-policy";
-import { ListsConfigSchema } from "../src/config/schemas";
+import { shouldSkipSync, BUILTIN_NO_SYNC_WELLKNOWN } from "../src/core/config/sync-policy";
+import { ListsConfigSchema } from "../src/core/config/schemas";
 
 const cfg = (over: Partial<{ no_sync: string[]; sync_flagged_emails: boolean }> = {}) =>
   ListsConfigSchema.parse({ patterns: [], aliases: {}, ...over });

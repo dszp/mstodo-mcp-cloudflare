@@ -1,4 +1,4 @@
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 // Feature gate + derived config for Graph change-notification subscriptions
 // (ROADMAP §4). Mirrors the downloadLinksEnabled pattern: ON unless the var is
 // the literal string "false". Subscriptions ride the existing delegated

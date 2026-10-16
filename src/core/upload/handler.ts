@@ -3,7 +3,7 @@ import { loadTokens } from "../auth/microsoft";
 import { loadAttachmentConfig } from "../config/loader";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import { resolveContentType } from "./sniff";
-import { ownerIndex } from "../core/owner-index";
+import { ownerIndex } from "../owner-index";
 import {
   attachFile,
   getAttachmentBytes,
@@ -19,7 +19,7 @@ import {
   lookupUploadCapability,
   type UploadCapabilityScope,
 } from "./tokens";
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 
 // Public (non-OAuth) binary upload endpoint. handleUpload returns a Response for
 // /upload (GET serves the page, POST attaches the file(s) to the scoped task) or

@@ -1,7 +1,7 @@
-import { env as rawEnv } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-const env = rawEnv as unknown as Env;
-import { handleWebhook } from "../src/subscriptions/webhook-handler";
+const env = testAppEnv();
+import { handleWebhook } from "../src/core/subscriptions/webhook-handler";
+import { testAppEnv } from "./_app-env";
 
 // Minimal ExecutionContext stub whose waitUntil work is awaitable via settle().
 function ctxStub() {

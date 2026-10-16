@@ -1,5 +1,5 @@
 import { AttachmentConfigSchema, LinkRulesConfigSchema, ListsConfigSchema, type AttachmentConfig, type LinkRulesConfig, type ListsConfig } from "./schemas";
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 
 const LINK_RULES_KEY = "config:link_rules";
 

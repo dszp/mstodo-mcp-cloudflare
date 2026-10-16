@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseDateInput, toGraphDate, toGraphDateTime, zonedWallTimeToUtc } from "../src/util/dates";
+import { parseDateInput, toGraphDate, toGraphDateTime, zonedWallTimeToUtc } from "../src/core/util/dates";
 
 const NY = "America/New_York";
 

@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import type { TodoIndex } from "../src/cache/index-do";
-import { SCOPES, TOKENS_KEY, IDENTITY_KEY } from "../src/auth/microsoft";
+import type { TodoIndex } from "../src/hosts/cloudflare/todo-index-do";
+import { SCOPES, TOKENS_KEY, IDENTITY_KEY } from "../src/core/auth/microsoft";
 
 function indexStub(name: string) {
   return env.TODO_INDEX_DO.getByName(name);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { patternProblem, MAX_PATTERN_LENGTH } from "../src/config/regex-safety";
+import { patternProblem, MAX_PATTERN_LENGTH } from "../src/core/config/regex-safety";
 
 describe("patternProblem", () => {
   it.each([

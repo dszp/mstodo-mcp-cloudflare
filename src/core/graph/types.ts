@@ -163,7 +163,7 @@ export type Attachment = z.infer<typeof AttachmentSchema>;
 // uploadSession — returned by .../attachments/createUploadSession for large
 // (> 3072 KiB) file attachments. `uploadUrl` is a graph.microsoft.com URL the
 // caller PUTs byte ranges to (with /content appended); `nextExpectedRanges`
-// tells the caller where to resume. See src/upload/graph-upload.ts.
+// tells the caller where to resume. See src/core/upload/graph-upload.ts.
 export const UploadSessionSchema = z
   .object({
     uploadUrl: z.string().url(),

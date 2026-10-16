@@ -22,7 +22,7 @@ to Microsoft Graph directly, while keeping the scheduling/reporting logic in n8n
 is deferred until the API exists and the trade-off is concrete).
 
 **Why it's cheap:** every tool's logic already lives behind the MCP layer in
-`src/mcp/agent.ts` as a handler over the DO + `GraphClient`. An HTTP layer imports
+`src/core/mcp/register-tools.ts` as a handler over the DO + `GraphClient`. An HTTP layer imports
 the same logic and dispatches via routes — zero refactor in the tool code.
 
 **Sketch** (when added):
@@ -298,7 +298,7 @@ covers user-touched tasks).
 > **Status: shipped in 0.12.0.** Checklist items have a user-controllable drag order, backed by
 > the Substrate-only subtask `OrderDateTime` — the same manual-order mechanism `reorder_task` uses
 > for tasks (Graph exposes no checklist order at all). `reorder_checklist_item` moves a step by
-> `top`/`bottom`/`before`/`after`/`index`/`set` (reusing the `src/mcp/reorder.ts` math) and returns
+> `top`/`bottom`/`before`/`after`/`index`/`set` (reusing the `src/core/mcp/reorder.ts` math) and returns
 > `ordered_items`; `list_checklist_items` enriches order best-effort (adds `ordered` + per-item
 > `orderDateTime`); `get_task` gains opt-in `include_checklist_order`. Opt-in (`ENABLE_MY_DAY` + EXO).
 >
@@ -452,7 +452,7 @@ Run the existing link-rules engine over tasks as they arrive through **normal
 delta sync**, so a task created or edited in the To Do app (or any other client)
 gets its linked resource created automatically — the same outcome the MCP server
 already produces, but without an MCP write. Today a ticket number typed into the
-app never gets linked: `runLinkRules` (`src/config/link-rules-engine.ts`, pure,
+app never gets linked: `runLinkRules` (`src/core/config/link-rules-engine.ts`, pure,
 DoS-guarded) only fires on the MCP write paths — `create_task` / `update_task` /
 the on-demand `extract_links` tool, all via `MSToDoMCP.applyLinkRules`. A task that
 never passes through one of those handlers is never scanned. This item closes that
@@ -515,6 +515,6 @@ next `$delta` (the feedback-loop assumption).
 
 Replace the hardcoded `owner` props and the singleton `idFromName("owner")` DO
 with per-user, KV-scoped tokens and per-user DO keying (the `OWNER_DO_NAME` seam
-in `src/cache/sql.ts` is the deliberate extension point). Significant rework —
+in `src/core/index/sql.ts` is the deliberate extension point). Significant rework —
 identity wipe, token storage, and the owner gate all become per-user. Only worth
 doing if sharing a single running instance across people becomes a real need.

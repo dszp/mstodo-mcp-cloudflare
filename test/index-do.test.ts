@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import type { TodoTask, TodoTaskList } from "../src/graph/types";
-import type { TodoIndex } from "../src/cache/index-do";
+import type { TodoTask, TodoTaskList } from "../src/core/graph/types";
+import type { TodoIndex } from "../src/hosts/cloudflare/todo-index-do";
 import { OWNER_DO_NAME } from "../src/core/index/sql";
 import {
   TOKENS_KEY,
@@ -9,7 +9,8 @@ import {
   SCOPES,
   wipeIdentityScopedState,
   loadTokens,
-} from "../src/auth/microsoft";
+} from "../src/core/auth/microsoft";
+import { testAppEnv } from "./_app-env";
 
 function indexStub(name = OWNER_DO_NAME) {
   return env.TODO_INDEX_DO.getByName(name);
@@ -287,7 +288,7 @@ describe("TodoIndex substrate (My Day) token mint", () => {
 
     // The substrate mint persists ONLY the rotated refresh token; the Graph
     // access token in tokens:owner is untouched (a Graph caller still reads it).
-    const stored = (await loadTokens(env as unknown as Env))!;
+    const stored = (await loadTokens(testAppEnv()))!;
     expect(stored.access_token).toBe("graph-at");
     expect(stored.refresh_token).toBe("rt-2");
   });
@@ -308,7 +309,7 @@ describe("TodoIndex substrate (My Day) token mint", () => {
     expect(spy).toHaveBeenCalledTimes(2);
 
     // Graph's full record persisted; substrate didn't clobber the access token.
-    const stored = (await loadTokens(env as unknown as Env))!;
+    const stored = (await loadTokens(testAppEnv()))!;
     expect(stored.access_token).toBe("graph-at-new");
   });
 
@@ -892,7 +893,7 @@ describe("TodoIndex #refresh generation guard (H4)", () => {
     });
 
     // The prior-account tokens were NOT written over the (now-wiped) identity.
-    const stored = (await loadTokens(env as unknown as Env))!;
+    const stored = (await loadTokens(testAppEnv()))!;
     expect(stored.access_token).toBe("at-old");
   });
 });
@@ -921,7 +922,7 @@ describe("wipeIdentityScopedState — Feature A alias clearing", () => {
     await env.TODO_CACHE.put(TOKENS_KEY, JSON.stringify({ access_token: "x" }));
     await env.TODO_CACHE.put(IDENTITY_KEY, JSON.stringify({ id: "old" }));
 
-    await wipeIdentityScopedState(env as unknown as Env);
+    await wipeIdentityScopedState(testAppEnv());
 
     const cfg = (await env.TODO_CACHE.get("config:lists", "json")) as Record<string, unknown>;
     expect(cfg.aliases).toEqual({});
@@ -938,7 +939,7 @@ describe("wipeIdentityScopedState — Feature A alias clearing", () => {
       "config:lists",
       JSON.stringify({ patterns: [], aliases: {} }),
     );
-    await expect(wipeIdentityScopedState(env as unknown as Env)).resolves.toBeUndefined();
+    await expect(wipeIdentityScopedState(testAppEnv())).resolves.toBeUndefined();
     const cfg = (await env.TODO_CACHE.get("config:lists", "json")) as Record<string, unknown>;
     expect(cfg.aliases).toEqual({});
   });
@@ -981,9 +982,9 @@ describe("wipeIdentityScopedState (H3 — fail-closed identity wipe)", () => {
     expect((await stub.query({})).rows.length).toBeGreaterThan(0);
 
     // The cloudflare:test env carries the wrangler-generated bindings but not
-    // the OAuthProvider-injected OAUTH_PROVIDER (added to Env in src/types.ts);
+    // the OAuthProvider-injected OAUTH_PROVIDER (added to Env in src/hosts/cloudflare/types.ts);
     // wipeIdentityScopedState never touches it, so narrow the type for the call.
-    await wipeIdentityScopedState(env as unknown as Env);
+    await wipeIdentityScopedState(testAppEnv());
 
     expect(await env.TODO_CACHE.get(TOKENS_KEY)).toBeNull();
     expect(await env.TODO_CACHE.get(IDENTITY_KEY)).toBeNull();

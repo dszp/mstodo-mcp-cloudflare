@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { readBounded } from "../util/body";
 import { log } from "../log";
-import { ownerIndex } from "../core/owner-index";
+import { ownerIndex } from "../owner-index";
 import { taskSubscriptionsEnabled } from "./gate";
-import type { AppEnv } from "../core/ports";
+import type { AppEnv } from "../ports";
 
 // Public (non-OAuth) Graph change-notification receiver (ROADMAP §4). Same
 // null-for-other-paths contract as /upload and /download. Two jobs:
