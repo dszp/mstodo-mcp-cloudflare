@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 // the real invariant: every tool registered via this.#tool("name") must have a
 // matching entry in the central TOOL_ANNOTATIONS table (otherwise a new tool
 // silently ships with only the bare base-default hints and no title).
-import agentSource from "../src/mcp/agent.ts?raw";
+import agentSource from "../src/core/mcp/register-tools.ts?raw";
 
 describe("MCP tool annotations coverage", () => {
   // Tool names registered through the annotation-injecting wrapper.
