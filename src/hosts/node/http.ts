@@ -11,7 +11,7 @@ import { VERSION } from "../../core/version";
 import { log } from "../../core/log";
 import { oauthProviderOptions, type McpHandler } from "../shared/oauth";
 import type { ProviderEnv } from "../shared/auth-handler";
-import type { NodeEnv } from "./env";
+import { parsePublicOrigin, type NodeEnv } from "./env";
 
 type ProviderNodeEnv = NodeEnv & ProviderEnv;
 
@@ -21,6 +21,12 @@ type ProviderNodeEnv = NodeEnv & ProviderEnv;
 // (the apiHandler in oauthProviderOptions, with this request's ctx.props).
 const nodeMcpHandler: McpHandler<ProviderNodeEnv> = {
   async fetch(req, env) {
+    // Stateless: no server-to-client SSE stream (GET) and no session to end
+    // (DELETE). Answering 405 here, after the grant check, keeps clients from
+    // reconnect-looping on a stream that would close at once.
+    if (req.method !== "POST") {
+      return new Response(null, { status: 405, headers: { allow: "POST" } });
+    }
     const server = new McpServer({ name: "mstodo-mcp", version: VERSION });
     registerTools(server, { env });
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -56,12 +62,11 @@ export function backgroundTasks() {
   };
 }
 
-// Behind a TLS-terminating reverse proxy the request reaches Node as
-// http://<internal host>. The OAuth resource, the Microsoft callback URL and
-// the consent cookies all derive from the request origin, so it is rewritten
-// to the configured public origin before routing.
-function atOrigin(req: Request, origin: string | undefined): Request {
-  if (!origin) return req;
+// Every request is rewritten to the configured public origin before routing.
+// The OAuth resource, the Microsoft callback URL and the consent cookies all
+// derive from the request origin, which @hono/node-server builds from the
+// client's Host header; behind a TLS proxy it is also http://<internal host>.
+function atOrigin(req: Request, origin: string): Request {
   const url = new URL(req.url);
   const target = new URL(url.pathname + url.search, origin);
   if (target.href === url.href) return req;
@@ -78,9 +83,11 @@ function atOrigin(req: Request, origin: string | undefined): Request {
 // Same routing order as the Worker (src/hosts/cloudflare/worker.ts): /health,
 // the three public capability/webhook endpoints, then the OAuth provider, which
 // owns /authorize, /token, /register, /.well-known/* and the /mcp grant gate.
-export function createHandler(env: NodeEnv, options: { publicOrigin?: string } = {}) {
+// publicOrigin is required (SERVICE_BASE_URL in main.ts): throws
+// MissingConfigError / InvalidConfigError unless it is https or loopback http.
+export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
   const background = backgroundTasks();
-  const publicOrigin = options.publicOrigin ? new URL(options.publicOrigin).origin : undefined;
+  const publicOrigin = parsePublicOrigin(options.publicOrigin);
 
   async function fetch(incoming: Request): Promise<Response> {
     const req = atOrigin(incoming, publicOrigin);
@@ -132,7 +139,11 @@ export function startScheduler(
     if (at === null || stopped) return;
     timer = setTimeout(() => {
       timer = undefined;
-      running = running.then(fire);
+      // The chain must stay fulfilled: a rejected link would skip every later
+      // alarm and surface as an unhandled rejection (fatal in Node).
+      running = running.then(fire).catch((e: unknown) =>
+        log.error("alarm_failed", { error: e instanceof Error ? e.message : String(e) }),
+      );
     }, Math.min(Math.max(0, at - Date.now()), MAX_DELAY_MS));
   };
 

@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { openDatabase } from "../src/hosts/node/sqlite-db";
-import { buildNodeEnv, MissingConfigError } from "../src/hosts/node/env";
+import { buildNodeEnv, InvalidConfigError, MissingConfigError } from "../src/hosts/node/env";
 import { backgroundTasks, createHandler, startScheduler } from "../src/hosts/node/http";
 import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
-import { oauthClient, stubMicrosoft } from "./_oauth-client";
+import { ORIGIN, oauthClient, stubMicrosoft } from "./_oauth-client";
 
 const vars = {
   TIMEZONE: "America/New_York",
@@ -37,7 +37,7 @@ function mcpHeaders(token?: string) {
 describe("node host", () => {
   it("serves /health", async () => {
     const { env } = buildNodeEnv(openDatabase(":memory:"), vars);
-    const res = await createHandler(env).fetch(new Request("http://localhost/health"));
+    const res = await createHandler(env, { publicOrigin: ORIGIN }).fetch(new Request("http://localhost/health"));
     expect(await res.json()).toMatchObject({ ok: true, service: "mstodo-mcp", host: "node" });
   });
 
@@ -82,6 +82,32 @@ describe("node host", () => {
     sched.stop();
   });
 
+  it("keeps the alarm chain alive when reading the alarm fails", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { core, state } = buildNodeEnv(openDatabase(":memory:"), vars);
+    const alarm = vi.spyOn(core, "alarm").mockResolvedValue();
+    const sched = startScheduler(core, state);
+    const realGet = state.getAlarm.bind(state);
+    let failed = false;
+    vi.spyOn(state, "getAlarm").mockImplementation(async () => {
+      if (!failed) {
+        failed = true;
+        throw new Error("disk I/O error");
+      }
+      return realGet();
+    });
+    await state.setAlarm(Date.now() + 100);
+    await vi.advanceTimersByTimeAsync(200); // fire() -> getAlarm rejects
+    expect(failed).toBe(true);
+    expect(alarm).not.toHaveBeenCalled();
+    expect(error.mock.calls.some(([m]) => String(m).includes("alarm_failed"))).toBe(true);
+    await state.setAlarm(Date.now() + 100);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(alarm).toHaveBeenCalledTimes(1);
+    await expect(sched.stop()).resolves.toBeUndefined();
+  });
+
   it("coalesces concurrent refreshes into one /token call", async () => {
     const { env, core } = buildNodeEnv(openDatabase(":memory:"), vars);
     await storeTokens(env, { access_token: "a", refresh_token: "r", expires_at: 0, scope: SCOPES, obtained_at: 0 });
@@ -99,7 +125,7 @@ describe("node host", () => {
 
   it("answers an unauthenticated POST /mcp with 401", async () => {
     const { env } = buildNodeEnv(openDatabase(":memory:"), vars);
-    const res = await createHandler(env).fetch(
+    const res = await createHandler(env, { publicOrigin: ORIGIN }).fetch(
       new Request("https://mcp.test/mcp", { ...rpc(1, "tools/list"), headers: mcpHeaders() }),
     );
     expect(res.status).toBe(401);
@@ -108,7 +134,7 @@ describe("node host", () => {
   it("serves MCP over a bearer from the OAuth flow, and drops it after revocation", async () => {
     stubMicrosoft(vars.OWNER_EMAIL);
     const { env, core } = buildNodeEnv(openDatabase(":memory:"), vars);
-    const handler = createHandler(env);
+    const handler = createHandler(env, { publicOrigin: ORIGIN });
     const client = oauthClient(handler.fetch);
     const { access_token } = await client.connect();
 
@@ -145,13 +171,48 @@ describe("node host", () => {
     await handler.drain();
   });
 
-  it("rewrites the request origin to the configured public origin", async () => {
+  it("takes the OAuth origin from configuration, never from the request's Host", async () => {
     const { env } = buildNodeEnv(openDatabase(":memory:"), vars);
     const res = await createHandler(env, { publicOrigin: "https://todo.example/" }).fetch(
-      new Request("http://127.0.0.1:8787/.well-known/oauth-protected-resource/mcp"),
+      new Request("http://evil.example/.well-known/oauth-protected-resource/mcp", { headers: { host: "evil.example" } }),
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ resource: "https://todo.example/mcp" });
+  });
+
+  it.each([
+    [undefined, MissingConfigError],
+    ["", MissingConfigError],
+    ["not a url", InvalidConfigError],
+    ["http://todo.example", InvalidConfigError],
+    ["ftp://todo.example", InvalidConfigError],
+  ])("refuses public origin %j", (publicOrigin, kind) => {
+    const { env } = buildNodeEnv(openDatabase(":memory:"), vars);
+    expect(() => createHandler(env, { publicOrigin: publicOrigin as string })).toThrow(kind);
+  });
+
+  it.each(["http://localhost:8787", "http://127.0.0.1:8787", "https://todo.example/path"])(
+    "accepts public origin %s",
+    (publicOrigin) => {
+      const { env } = buildNodeEnv(openDatabase(":memory:"), vars);
+      expect(() => createHandler(env, { publicOrigin })).not.toThrow();
+    },
+  );
+
+  it("answers GET and DELETE /mcp: 401 without a bearer, 405 Allow: POST with one", async () => {
+    stubMicrosoft(vars.OWNER_EMAIL);
+    const { env } = buildNodeEnv(openDatabase(":memory:"), vars);
+    const handler = createHandler(env, { publicOrigin: ORIGIN });
+    const client = oauthClient(handler.fetch);
+    for (const method of ["GET", "DELETE"]) {
+      expect((await client.send("/mcp", { method })).status).toBe(401);
+    }
+    const { access_token } = await client.connect();
+    for (const method of ["GET", "DELETE"]) {
+      const res = await client.send("/mcp", { method, headers: mcpHeaders(access_token) });
+      expect(res.status).toBe(405);
+      expect(res.headers.get("allow")).toBe("POST");
+    }
   });
 
   it("acks a Graph notification at once and finishes the deferred work on drain", async () => {
@@ -160,7 +221,7 @@ describe("node host", () => {
     const onChange = vi
       .spyOn(core, "onChangeNotification")
       .mockReturnValue(new Promise((r) => (finish = () => r({ accepted: 1, rejected: 0 }))) as never);
-    const handler = createHandler(env);
+    const handler = createHandler(env, { publicOrigin: ORIGIN });
     const res = await handler.fetch(
       new Request("https://mcp.test/webhook", {
         method: "POST",

@@ -38,6 +38,34 @@ export class MissingConfigError extends Error {
   }
 }
 
+export class InvalidConfigError extends Error {
+  constructor(
+    readonly key: string,
+    readonly reason: string,
+  ) {
+    super(`Invalid configuration ${key}: ${reason}`);
+  }
+}
+
+// The public origin the OAuth front is served under (SERVICE_BASE_URL). It
+// becomes the token audience, the Microsoft redirect_uri and the cookie
+// context, so it comes from configuration only, never from a request's Host.
+// https is required; plain http only for a loopback host during local dev.
+export function parsePublicOrigin(raw: string | undefined, key = "SERVICE_BASE_URL"): string {
+  if (!raw) throw new MissingConfigError([key]);
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new InvalidConfigError(key, "not an absolute URL");
+  }
+  const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new InvalidConfigError(key, "must be https (http is allowed only for localhost or 127.0.0.1)");
+  }
+  return url.origin;
+}
+
 // vars: process.env on a real start. Throws MissingConfigError (names only,
 // never values) when a required secret is absent or empty.
 export function buildNodeEnv(db: DatabaseSync, vars: Record<string, string | undefined>) {
