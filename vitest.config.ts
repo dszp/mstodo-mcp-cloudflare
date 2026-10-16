@@ -27,8 +27,24 @@ const poolOptions = {
 };
 
 export default defineConfig({
-  plugins: [cloudflareTest(poolOptions)],
   test: {
-    pool: cloudflarePool(poolOptions),
+    projects: [
+      {
+        plugins: [cloudflareTest(poolOptions)],
+        test: {
+          name: "workers",
+          include: ["test/**/*.test.ts"],
+          pool: cloudflarePool(poolOptions),
+        },
+      },
+      {
+        test: {
+          name: "node",
+          include: ["test-node/**/*.test.ts"],
+          environment: "node",
+          pool: "forks",
+        },
+      },
+    ],
   },
 });
