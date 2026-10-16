@@ -16,7 +16,6 @@ import {
   compareOrderDateTimeDesc,
 } from "../graph/substrate-client";
 import {
-  OWNER_DO_NAME,
   epochToIso,
   rowToList,
   rowToSummary,
@@ -24,7 +23,7 @@ import {
   type ListRow,
   type TaskRow,
 } from "../cache/sql";
-import type { TodoIndex } from "../cache/index-do";
+import { ownerIndex } from "../core/owner-index";
 import { mapPool } from "../graph/concurrency";
 import { VERSION } from "../version";
 import { parseDateInput, toGraphDate, toGraphDateTime } from "../util/dates";
@@ -4626,11 +4625,9 @@ export class MSToDoMCP extends McpAgent<Env, never, Props> implements TokenProvi
   }
 
   // Singleton TodoIndex DO stub — the cross-list index + sole token refresher.
-  // Same instance for every session (idFromName(OWNER_DO_NAME)).
-  #index(): DurableObjectStub<TodoIndex> {
-    return this.env.TODO_INDEX_DO.get(
-      this.env.TODO_INDEX_DO.idFromName(OWNER_DO_NAME),
-    );
+  // Same instance for every session (see ownerIndex()).
+  #index() {
+    return ownerIndex(this.env);
   }
 
   // Cross-list DO reads (query_tasks/search_tasks) return empty on a cold

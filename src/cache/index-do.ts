@@ -65,7 +65,7 @@ import {
 
 // Phase 5 — TodoIndex: singleton Durable Object, the single source of truth for
 // Microsoft To Do state. SQLite `tasks` (+ `tasks_fts` FTS5 mirror) + `lists`
-// roster + `sync_state`. Addressed via idFromName(OWNER_DO_NAME) from the agent
+// roster + `sync_state`. Addressed via ownerIndex(env) from the agent
 // and the Worker scheduled() heartbeat.
 //
 // Token refresh (Task 4) + resumable alarm-driven delta sync (Task 5) are in
@@ -2238,5 +2238,6 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
   }
 }
 
-// Temporary placeholder (Task 1); Task 4 replaces it with the real surface.
-export interface IndexBackendSurface {}
+// Temporary (Task 2): the real stub type, so ownerIndex() callers see the
+// actual methods. Task 4 replaces it with `Pick<IndexCore, …>`.
+export type IndexBackendSurface = DurableObjectStub<TodoIndex>;

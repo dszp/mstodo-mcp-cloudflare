@@ -1,4 +1,4 @@
-import { OWNER_DO_NAME } from "../cache/sql";
+import { ownerIndex } from "../core/owner-index";
 import { log } from "../log";
 import type { Props } from "../types";
 
@@ -46,10 +46,6 @@ export async function refuseMcpRequest(env: Env, props: Partial<Props> | undefin
 // Microsoft refused our refresh token or demanded a Conditional Access sign-in?
 export async function reauthPending(env: Env): Promise<boolean> {
   return (await ownerIndex(env).authState()).reauth !== null;
-}
-
-function ownerIndex(env: Env) {
-  return env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName(OWNER_DO_NAME));
 }
 
 export function refusalDescription(refusal: GrantRefusal): string {

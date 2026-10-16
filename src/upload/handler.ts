@@ -2,9 +2,8 @@ import { log } from "../log";
 import { loadTokens } from "../auth/microsoft";
 import { loadAttachmentConfig } from "../config/loader";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
-import { OWNER_DO_NAME } from "../cache/sql";
-import type { TodoIndex } from "../cache/index-do";
 import { resolveContentType } from "./sniff";
+import { ownerIndex } from "../core/owner-index";
 import {
   attachFile,
   getAttachmentBytes,
@@ -62,10 +61,6 @@ function html(body: string, status = 200): Response {
     status,
     headers: { "content-type": "text/html; charset=utf-8" },
   });
-}
-
-export function ownerIndex(env: Env): DurableObjectStub<TodoIndex> {
-  return env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName(OWNER_DO_NAME));
 }
 
 // Strip path components and control characters from a browser-supplied filename.

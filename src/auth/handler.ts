@@ -5,7 +5,7 @@ import {
 } from "@cloudflare/workers-oauth-provider";
 import { readBounded } from "../util/body";
 import { log } from "../log";
-import { OWNER_DO_NAME } from "../cache/sql";
+import { ownerIndex } from "../core/owner-index";
 import { consentRememberSecret } from "./crypto";
 import { consentPage, errorPage } from "./consent-page";
 import {
@@ -54,10 +54,6 @@ interface UpstreamData {
 
 function callbackUrlFor(req: Request): string {
   return `${new URL(req.url).origin}${CALLBACK_PATH}`;
-}
-
-function ownerIndex(env: Env) {
-  return env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName(OWNER_DO_NAME));
 }
 
 // Remembered consent is per browser; the subject is fixed because this server

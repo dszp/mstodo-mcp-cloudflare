@@ -1,6 +1,6 @@
 import { MSToDoMCP } from "./mcp/agent";
 import { TodoIndex } from "./cache/index-do";
-import { OWNER_DO_NAME } from "./cache/sql";
+import { ownerIndex } from "./core/owner-index";
 import { buildOAuthProvider } from "./auth/oauth";
 import { handleUpload } from "./upload/handler";
 import { handleDownload } from "./upload/download-handler";
@@ -52,7 +52,7 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
-    const index = env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName(OWNER_DO_NAME));
+    const index = ownerIndex(env);
     ctx.waitUntil(index.ensureSyncing());
   },
 };

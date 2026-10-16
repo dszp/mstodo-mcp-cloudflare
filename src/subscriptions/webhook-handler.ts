@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { readBounded } from "../util/body";
 import { log } from "../log";
-import { ownerIndex } from "../upload/handler";
+import { ownerIndex } from "../core/owner-index";
 import { taskSubscriptionsEnabled } from "./gate";
 
 // Public (non-OAuth) Graph change-notification receiver (ROADMAP §4). Same

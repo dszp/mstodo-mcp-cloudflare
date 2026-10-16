@@ -1,5 +1,5 @@
 import { log } from "../log";
-import { OWNER_DO_NAME } from "../cache/sql";
+import { ownerIndex } from "../core/owner-index";
 import { loadListsConfig, storeListsConfig } from "../config/loader";
 import { isSealed, seal, unseal } from "./crypto";
 
@@ -412,7 +412,7 @@ export async function storeIdentity(env: Env, ident: OwnerIdentity): Promise<voi
 //      of silently skipping the wipe (prevIdentity === null) and letting the new
 //      baseline mix with leftover old-account rows.
 export async function wipeIdentityScopedState(env: Env): Promise<void> {
-  const index = env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName(OWNER_DO_NAME));
+  const index = ownerIndex(env);
   await index.resetIdentity();
   await env.TODO_CACHE.delete(TOKENS_KEY);
   await env.TODO_CACHE.delete(IDENTITY_KEY);

@@ -2,7 +2,8 @@ import { log } from "../log";
 import { loadTokens } from "../auth/microsoft";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import { getAttachmentBytes } from "./graph-upload";
-import { json, ownerIndex, reasonForGraphError, sanitizeName, statusForReason } from "./handler";
+import { json, reasonForGraphError, sanitizeName, statusForReason } from "./handler";
+import { ownerIndex } from "../core/owner-index";
 import {
   consumeDownloadCapability,
   downloadLinksEnabled,

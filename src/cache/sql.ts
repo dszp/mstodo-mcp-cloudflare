@@ -10,7 +10,7 @@ import type { ChecklistItem, TodoTask, TodoTaskList } from "../graph/types";
 import { stripHtml } from "../util/html";
 
 // Singleton address for the cross-list index DO. Used everywhere via
-//   env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName(OWNER_DO_NAME))
+//   ownerIndex(env) (src/core/owner-index.ts)
 export const OWNER_DO_NAME = "owner";
 
 // ---------------------------------------------------------------------------
