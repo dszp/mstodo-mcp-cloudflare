@@ -13,13 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   KV and Durable Objects; the tools, OAuth consent flow and Microsoft sign-in are the same as on
   the Worker. The process refuses to start when another one holds the same database file. Build
   with `npm run build:node`; setup, backups and the differences from Cloudflare are in
-  [docs/NODE-HOSTING.md](./docs/NODE-HOSTING.md).
+  [docs/NODE-HOSTING.md](./docs/NODE-HOSTING.md). The Node host:
+  - caps request bodies per route (413 past the cap, including chunked bodies) and refuses an
+    `/upload` POST that has neither a link token nor a `Content-Length`;
+  - binds `127.0.0.1` unless `HOST` is set (the image sets `0.0.0.0`), and creates its database
+    files owner-only (`0600`);
+  - requires `SERVICE_BASE_URL` to be an `https` origin (loopback `http` for local testing), with
+    no path, query or fragment;
+  - deletes expired OAuth records from the database every 15 minutes, and retries a failed sync
+    run after 60 seconds;
+  - releases its instance lock on any exit, logs and survives an unhandled promise rejection,
+    and finishes shutdown within the Compose file's 30-second grace period.
+- **`engines`** in `package.json` declares Node 24 or later.
 
 ### Changed
 - **Dependency hygiene:** in-range updates for `fast-uri`, `ip-address`, `qs`, `body-parser`,
   `proxy-addr`, `@hono/node-server`, `undici`, `vitest`, `postcss`, `sharp` and `source-map-js`,
   clearing most open Dependabot alerts. None of these reached the Worker's request path: the
   "runtime" ones arrive through the MCP SDK's Express server, which this Worker doesn't use.
+  `@hono/node-server` is now the Node host's HTTP listener, so that update does reach the Node
+  host's request path.
   What's left (`miniflare`, `sharp`, `undici` inside `wrangler`) is build tooling pinned by the
   current wrangler release.
 - **Source split into `src/core/` and `src/hosts/cloudflare/`.** Host-neutral code (tools, index,
@@ -28,7 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/hosts/cloudflare/`. No behavior change: tool names, inputs, outputs, KV keys and Durable
   Object storage are unchanged.
 - **`src/hosts/node/` and `src/hosts/shared/`.** The Node host lives beside the Worker under
-  `src/hosts/`, and the OAuth front both hosts use moved to `src/hosts/shared/`. CI now runs on
+  `src/hosts/`, and the OAuth front both hosts use moved to `src/hosts/shared/`. On both hosts,
+  the `oauth_error` log line now carries only the status, code, category and reason, never the
+  OAuth library's internal detail object. CI now runs on
   Node 24 and also typechecks (`tsconfig.node.json`) and builds the Node host.
 
 ### Upgrade notes

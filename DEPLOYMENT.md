@@ -34,7 +34,7 @@ see [README.md](./README.md).
 
 ## Prerequisites
 
-- **Node 18+** and **npm** (Wrangler 4 is pinned in `devDependencies`).
+- **Node 24 or later** and **npm** (Wrangler 4 is pinned in `devDependencies`). The test suite and the Node host use Node 24's built-in `node:sqlite` module.
 - A **Cloudflare account**, logged in locally (`npx wrangler login`).
 - A **Microsoft Entra app registration** — walkthrough in [Microsoft Entra app
   registration](#microsoft-entra-app-registration) below. You'll need four values:
@@ -85,7 +85,7 @@ registration**) and collect four values for the Worker's secrets.
 ### 2. API permissions
 
 Add these **Microsoft Graph → Delegated** permissions (they must equal the `SCOPES`
-constant in `src/auth/microsoft.ts`: `Tasks.ReadWrite offline_access User.Read`):
+constant in `src/core/auth/microsoft.ts`: `Tasks.ReadWrite offline_access User.Read`):
 
 | Permission | Why |
 |---|---|

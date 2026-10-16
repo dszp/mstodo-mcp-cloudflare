@@ -876,7 +876,7 @@ class ToDoTools implements TokenProvider {
           );
           // Single-call $expand for all three nav properties. If step 9 smoke
           // shows Graph rejects any expansion on /v1.0, fall back to parallel
-          // sub-collection fetches via mapPool (src/graph/concurrency.ts).
+          // sub-collection fetches via mapPool (src/core/graph/concurrency.ts).
           url.searchParams.set(
             "$expand",
             "checklistItems,linkedResources,attachments",
@@ -4503,7 +4503,7 @@ class ToDoTools implements TokenProvider {
 
   // Build a SubstrateClient outside the withSubstrate wrapper (used by move_task,
   // which runs in the Graph context). Mirrors withSubstrate's construction
-  // (agent.ts withSubstrate): token logic lives in the sole-refresher DO; this
+  // (withSubstrate above): token logic lives in the sole refresher (IndexCore); this
   // just injects the anchor mailbox. The caller is responsible for the
   // myDayEnabled gate and for swallowing my_day_unavailable / SubstrateError.
   async #buildSubstrateClient(): Promise<SubstrateClient> {

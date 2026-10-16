@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-A single-user, single-tenant **MCP server for Microsoft To Do**, running as one Cloudflare Worker. It exposes ~40 MCP tools (list/task CRUD, checklist items, linked resources, attachments, My Day, search, config) backed by a SQLite-in-Durable-Object cache with Graph delta sync.
+A single-user, single-tenant **MCP server for Microsoft To Do**. It exposes ~50 MCP tools (list/task CRUD, checklist items, linked resources, attachments, My Day, search, config) backed by a SQLite cache with Graph delta sync. Host-independent code lives in `src/core`; it runs on two hosts: the primary **Cloudflare Worker** (`src/hosts/cloudflare`, SQLite in a Durable Object) and a **Node.js / Docker** host for self-hosting elsewhere (`src/hosts/node`, one SQLite file). `src/hosts/shared` holds the OAuth front both hosts use.
 
 ## Commands
 
@@ -12,13 +12,19 @@ npm test             # vitest run (all tests, via @cloudflare/vitest-pool-worker
 npm run test:watch   # vitest watch mode
 npm run types        # wrangler types — regenerate worker-configuration.d.ts after binding changes
 npm run deploy       # wrangler deploy
+npm run build:node   # esbuild the Node host into dist/main.mjs
+npm run start:node   # node dist/main.mjs (needs SERVICE_BASE_URL + the MS_* / OWNER_EMAIL env)
 
 npx vitest run test/move-task.test.ts          # one test file
 npx vitest run -t "reparent"                    # tests matching a name
+npx vitest run --project workers                # Cloudflare pool only (test/**)
+npx vitest run --project node                   # Node host only (test-node/**)
+npx tsc --noEmit -p .                           # typecheck (Workers types)
+npx tsc -p tsconfig.node.json                   # typecheck core + Node host with Node-only types
 bash scripts/push-secrets.sh                    # push every secret from .dev.vars to the deployed Worker
 ```
 
-**Tests need no real credentials or live config.** `vitest.config.ts` points the workers pool at the committed `wrangler.example.jsonc` and supplies fake secrets via miniflare bindings; KV and DO bindings are simulated locally. `test/_test-worker.ts` re-exports only `TodoIndex` (the `MSToDoMCP` agent DO is deliberately excluded — it pulls in the MCP SDK → ajv, which the pool can't resolve).
+**Tests need no real credentials or live config.** `vitest.config.ts` defines two projects. `workers` (`test/**`) points the Cloudflare pool at the committed `wrangler.example.jsonc` and supplies fake secrets via miniflare bindings; KV and DO bindings are simulated locally. `test/_test-worker.ts` re-exports only `TodoIndex` (the `MSToDoMCP` agent DO is deliberately excluded — it pulls in the MCP SDK → ajv, which the pool can't resolve). `node` (`test-node/**`) runs on plain Node 24 with in-memory `node:sqlite` databases and fake `MS_*` values passed to `buildNodeEnv`; Microsoft endpoints are stubbed with `vi.stubGlobal("fetch")`. Node ≥ 24 is required for development (`node:sqlite`).
 
 ## Architecture
 
@@ -30,6 +36,9 @@ bash scripts/push-secrets.sh                    # push every secret from .dev.va
 - **`TodoIndex`** (binding `TODO_INDEX_DO`, **singleton** `idFromName("owner")`) — extends `DurableObject`. Owns the SQLite cache (tasks/lists/sync_state), delta-sync orchestration, and is the **sole** caller of the Microsoft token endpoint. A `#refreshChain` promise serializer funnels every refresh through one chain so concurrent sessions don't create refresh storms; an `#identityGeneration` counter invalidates in-flight refreshes when the user re-authorizes as a different account.
 
 > The wrangler binding for the MCP agent is named `TODO_INDEX`, overriding the SDK's default `MCP_OBJECT`. Without this override the SDK throws `env.MCP_OBJECT is undefined`.
+
+### Node host — `src/hosts/node/`
+One process, one SQLite file (`MSTODO_DB`). `main.ts` is the entry point (bundled by `scripts/build-node.mjs` to `dist/main.mjs`; the OAuth library is bundled with `cloudflare:workers` aliased to `cloudflare-workers-shim.ts`). Adapters implement core's ports: `sqlite-db.ts` (`SqlDb`, WAL + `synchronous=NORMAL`), `sqlite-kv.ts` (one `kv` table for `TODO_CACHE` and `OAUTH_KV`, plus the Workers KV spellings the OAuth library calls; `sweepKv()` deletes expired rows at startup and every heartbeat), `state-store.ts` (DO storage + a persisted alarm). `env.ts` `buildNodeEnv()` constructs `IndexCore` **in process** and exposes it through `indexBackend()`, an async proxy with the same surface as the DO stub (every method returns a Promise; `alarm`/`bootstrap` are not reachable). `http.ts` `createHandler()` rewrites every request to `SERVICE_BASE_URL` (**required**, an https origin or loopback http; the Host header is never trusted), caps request bodies (`body-limit.ts`), then routes like the Worker into the shared OAuth front; MCP is **stateless** Streamable HTTP (a fresh `McpServer` + transport per POST, JSON responses, GET/DELETE 405). `startScheduler()` replaces the DO alarm and cron: a timer follows the persisted alarm, a failed `alarm()` retries 60 s later, and a 15-minute heartbeat calls `ensureSyncing()`. `single-instance.ts` holds a lease row (heartbeat 20 s, TTL 60 s) so a second process on the same file refuses to start; `lifecycle.ts` releases it on exit, logs (and survives) unhandled rejections, and exits on uncaught exceptions. `HOST` defaults to `127.0.0.1`; `umask 077` keeps the DB files `0600`. Docker: `src/hosts/node/Dockerfile` + `compose.yaml`; operator guide: `docs/NODE-HOSTING.md`.
 
 ### MCP tool layer — `src/core/mcp/register-tools.ts`
 All tools live here and are wrapped by `withGraph(name, fn)`: auth preflight → `GraphError`→named-reason mapping (`list_not_found`, `task_not_found`, `rate_limit_exceeded`, …) → `instrument()`. My Day tools additionally use `withSubstrate()`, which gates on `ENABLE_MY_DAY` and builds a `SubstrateClient`. Handlers build results with `src/core/mcp/result.ts` (`ok()`/`err()` `ToolResult<T>`); `instrument()` converts those to the MCP text envelope and catches unexpected throws as `unexpected_error` (no unhandled rejections escape the tool layer).
@@ -85,10 +94,13 @@ Releases are cut **from `dev`**, then merged/pushed to `main` and tagged. The co
 8. Deploy (`npm run deploy`) and confirm `/health` if this release ships code (often already deployed from `dev` before cutting the release — check first).
 
 ## Conventions & invariants worth preserving
-- **Only `TodoIndex` refreshes tokens.** Don't add token-endpoint calls elsewhere; route through the singleton's serializer.
+- **Only `IndexCore` refreshes tokens** (hosted by the `TodoIndex` DO on Cloudflare, in process on Node). Don't add token-endpoint calls elsewhere; route through its serializer.
+- **Core import boundary.** `src/core/**` never imports `cloudflare:*`, `agents`, `@cloudflare/*`, or anything under `src/hosts/` (enforced by `test/core-boundary.test.ts`). `src/hosts/node` never imports `src/hosts/cloudflare`, and `src/hosts/shared` imports neither host (`test-node/host-boundary.test.ts`).
+- **No host switches in core.** A behavior that differs by host is a port in `src/core/ports.ts`, implemented by each host — never `if (isCloudflare)`.
+- **Each host bounds request bodies.** Core's upload handler buffers a body it cannot size in advance; Cloudflare's platform caps bodies, the Node host caps them in `createHandler`. A new host must do the same.
 - **Host-pin before attaching a Bearer token** — keep `assertGraphUrl` / `assertSubstrateUrl` in front of every authed request when adding endpoints.
 - **The server is strictly single-user.** The `OWNER_EMAIL` 403 gate and identity-change wipe are load-bearing; don't loosen them.
-- Register tools with `#tool()` — it applies the auth preflight (Microsoft re-auth pending, tokens present) to every tool, including cache-only ones; the grant epoch/age check runs per request in `oauth.ts`. Graph tools also go through `withGraph` (and `withSubstrate` for My Day) for error mapping (`reauth_required` included) and instrumentation.
+- Register tools with `#tool()` — it applies the auth preflight (Microsoft re-auth pending, tokens present) to every tool, including cache-only ones; the grant epoch/age check runs per request in `src/hosts/shared/oauth.ts` (both hosts). Graph tools also go through `withGraph` (and `withSubstrate` for My Day) for error mapping (`reauth_required` included) and instrumentation.
 - **A refused Microsoft refresh is classified, not just thrown.** `reauthReasonFromTokenError` marks re-auth only for `invalid_grant` / `interaction_required` / `consent_required` on the **Graph** refresh; the same codes on the Exchange (Substrate) mint only latch My Day off. Transient failures must never lock the owner out. A CAE claims challenge on a 401 is reported via `reportClaimsChallenge`, not retried.
 - **Naive date strings are local time** (`TIMEZONE`), via `src/core/util/dates.ts` — never pass a model-supplied date to Graph labelled UTC.
 - Graph silently ignores `$expand=attachments`; fetch `/attachments` as a sub-resource collection (`src/core/graph/todo-resources.ts`).

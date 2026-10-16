@@ -99,9 +99,9 @@ deferred** until the §1 API exists:
 ## 4. Graph change-notification subscriptions to augment delta polling (toggleable)
 
 > **Status: SHIPPED on `feat/task-subscriptions` 2026-05-29 (gate `ENABLE_TASK_SUBSCRIPTIONS`, default ON).**
-> `src/subscriptions/{gate,manager,webhook-handler}.ts` + a `subscriptions` SQLite table (migration v2)
+> `src/core/subscriptions/{gate,manager,webhook-handler}.ts` + a `subscriptions` SQLite table (migration v2)
 > + `TodoIndex.onChangeNotification`/`reconcileSubscriptions`/`renewSubscriptions`; `POST /webhook` wired
-> in `index.ts` after `/download`. Reconcile + renew run in `runSyncCycle`'s calm-cycle block,
+> in the host entry point (`src/hosts/cloudflare/worker.ts`; the Node host's `http.ts`) after `/download`. Reconcile + renew run in `runSyncCycle`'s calm-cycle block,
 > **budgeted** by `MAX_SUBSCRIPTION_OPS_PER_CYCLE`. Verified against current docs (2026-05-29):
 > `todoTask` notifications are **basic-only** (not on the rich/resource-data list) and **global-cloud-only**,
 > max lifetime **4,230 min**, webhook must ack within **3 s**. **§4a Phase 2 landed here too:** a notification
@@ -345,7 +345,7 @@ unguessable random id whose task scope is stored in `OAUTH_KV` under a TTL, veri
 lookup, single-use by delete; **no signing key / shared secret** (simplified from the
 originally-planned HMAC design — see below — since single-use already requires KV state).
 Bytes are forwarded synchronously (no R2 / no temp blob). Requires only the
-`SERVICE_BASE_URL` var. Code: `src/upload/{tokens,sniff,graph-upload,handler,page}.ts`;
+`SERVICE_BASE_URL` var. Code: `src/core/upload/{tokens,sniff,graph-upload,handler,page}.ts`;
 tests under `test/upload-*`.
 
 Original design notes below (retained for context).
@@ -454,7 +454,7 @@ gets its linked resource created automatically — the same outcome the MCP serv
 already produces, but without an MCP write. Today a ticket number typed into the
 app never gets linked: `runLinkRules` (`src/core/config/link-rules-engine.ts`, pure,
 DoS-guarded) only fires on the MCP write paths — `create_task` / `update_task` /
-the on-demand `extract_links` tool, all via `MSToDoMCP.applyLinkRules`. A task that
+the on-demand `extract_links` tool, all via `ToDoTools.applyLinkRules` in `src/core/mcp/register-tools.ts`. A task that
 never passes through one of those handlers is never scanned. This item closes that
 gap: type `INC0042189` into a task in the app, and on its next sync cycle it picks
 up the matching linked resource.
