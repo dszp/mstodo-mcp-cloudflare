@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// The test pool types env as Cloudflare.Env (no runtime-injected OAUTH_PROVIDER);
-// handleUpload takes the global Env. Cast once for the file (see index-do.test.ts).
+// The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it
+// before calling core (see test/_app-env.ts).
 const env = testAppEnv();
 import { handleUpload } from "../src/core/upload/handler";
 import { createUploadCapability } from "../src/core/upload/tokens";

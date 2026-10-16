@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// The test pool types env as Cloudflare.Env (no runtime-injected OAUTH_PROVIDER);
-// handleDownload takes the global Env. Cast once for the file (see upload-handler).
+// The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it
+// before calling core (see test/_app-env.ts).
 const env = testAppEnv();
 import { handleDownload } from "../src/core/upload/download-handler";
 import { createDownloadCapability, lookupDownloadCapability } from "../src/core/upload/tokens";

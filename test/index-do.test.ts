@@ -981,9 +981,7 @@ describe("wipeIdentityScopedState (H3 — fail-closed identity wipe)", () => {
     await stub.upsertTask({ id: "t1", title: "x", status: "notStarted" }, "list-A");
     expect((await stub.query({})).rows.length).toBeGreaterThan(0);
 
-    // The cloudflare:test env carries the wrangler-generated bindings but not
-    // the OAuthProvider-injected OAUTH_PROVIDER (added to Env in src/hosts/cloudflare/types.ts);
-    // wipeIdentityScopedState never touches it, so narrow the type for the call.
+    // wipeIdentityScopedState takes the core env (testAppEnv), not the raw Worker Env.
     await wipeIdentityScopedState(testAppEnv());
 
     expect(await env.TODO_CACHE.get(TOKENS_KEY)).toBeNull();

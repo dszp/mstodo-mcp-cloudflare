@@ -13,8 +13,8 @@ import {
 import { testAppEnv } from "./_app-env";
 import type { AppEnv } from "../src/core/ports";
 
-// The test pool types env as Cloudflare.Env (no runtime-injected OAUTH_PROVIDER);
-// our helpers take the global Env. Cast once for the file (see index-do.test.ts).
+// The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it
+// before calling core (see test/_app-env.ts).
 const env = testAppEnv();
 
 const SCOPE = { list_id: "L1", task_id: "T1", attachment_id: "A1" } as const;
