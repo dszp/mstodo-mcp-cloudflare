@@ -51,6 +51,9 @@ export class InvalidConfigError extends Error {
 // becomes the token audience, the Microsoft redirect_uri and the cookie
 // context, so it comes from configuration only, never from a request's Host.
 // https is required; plain http only for a loopback host during local dev.
+// Origin only: OAuth and routing serve at the root, so a path would leave the
+// upload, download and webhook links (built from SERVICE_BASE_URL as given)
+// pointing at URLs this server does not answer. A trailing "/" is accepted.
 export function parsePublicOrigin(raw: string | undefined, key = "SERVICE_BASE_URL"): string {
   if (!raw) throw new MissingConfigError([key]);
   let url: URL;
@@ -63,6 +66,10 @@ export function parsePublicOrigin(raw: string | undefined, key = "SERVICE_BASE_U
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
     throw new InvalidConfigError(key, "must be https (http is allowed only for localhost or 127.0.0.1)");
   }
+  if (url.pathname !== "/" || url.search || url.hash || raw.includes("?") || raw.includes("#")) {
+    throw new InvalidConfigError(key, "must be an origin only (no path, query or fragment)");
+  }
+  if (url.username || url.password) throw new InvalidConfigError(key, "must not contain credentials");
   return url.origin;
 }
 

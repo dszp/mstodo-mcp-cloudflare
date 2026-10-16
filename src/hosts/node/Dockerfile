@@ -21,9 +21,11 @@ RUN npm run build:node
 FROM node:24-slim
 WORKDIR /app
 # Required at run time, no default: SERVICE_BASE_URL (the public https origin
-# your reverse proxy serves), TIMEZONE, MS_TENANT_ID, MS_CLIENT_ID,
-# MS_CLIENT_SECRET, OWNER_EMAIL.
-ENV NODE_ENV=production MSTODO_DB=/data/mstodo.sqlite PORT=8787
+# your reverse proxy serves), MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET,
+# OWNER_EMAIL. Optional: TIMEZONE (an IANA name; defaults to UTC).
+# HOST=0.0.0.0 so the published port reaches the process inside the container;
+# outside a container the server binds 127.0.0.1 unless HOST says otherwise.
+ENV NODE_ENV=production MSTODO_DB=/data/mstodo.sqlite PORT=8787 HOST=0.0.0.0
 COPY --from=build /app/package.json /app/package-lock.json ./
 # Runtime dependencies only, with install scripts off: nothing at run time
 # needs them, and skipping them keeps package scripts out of the image build.

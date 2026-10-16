@@ -209,12 +209,15 @@ describe("node host", () => {
     ["not a url", InvalidConfigError],
     ["http://todo.example", InvalidConfigError],
     ["ftp://todo.example", InvalidConfigError],
+    ["https://todo.example/path", InvalidConfigError],
+    ["https://todo.example/?x=1", InvalidConfigError],
+    ["https://todo.example/#frag", InvalidConfigError],
   ])("refuses public origin %j", (publicOrigin, kind) => {
     const { env } = buildNodeEnv(openDatabase(":memory:"), vars);
     expect(() => createHandler(env, { publicOrigin: publicOrigin as string })).toThrow(kind);
   });
 
-  it.each(["http://localhost:8787", "http://127.0.0.1:8787", "https://todo.example/path"])(
+  it.each(["http://localhost:8787", "http://127.0.0.1:8787", "https://todo.example", "https://todo.example/"])(
     "accepts public origin %s",
     (publicOrigin) => {
       const { env } = buildNodeEnv(openDatabase(":memory:"), vars);

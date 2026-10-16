@@ -12,6 +12,7 @@ import { log } from "../../core/log";
 import { oauthProviderOptions, type McpHandler } from "../shared/oauth";
 import type { ProviderEnv } from "../shared/auth-handler";
 import { parsePublicOrigin, type NodeEnv } from "./env";
+import { bodyCapFor, limitBody, tooLarge } from "./body-limit";
 
 type ProviderNodeEnv = NodeEnv & ProviderEnv;
 
@@ -100,13 +101,41 @@ export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
   const background = backgroundTasks();
   const publicOrigin = parsePublicOrigin(options.publicOrigin);
 
+  // Every request body is capped before routing (see body-limit.ts): the
+  // platform does this on Cloudflare, nothing does it on Node.
   async function fetch(incoming: Request): Promise<Response> {
-    const req = toPublicOrigin(incoming, publicOrigin);
-    const url = new URL(req.url);
+    const rewritten = toPublicOrigin(incoming, publicOrigin);
+    const url = new URL(rewritten.url);
     if (url.pathname === "/health") {
       return Response.json({ ok: true, service: "mstodo-mcp", version: VERSION, host: "node" });
     }
 
+    // Core's upload handler reads the form before it can see a token in the
+    // body; without ?t= its only pre-read check is the declared length. A POST
+    // with neither is refused before anything reads it.
+    if (
+      url.pathname === "/upload" &&
+      rewritten.method === "POST" &&
+      !url.searchParams.get("t") &&
+      rewritten.headers.get("content-length") === null
+    ) {
+      return Response.json({ ok: false, reason: "length_required" }, { status: 400 });
+    }
+
+    const max = bodyCapFor(url.pathname);
+    const limited = limitBody(rewritten, max);
+    if (limited instanceof Response) return limited;
+    let res: Response;
+    try {
+      res = await route(limited.req, url);
+    } catch (e) {
+      if (limited.exceeded()) return tooLarge(max);
+      throw e;
+    }
+    return limited.exceeded() ? tooLarge(max) : res;
+  }
+
+  async function route(req: Request, url: URL): Promise<Response> {
     // A fresh ctx per request: the OAuth library writes the token's grant
     // props to ctx.props and the /mcp gate reads them back. A shared ctx would
     // let a concurrent request's props replace this one's between the two.
@@ -132,9 +161,17 @@ export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
 // The Durable Object alarm and the Cloudflare cron, in one process: a timer
 // follows the persisted alarm (so a restart picks it up), and a 15-minute
 // heartbeat calls ensureSyncing() like the */15 cron.
+//
+// A failed alarm() is retried ALARM_RETRY_MS later: Cloudflare retries a
+// throwing alarm handler with backoff, and IndexCore re-arms only on success,
+// so without this one failed cycle would stop sync until the next heartbeat.
+// `maintenance` runs on the heartbeat too (main.ts sweeps expired KV rows).
+export const ALARM_RETRY_MS = 60_000;
+
 export function startScheduler(
   core: Pick<IndexCore, "alarm" | "ensureSyncing">,
   state: StateStore & AlarmScheduler & { onAlarmChange(cb: (at: number | null) => void): void },
+  options: { maintenance?: () => void } = {},
 ) {
   // setTimeout overflows past 2^31-1 ms (~24.8 days) and fires at once; a
   // longer alarm is reached in steps, re-reading the persisted time each wake.
@@ -165,9 +202,13 @@ export function startScheduler(
     // As on a Durable Object, the alarm is cleared before the handler runs;
     // alarm() re-arms it by calling setAlarm, which reaches arm() above.
     await state.deleteAlarm();
-    await core.alarm().catch((e: unknown) =>
-      log.error("alarm_failed", { error: e instanceof Error ? e.message : String(e) }),
-    );
+    try {
+      await core.alarm();
+    } catch (e) {
+      log.error("alarm_failed", { error: e instanceof Error ? e.message : String(e), retry_in_ms: ALARM_RETRY_MS });
+      // Keep an alarm the failed run already set; otherwise retry.
+      if (!stopped && (await state.getAlarm()) === null) await state.setAlarm(Date.now() + ALARM_RETRY_MS);
+    }
   }
 
   // The startup read is async; a setAlarm that lands before it resolves is
@@ -184,6 +225,11 @@ export function startScheduler(
     core.ensureSyncing().catch((e: unknown) =>
       log.error("heartbeat_failed", { error: e instanceof Error ? e.message : String(e) }),
     );
+    try {
+      options.maintenance?.();
+    } catch (e) {
+      log.error("maintenance_failed", { error: e instanceof Error ? e.message : String(e) });
+    }
   }, 15 * 60_000);
 
   return {

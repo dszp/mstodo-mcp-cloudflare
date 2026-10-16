@@ -6,12 +6,17 @@ import { join } from "node:path";
 // into the Cloudflare host (whose oauth.ts pulls in McpAgent → agents), and the
 // shared front may not depend on either host.
 const root = new URL("../src/hosts/", import.meta.url).pathname;
+// Recursive, so a file in a subdirectory added later is still checked.
 const sources = (dir: string) =>
-  readdirSync(join(root, dir))
+  (readdirSync(join(root, dir), { recursive: true }) as string[])
     .filter((f) => f.endsWith(".ts"))
     .map((f) => [`${dir}/${f}`, readFileSync(join(root, dir, f), "utf8")] as const);
 
-const imports = (src: string) => [...src.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]);
+// Static `from`, side-effect `import "x"` and dynamic `import("x")` specifiers.
+const imports = (src: string) =>
+  [/\bfrom\s+["']([^"']+)["']/g, /\bimport\s+["']([^"']+)["']/g, /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g].flatMap(
+    (re) => [...src.matchAll(re)].map((m) => m[1]),
+  );
 
 describe("host import boundary", () => {
   const node = sources("node");
@@ -20,6 +25,12 @@ describe("host import boundary", () => {
   it("finds the sources (guards against a vacuous pass)", () => {
     expect(node.map(([p]) => p)).toEqual(expect.arrayContaining(["node/http.ts", "node/env.ts", "node/main.ts"]));
     expect(shared.map(([p]) => p)).toEqual(expect.arrayContaining(["shared/oauth.ts", "shared/auth-handler.ts"]));
+  });
+
+  it("reads subdirectories and every import form (guards the helpers)", () => {
+    expect(imports('import "x"; await import("y"); export { z } from "z";').sort()).toEqual(["x", "y", "z"]);
+    const nested = (readdirSync(root, { recursive: true }) as string[]).filter((f) => f.endsWith(".ts"));
+    expect(nested.length).toBeGreaterThanOrEqual(node.length + shared.length);
   });
 
   it.each(node)("%s imports nothing from the Cloudflare host", (_p, src) => {

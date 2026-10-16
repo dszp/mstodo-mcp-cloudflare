@@ -34,6 +34,8 @@ import type { AppEnv } from "../ports";
 const TOTAL_BATCH_MAX_BYTES = 60 * 1024 * 1024;
 // Multipart boundaries, part headers and the `t` field on top of the file bytes.
 const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
+// The largest request body a legal upload can be.
+export const UPLOAD_BODY_MAX_BYTES = TOTAL_BATCH_MAX_BYTES + MULTIPART_OVERHEAD_BYTES;
 
 // Above this *raw uploaded* size, exact-content dedup would mean downloading the
 // whole existing attachment to hash it — impractical. Larger uploads fall back to
@@ -136,11 +138,13 @@ export async function handleUpload(req: Request, env: AppEnv): Promise<Response 
 
   // Refuse oversized or unauthenticated bodies BEFORE buffering them:
   // formData() reads the whole request into memory. A declared length must fit
-  // the largest legal batch plus multipart framing (a body sent without one is
-  // still bounded by the platform's request limit), and when the link token
+  // the largest legal batch plus multipart framing, and when the link token
   // rides in the query string (as the upload page sends it) it is checked first.
+  // A body sent without a declared length is NOT bounded here: the host must
+  // bound request bodies. Cloudflare's platform does; the Node host caps them
+  // in createHandler (src/hosts/node/body-limit.ts).
   const declared = Number(req.headers.get("content-length") ?? "0");
-  if (declared > TOTAL_BATCH_MAX_BYTES + MULTIPART_OVERHEAD_BYTES) {
+  if (declared > UPLOAD_BODY_MAX_BYTES) {
     return json({ ok: false, reason: "too_large_batch", max: TOTAL_BATCH_MAX_BYTES }, 413);
   }
   const queryToken = url.searchParams.get("t");

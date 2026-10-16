@@ -6,7 +6,15 @@ export function openDatabase(path: string): DatabaseSync {
   // busy_timeout first: switching journal_mode can need a lock, and without a
   // timeout a second process opening the file fails at once with "database is
   // locked" instead of waiting (and then reaching the instance lock check).
-  db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+  // synchronous = NORMAL is the usual pairing with WAL: commits stay atomic and
+  // the database stays consistent after a crash, but SQLite syncs at
+  // checkpoints instead of on every commit. node:sqlite is synchronous, so an
+  // fsync per statement would block the event loop through a baseline sync.
+  // (A power loss can drop the last few commits; the next delta sync refetches
+  // them.)
+  db.exec(
+    "PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
+  );
   return db;
 }
 

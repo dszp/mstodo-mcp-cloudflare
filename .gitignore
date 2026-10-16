@@ -28,6 +28,11 @@ node_modules/
 dist/
 worker-configuration.d.ts
 
+# Node host databases: a local SQLite file holds sealed tokens, OAuth grants
+# and the plaintext task cache.
+*.sqlite
+*.sqlite-*
+
 # Logs, scratch, OS noise
 *.log
 *.backup

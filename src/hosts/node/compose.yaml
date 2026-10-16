@@ -3,9 +3,10 @@
 services:
   mstodo-mcp:
     build: { context: ../../.., dockerfile: src/hosts/node/Dockerfile }
-    env_file: .env          # SERVICE_BASE_URL, TIMEZONE, MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, OWNER_EMAIL, …
+    env_file: .env          # required: SERVICE_BASE_URL, MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, OWNER_EMAIL; optional: TIMEZONE (default UTC), …
     volumes: [ "mstodo-data:/data" ]
-    ports: [ "127.0.0.1:8787:8787" ]   # put a TLS reverse proxy in front; Entra redirect URIs must be https
+    ports: [ "127.0.0.1:8787:8787" ]   # put a TLS reverse proxy in front for anything but localhost testing
     restart: unless-stopped
+    stop_grace_period: 30s  # shutdown finishes in under 25 s; the default 10 s would SIGKILL a running sync
     deploy: { replicas: 1 }  # one process per database; a second one refuses to start
 volumes: { mstodo-data: {} }

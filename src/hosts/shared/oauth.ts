@@ -71,8 +71,11 @@ export function oauthProviderOptions<E extends ProviderEnv>(opts: {
         throw new OAuthError("invalid_grant", { description: refusalDescription(refusal) });
       }
     },
+    // Named fields only. The library's `internal.detail` may carry a caught
+    // error or the offending request parameter, and a library update could add
+    // fields to `internal`; neither should reach the logs unreviewed.
     onError: ({ status, code, internal }) => {
-      log.warn("oauth_error", { status, code, ...internal });
+      log.warn("oauth_error", { status, code, category: internal?.category, reason: internal?.reason });
     },
   };
 }

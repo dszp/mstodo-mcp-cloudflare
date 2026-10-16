@@ -13,12 +13,8 @@ export type OAuthKvStore = KeyValueStore & {
 };
 
 // One table for every namespace (TODO_CACHE, OAUTH_KV). Expired rows read as
-// missing immediately; sweep() deletes them.
-export function sqliteKv(
-  db: DatabaseSync,
-  namespace: string,
-  now: () => number = Date.now,
-): OAuthKvStore & { sweep(): void } {
+// missing immediately; sweepKv() deletes them.
+export function sqliteKv(db: DatabaseSync, namespace: string, now: () => number = Date.now): OAuthKvStore {
   db.exec(`CREATE TABLE IF NOT EXISTS kv (
     ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
     expires_at INTEGER, metadata TEXT, PRIMARY KEY (ns, key))`);
@@ -32,7 +28,6 @@ export function sqliteKv(
   const listStmt = db.prepare(
     `SELECT key, expires_at, metadata FROM kv WHERE ${live} AND key > ? AND substr(key, 1, ?) = ? ORDER BY key LIMIT ?`,
   );
-  const sweepStmt = db.prepare("DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?");
 
   // Overloads cover both core's get(key, "json") and the Workers KV spellings
   // the OAuth library uses (see OAuthKvStore), so the object below needs no cast.
@@ -84,8 +79,13 @@ export function sqliteKv(
         ...(more ? { cursor: page[page.length - 1].key } : {}),
       };
     },
-    sweep() {
-      sweepStmt.run(now());
-    },
   };
+}
+
+// Deletes expired rows in every namespace. Reads already treat them as missing;
+// this keeps expired auth codes, consent transactions and grant records (which
+// hold encrypted props) from accumulating on disk and in backups. main.ts runs
+// it at startup and on the scheduler's 15-minute heartbeat.
+export function sweepKv(db: DatabaseSync, now: () => number = Date.now): void {
+  db.prepare("DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?").run(now());
 }
