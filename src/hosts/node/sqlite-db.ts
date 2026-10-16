@@ -3,7 +3,10 @@ import type { SqlDb, SqlValue } from "../../core/ports";
 
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+  // busy_timeout first: switching journal_mode can need a lock, and without a
+  // timeout a second process opening the file fails at once with "database is
+  // locked" instead of waiting (and then reaching the instance lock check).
+  db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
   return db;
 }
 

@@ -3,6 +3,7 @@ import { log } from "../../core/log";
 import { openDatabase } from "./sqlite-db";
 import { buildNodeEnv, InvalidConfigError, MissingConfigError, parsePublicOrigin } from "./env";
 import { createHandler, startScheduler } from "./http";
+import { acquireInstanceLock, type InstanceLock } from "./single-instance";
 
 // Node entry point. Configuration comes from process.env under the same names
 // the Worker uses, plus MSTODO_DB (SQLite file) and PORT. SERVICE_BASE_URL is
@@ -28,10 +29,24 @@ try {
   configError(e);
 }
 const db = openDatabase(dbPath);
+// Claimed before anything else touches the database: a second process on the
+// same file would run its own token refreshes and sync loop alongside ours.
+let lock: InstanceLock;
+try {
+  lock = acquireInstanceLock(db, undefined, () => {
+    log.error("instance_lock_lost", { db: dbPath });
+    process.exit(1);
+  });
+} catch (e) {
+  log.error("instance_lock_refused", { db: dbPath, error: e instanceof Error ? e.message : String(e) });
+  db.close();
+  process.exit(1);
+}
 let built: ReturnType<typeof buildNodeEnv>;
 try {
   built = buildNodeEnv(db, process.env);
 } catch (e) {
+  lock.release();
   db.close();
   configError(e);
 }
@@ -64,6 +79,7 @@ async function shutdown(signal: string) {
   await closeServer();
   await scheduler.stop();
   await handler.drain();
+  lock.release();
   db.close();
   process.exit(0);
 }

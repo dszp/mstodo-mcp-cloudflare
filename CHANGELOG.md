@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Node.js host and container image.** The server can run as one Node 24 process, or from the
+  Docker image in `src/hosts/node/`, behind your own HTTPS reverse proxy. A SQLite file replaces
+  KV and Durable Objects; the tools, OAuth consent flow and Microsoft sign-in are the same as on
+  the Worker. The process refuses to start when another one holds the same database file. Build
+  with `npm run build:node`; setup, backups and the differences from Cloudflare are in
+  [docs/NODE-HOSTING.md](./docs/NODE-HOSTING.md).
+
 ### Changed
 - **Dependency hygiene:** in-range updates for `fast-uri`, `ip-address`, `qs`, `body-parser`,
   `proxy-addr`, `@hono/node-server`, `undici`, `vitest`, `postcss`, `sharp` and `source-map-js`,
@@ -19,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cloudflare imports; the Worker entry point, Durable Object classes and OAuth wiring moved under
   `src/hosts/cloudflare/`. No behavior change: tool names, inputs, outputs, KV keys and Durable
   Object storage are unchanged.
+- **`src/hosts/node/` and `src/hosts/shared/`.** The Node host lives beside the Worker under
+  `src/hosts/`, and the OAuth front both hosts use moved to `src/hosts/shared/`. CI now runs on
+  Node 24 and also typechecks (`tsconfig.node.json`) and builds the Node host.
 
 ### Upgrade notes
 - **Update `main` in your `wrangler.jsonc`.** The Worker entry point moved from `src/index.ts` to

@@ -1,0 +1,9 @@
+# Allowlist: the build context is ONLY what is re-included below. The repository
+# directory also holds gitignored secrets and local config (.dev.vars,
+# wrangler.jsonc, config-live/, ...); none of it may reach an image.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!scripts/build-node.mjs
+!src/

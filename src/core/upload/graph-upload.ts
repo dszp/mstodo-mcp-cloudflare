@@ -58,15 +58,20 @@ function base64FromBytes(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-export function bytesFromBase64(b64: string): Uint8Array {
+export function bytesFromBase64(b64: string): Uint8Array<ArrayBuffer> {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
 
-/** SHA-256 of the given bytes, hex-encoded. Used for exact-duplicate detection. */
-export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+/**
+ * SHA-256 of the given bytes, hex-encoded. Used for exact-duplicate detection.
+ * Typed Uint8Array<ArrayBuffer>, not the default ArrayBufferLike: WebCrypto
+ * rejects SharedArrayBuffer-backed views, and Node's lib types (unlike
+ * Workers') say so.
+ */
+export async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
@@ -105,7 +110,7 @@ export async function getAttachmentBytes(
   listId: string,
   taskId: string,
   attachmentId: string,
-): Promise<Uint8Array | null> {
+): Promise<Uint8Array<ArrayBuffer> | null> {
   const url = `${attachmentsUrl(listId, taskId)}/${encodeURIComponent(attachmentId)}`;
   const att = await graph.getJson(url, TaskFileAttachmentSchema);
   return att.contentBytes ? bytesFromBase64(att.contentBytes) : null;

@@ -25,6 +25,7 @@ running your own private instance — not a shared/multi-tenant service.
 - [Design decisions to revisit](#design-decisions-to-revisit)
 - [Author](#author)
 - [Deployment guide →](./DEPLOYMENT.md)
+- [Node.js and Docker hosting →](./docs/NODE-HOSTING.md)
 - [Changelog →](./CHANGELOG.md)
 
 ## Requirements
@@ -41,6 +42,10 @@ running your own private instance — not a shared/multi-tenant service.
 ➡️ **Setup & deployment:** see **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the full
 step-by-step guide (including the Microsoft Entra app registration), custom-domain
 setup, and troubleshooting. The [Configuration](#configuration) reference is below.
+
+To run without Cloudflare, use the Node.js host: one Node 24 process, or the included Docker
+image, behind your own HTTPS reverse proxy, with the same tools and sign-in flow and a SQLite
+file in place of KV and Durable Objects. See [docs/NODE-HOSTING.md](./docs/NODE-HOSTING.md).
 
 ## Tools
 
