@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import type { TodoIndex } from "../src/cache/index-do";
 import { isScanDue, selectDueScanLists } from "../src/cache/index-do";
-import { LATEST_SCHEMA_VERSION } from "../src/cache/migrations";
+import { LATEST_SCHEMA_VERSION } from "../src/core/index/migrations";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}

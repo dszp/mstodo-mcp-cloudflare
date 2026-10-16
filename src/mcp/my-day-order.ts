@@ -10,7 +10,7 @@
 import { orderToMs } from "./reorder";
 
 // We only ever read these three columns, so accept the minimal structural shape
-// (a subset of cache/sql.ts TaskRow) — keeps callers and tests honest without
+// (a subset of core/index/sql.ts TaskRow) — keeps callers and tests honest without
 // fabricating whole rows. Status is Graph-cased ("completed"/"notStarted"/…),
 // the value the cache stores from Graph delta.
 export interface MyDayOrderRow {

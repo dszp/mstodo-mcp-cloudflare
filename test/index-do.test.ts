@@ -2,7 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import type { TodoTask, TodoTaskList } from "../src/graph/types";
 import type { TodoIndex } from "../src/cache/index-do";
-import { OWNER_DO_NAME } from "../src/cache/sql";
+import { OWNER_DO_NAME } from "../src/core/index/sql";
 import {
   TOKENS_KEY,
   IDENTITY_KEY,

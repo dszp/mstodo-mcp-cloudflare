@@ -6,8 +6,8 @@
 // types, and the Graph-object ⇄ row mappers; the DO class in index-do.ts owns
 // the connection and the query logic.
 
-import type { ChecklistItem, TodoTask, TodoTaskList } from "../graph/types";
-import { stripHtml } from "../util/html";
+import type { ChecklistItem, TodoTask, TodoTaskList } from "../../graph/types";
+import { stripHtml } from "../../util/html";
 
 // Singleton address for the cross-list index DO. Used everywhere via
 //   ownerIndex(env) (src/core/owner-index.ts)

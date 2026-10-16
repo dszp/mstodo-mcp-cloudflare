@@ -10,9 +10,11 @@
 // To add a migration: append a new entry with the next sequential version.
 // Order matters; do not edit historical entries.
 
+import type { SqlDb } from "../ports";
+
 interface Migration {
   version: number;
-  apply: (sql: SqlStorage) => void;
+  apply: (sql: SqlDb) => void;
 }
 
 const MIGRATIONS: Migration[] = [
@@ -128,7 +130,7 @@ export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
 
 // Read the stored schema version, creating + seeding the schema_meta table on
 // first use. PRAGMA user_version is unavailable here (see file header).
-function currentVersion(sql: SqlStorage): number {
+function currentVersion(sql: SqlDb): number {
   sql.exec(
     "CREATE TABLE IF NOT EXISTS schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)",
   );
@@ -138,7 +140,7 @@ function currentVersion(sql: SqlStorage): number {
     .one().version;
 }
 
-export function applyMigrations(sql: SqlStorage): void {
+export function applyMigrations(sql: SqlDb): void {
   const cur = currentVersion(sql);
   for (const m of MIGRATIONS) {
     if (cur >= m.version) continue;

@@ -1,5 +1,5 @@
 import type { AppEnv, IndexBackend } from "./ports";
-import { OWNER_DO_NAME } from "../cache/sql";
+import { OWNER_DO_NAME } from "./index/sql";
 
 // The one place core resolves the singleton index. A host either supplies
 // env.ownerIndex (Node: the in-process IndexCore) or exposes the Cloudflare
@@ -9,5 +9,6 @@ import { OWNER_DO_NAME } from "../cache/sql";
 export function ownerIndex(env: AppEnv): IndexBackend {
   if (env.ownerIndex) return env.ownerIndex();
   const ns = (env as unknown as { TODO_INDEX_DO: DurableObjectNamespace<import("../cache/index-do").TodoIndex> }).TODO_INDEX_DO;
-  return ns.get(ns.idFromName(OWNER_DO_NAME)) as unknown as IndexBackend;
+  const stub: IndexBackend = ns.get(ns.idFromName(OWNER_DO_NAME));
+  return stub;
 }

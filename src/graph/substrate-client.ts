@@ -7,7 +7,7 @@ import { type ClaimsChallengeSink, parseClaimsChallenge, ReauthRequiredError } f
 // the `CommittedDay` field on a task, which Graph does not expose; the Substrate
 // API does. This client is deliberately trivial: it owns NO token logic. The
 // rotating refresh token is shared with Graph and the singleton TodoIndex DO is
-// the sole refresher (see cache/index-do.ts getSubstrateAccessToken), so this
+// the sole refresher (see core/index/index-core.ts getSubstrateAccessToken), so this
 // client just asks the provider for a token, injects headers, and retries once
 // on 401 by forcing a re-mint.
 //

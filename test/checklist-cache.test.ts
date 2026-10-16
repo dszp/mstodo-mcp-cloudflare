@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import type { TodoIndex } from "../src/cache/index-do";
-import { LATEST_SCHEMA_VERSION } from "../src/cache/migrations";
+import { LATEST_SCHEMA_VERSION } from "../src/core/index/migrations";
 import { SCOPES, TOKENS_KEY } from "../src/auth/microsoft";
 
 declare module "cloudflare:test" {

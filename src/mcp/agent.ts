@@ -22,7 +22,7 @@ import {
   type ChecklistSearchRow,
   type ListRow,
   type TaskRow,
-} from "../cache/sql";
+} from "../core/index/sql";
 import { ownerIndex } from "../core/owner-index";
 import { mapPool } from "../graph/concurrency";
 import { VERSION } from "../version";

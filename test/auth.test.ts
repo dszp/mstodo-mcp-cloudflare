@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
-import { OWNER_DO_NAME } from "../src/cache/sql";
+import { OWNER_DO_NAME } from "../src/core/index/sql";
 import { seal, unseal, isSealed } from "../src/auth/crypto";
 import {
   TOKENS_KEY,

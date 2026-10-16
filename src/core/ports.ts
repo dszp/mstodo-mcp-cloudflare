@@ -14,13 +14,13 @@ export interface KeyValueStore {
   }>;
 }
 
-export interface SqlCursor<T> {
+export interface SqlCursor<T extends Record<string, SqlValue>> {
   toArray(): T[];
   one(): T; // throws when the result is not exactly one row, like Cloudflare's cursor
 }
 
 export interface SqlDb {
-  exec<T = Record<string, SqlValue>>(query: string, ...params: SqlValue[]): SqlCursor<T>;
+  exec<T extends Record<string, SqlValue> = Record<string, SqlValue>>(query: string, ...params: SqlValue[]): SqlCursor<T>;
 }
 export type SqlValue = string | number | null | ArrayBuffer;
 
@@ -39,7 +39,7 @@ export interface AlarmScheduler {
 // The RPC surface core calls on the singleton index. Generated from IndexCore's
 // public methods in Task 4 (`Pick<IndexCore, …>`); declared here as the type the
 // rest of core depends on.
-export type IndexBackend = import("../cache/index-do").IndexBackendSurface;
+export type IndexBackend = import("./index/index-core").IndexBackendSurface;
 
 // Vars and secrets core reads, plus the two stores. Cloudflare's Env is a
 // structural superset; the Node host builds one from process.env.
