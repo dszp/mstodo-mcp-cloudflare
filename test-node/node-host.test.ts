@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { openDatabase } from "../src/hosts/node/sqlite-db";
 import { buildNodeEnv, InvalidConfigError, MissingConfigError } from "../src/hosts/node/env";
-import { backgroundTasks, createHandler, startScheduler } from "../src/hosts/node/http";
+import { backgroundTasks, createHandler, startScheduler, toPublicOrigin } from "../src/hosts/node/http";
 import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
 import { ORIGIN, oauthClient, stubMicrosoft } from "./_oauth-client";
 
@@ -178,6 +178,29 @@ describe("node host", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ resource: "https://todo.example/mcp" });
+  });
+
+  // A request target starting with "//" must not be re-parsed as
+  // protocol-relative (new URL("//evil.example/x", origin) → https://evil.example/x).
+  const smuggled = [
+    "http://127.0.0.1:8787//evil.example/.well-known/oauth-protected-resource/mcp",
+    "http://127.0.0.1:8787///evil.example/.well-known/oauth-protected-resource/mcp",
+    "http://127.0.0.1:8787/\\evil.example/.well-known/oauth-protected-resource/mcp",
+    "http://127.0.0.1:8787//evil.example:443/authorize?x=1",
+  ];
+
+  it.each(smuggled)("keeps the configured origin for %s", (target) => {
+    const out = new URL(toPublicOrigin(new Request(target), "https://todo.example").url);
+    expect(out.origin).toBe("https://todo.example");
+    expect(out.username + out.password).toBe("");
+  });
+
+  it.each(smuggled)("serves nothing derived from a smuggled host for %s", async (target) => {
+    const { env } = buildNodeEnv(openDatabase(":memory:"), vars);
+    const res = await createHandler(env, { publicOrigin: "https://todo.example" }).fetch(new Request(target));
+    const body = await res.text();
+    const headers = JSON.stringify([...res.headers]);
+    expect(body + headers).not.toMatch(/https?:\/\/evil\.example/);
   });
 
   it.each([

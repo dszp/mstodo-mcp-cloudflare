@@ -66,9 +66,20 @@ export function backgroundTasks() {
 // The OAuth resource, the Microsoft callback URL and the consent cookies all
 // derive from the request origin, which @hono/node-server builds from the
 // client's Host header; behind a TLS proxy it is also http://<internal host>.
-function atOrigin(req: Request, origin: string): Request {
+//
+// The path is never re-parsed against the origin: a target such as
+// "//evil.example/x" would resolve as protocol-relative and hand routing an
+// attacker-chosen host. Only the origin parts of the parsed URL are replaced.
+export function toPublicOrigin(req: Request, origin: string): Request {
   const url = new URL(req.url);
-  const target = new URL(url.pathname + url.search, origin);
+  const o = new URL(origin);
+  const target = new URL(url.href);
+  target.protocol = o.protocol;
+  target.host = o.host; // host includes the port; an empty port clears it
+  target.port = o.port;
+  target.username = "";
+  target.password = "";
+  if (target.origin !== o.origin) throw new Error("request URL could not be moved to the public origin");
   if (target.href === url.href) return req;
   return new Request(target, {
     method: req.method,
@@ -90,7 +101,7 @@ export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
   const publicOrigin = parsePublicOrigin(options.publicOrigin);
 
   async function fetch(incoming: Request): Promise<Response> {
-    const req = atOrigin(incoming, publicOrigin);
+    const req = toPublicOrigin(incoming, publicOrigin);
     const url = new URL(req.url);
     if (url.pathname === "/health") {
       return Response.json({ ok: true, service: "mstodo-mcp", version: VERSION, host: "node" });
