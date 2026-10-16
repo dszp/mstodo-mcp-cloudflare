@@ -2237,3 +2237,6 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
     return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 6;
   }
 }
+
+// Temporary placeholder (Task 1); Task 4 replaces it with the real surface.
+export interface IndexBackendSurface {}
