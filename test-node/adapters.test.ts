@@ -43,9 +43,22 @@ describe("sqliteKv", () => {
   it("accepts the Workers KV get() spellings the OAuth library uses", async () => {
     const kv = sqliteKv(openDatabase(":memory:"), "ns");
     await kv.put("k", '{"a":1}');
-    const lib = kv as unknown as { get(key: string, opts?: { type: "json" }): Promise<unknown> };
-    expect(await lib.get("k", { type: "json" })).toEqual({ a: 1 });
-    expect(await lib.get("k")).toBe('{"a":1}');
+    expect(await kv.get("k", { type: "json" })).toEqual({ a: 1 });
+    expect(await kv.get("k")).toBe('{"a":1}');
+  });
+
+  it("honors an absolute expiration (epoch seconds), with expirationTtl winning", async () => {
+    let t = 1_000_000_000;
+    const kv = sqliteKv(openDatabase(":memory:"), "ns", () => t);
+    const at = t / 1000 + 60;
+    await kv.put("grant:a", "v", { expiration: at, metadata: { m: 1 } });
+    await kv.put("both", "v", { expiration: at, expirationTtl: 3600 });
+    expect(await kv.get("grant:a")).toBe("v");
+    expect((await kv.list({ prefix: "grant:" })).keys).toEqual([{ name: "grant:a", expiration: at, metadata: { m: 1 } }]);
+    t += 61_000;
+    expect(await kv.get("grant:a")).toBeNull();
+    expect((await kv.list({ prefix: "grant:" })).keys).toEqual([]);
+    expect(await kv.get("both")).toBe("v");
   });
 
   it("expires keys by TTL without a sweep", async () => {

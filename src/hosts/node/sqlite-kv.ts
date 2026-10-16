@@ -1,13 +1,24 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { KeyValueStore } from "../../core/ports";
 
+// The KV surface @cloudflare/workers-oauth-provider uses on OAUTH_KV: core's
+// KeyValueStore plus the Workers KV spellings core never needs — get(key),
+// get(key, { type }), and put's absolute `expiration` (epoch seconds), which
+// the library sets on grants. Kept out of core's port on purpose.
+export type OAuthKvStore = KeyValueStore & {
+  get(key: string): Promise<string | null>;
+  get(key: string, options: { type: "text" }): Promise<string | null>;
+  get<T = unknown>(key: string, options: { type: "json" }): Promise<T | null>;
+  put(key: string, value: string, options?: { expiration?: number; expirationTtl?: number; metadata?: unknown }): Promise<void>;
+};
+
 // One table for every namespace (TODO_CACHE, OAUTH_KV). Expired rows read as
 // missing immediately; sweep() deletes them.
 export function sqliteKv(
   db: DatabaseSync,
   namespace: string,
   now: () => number = Date.now,
-): KeyValueStore & { sweep(): void } {
+): OAuthKvStore & { sweep(): void } {
   db.exec(`CREATE TABLE IF NOT EXISTS kv (
     ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
     expires_at INTEGER, metadata TEXT, PRIMARY KEY (ns, key))`);
@@ -23,14 +34,12 @@ export function sqliteKv(
   );
   const sweepStmt = db.prepare("DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?");
 
-  // Overloads mirror KeyValueStore.get, so the object below needs no cast.
-  // The implementation also accepts Workers KV's other spellings, because the
-  // OAuth library reads OAUTH_KV through them: get(key) and
-  // get(key, { type: "json" }). Without this, those calls would get the raw
-  // string back where the library expects a parsed object.
-  async function get(key: string, type: "text"): Promise<string | null>;
-  async function get<T = unknown>(key: string, type: "json"): Promise<T | null>;
-  async function get(key: string, type?: "text" | "json" | { type?: "text" | "json" }): Promise<unknown> {
+  // Overloads cover both core's get(key, "json") and the Workers KV spellings
+  // the OAuth library uses (see OAuthKvStore), so the object below needs no cast.
+  async function get(key: string): Promise<string | null>;
+  async function get(key: string, type: "text" | { type: "text" }): Promise<string | null>;
+  async function get<T = unknown>(key: string, type: "json" | { type: "json" }): Promise<T | null>;
+  async function get(key: string, type?: "text" | "json" | { type: "text" | "json" }): Promise<unknown> {
     const row = getStmt.get(namespace, now(), key) as { value: string } | undefined;
     if (!row) return null;
     const as = typeof type === "object" ? type.type : type;
@@ -39,13 +48,16 @@ export function sqliteKv(
 
   return {
     get,
-    async put(key, value, options) {
+    async put(key: string, value: string, options?: { expiration?: number; expirationTtl?: number; metadata?: unknown }) {
+      // Workers KV: expirationTtl (seconds from now) wins over expiration
+      // (absolute epoch seconds) when both are given.
       const ttl = options?.expirationTtl;
+      const at = options?.expiration;
       putStmt.run(
         namespace,
         key,
         value,
-        ttl ? now() + ttl * 1000 : null,
+        ttl ? now() + ttl * 1000 : at ? at * 1000 : null,
         options?.metadata === undefined ? null : JSON.stringify(options.metadata),
       );
     },

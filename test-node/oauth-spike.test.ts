@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { OAuthError, OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { openDatabase, sqlDb } from "../src/hosts/node/sqlite-db";
-import { sqliteKv } from "../src/hosts/node/sqlite-kv";
+import { sqliteKv, type OAuthKvStore } from "../src/hosts/node/sqlite-kv";
 import { stateStore } from "../src/hosts/node/state-store";
 import { IndexCore } from "../src/core/index/index-core";
 import { grantRefusal, refuseMcpRequest, refusalDescription } from "../src/core/auth/grant";
@@ -20,17 +20,26 @@ import type { Props } from "../src/core/types";
 const ORIGIN = "https://mcp.test"; // https: the library's __Host- cookies are Secure
 const REDIRECT_URI = "http://localhost:9/cb";
 
+// The env the provider and auth-handler see. The library types env as a free
+// generic (it never constrains OAUTH_KV), so this declaration is where the
+// compiler checks our KV against the surface the library actually calls.
+type SpikeEnv = AppEnv & {
+  OAUTH_KV: OAuthKvStore;
+  TODO_INDEX_DO: { idFromName(name: string): string; get(id: string): IndexCore };
+};
+
 function nodeEnv() {
   const db = openDatabase(":memory:");
   const state = stateStore(db);
-  const env: AppEnv = {
+  const oauthKv = sqliteKv(db, "OAUTH_KV");
+  const env: AppEnv & { OAUTH_KV: OAuthKvStore } = {
     TIMEZONE: "America/New_York",
     OWNER_EMAIL: "test-owner@example.com",
     MS_TENANT_ID: "test-tenant",
     MS_CLIENT_ID: "test-client",
     MS_CLIENT_SECRET: "test-secret",
     ENABLE_MY_DAY: "true",
-    OAUTH_KV: sqliteKv(db, "OAUTH_KV"),
+    OAUTH_KV: oauthKv,
     TODO_CACHE: sqliteKv(db, "TODO_CACHE"),
     ownerIndex: () => core as never,
   };
@@ -40,12 +49,12 @@ function nodeEnv() {
   // ownerIndex with a lookup through the TODO_INDEX_DO namespace. Until the
   // handler takes an AppEnv directly (Task 10), the spike satisfies that
   // lookup with a stand-in namespace that returns the same IndexCore.
-  const workerEnv = { ...env, TODO_INDEX_DO: { idFromName: () => "owner", get: () => core } };
+  const workerEnv: SpikeEnv = { ...env, TODO_INDEX_DO: { idFromName: () => "owner", get: () => core } };
   return { env, workerEnv, core };
 }
 
 function buildProvider(env: AppEnv) {
-  return new OAuthProvider({
+  return new OAuthProvider<SpikeEnv>({
     apiRoute: "/mcp",
     apiHandler: {
       async fetch(_req: Request, _env: unknown, ctx: { props?: unknown }) {
@@ -100,7 +109,8 @@ function harness() {
     const headers = new Headers(init.headers);
     if (jar.size) headers.set("cookie", [...jar].map(([k, v]) => `${k}=${v}`).join("; "));
     const ctx = { waitUntil: () => {}, passThroughOnException: () => {} };
-    const res = await provider.fetch(new Request(`${ORIGIN}${path}`, { ...init, headers }), workerEnv as never, ctx as never);
+    // ctx: the library only writes ctx.props; it never calls waitUntil.
+    const res = await provider.fetch(new Request(`${ORIGIN}${path}`, { ...init, headers }), workerEnv, ctx as unknown as ExecutionContext);
     for (const c of res.headers.getSetCookie()) {
       const [pair, ...attrs] = c.split(";");
       const i = pair.indexOf("=");
@@ -202,7 +212,7 @@ describe("OAuth provider on Node (spike)", () => {
     await core.revokeAllGrants();
     const revoked = await send("/mcp", bearer(t2.access_token));
     expect(revoked.status).toBe(401);
-    expect(((await revoked.json()) as { error: string }).error).toBe("invalid_token");
+    expect(await revoked.json()).toEqual({ error: "invalid_token", error_description: refusalDescription("grant_revoked") });
     const refused = await send("/token", form({ grant_type: "refresh_token", refresh_token: t2.refresh_token, client_id: clientId }));
     expect(refused.status).toBe(400);
     expect(((await refused.json()) as { error: string }).error).toBe("invalid_grant");
@@ -216,5 +226,6 @@ describe("OAuth provider on Node (spike)", () => {
     expect(callback.status).toBe(403);
     expect(callback.headers.get("location")).toBeNull();
     expect(await env.TODO_CACHE.get(TOKENS_KEY, "text")).toBeNull();
+    expect((await env.OAUTH_KV.list({ prefix: "grant:" })).keys).toEqual([]);
   });
 });
