@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified domains; `mail` is an attribute an administrator can set to any address. A match on
   `mail` alone still works, but only when `OWNER_OBJECT_ID` is set and matches.
 
+### Changed
+- **wrangler 4.151.0** (from 4.150.0).
+
 ### Upgrade notes
 - **If `OWNER_EMAIL` is your `mail` address and differs from your UPN, set `OWNER_OBJECT_ID`
   before you deploy.** Otherwise your next Microsoft sign-in is refused (the log says
