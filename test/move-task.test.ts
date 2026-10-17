@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
-import type { TodoTask } from "../src/graph/types";
+import type { TodoTask } from "../src/core/graph/types";
 import {
   buildMoveCopyBody,
   isReparentConfirmed,
   decideAfterReparentFailure,
-} from "../src/mcp/move-task";
+} from "../src/core/mcp/move-task";
 
 describe("buildMoveCopyBody (fallback create-in-destination body)", () => {
   it("copies only the writable scalar fields that are present", () => {

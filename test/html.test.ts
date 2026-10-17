@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stripHtml } from "../src/util/html";
+import { stripHtml } from "../src/core/util/html";
 
 describe("stripHtml", () => {
   it("passes non-html content through verbatim", () => {

@@ -1,0 +1,20 @@
+# Allowlist: the build context is ONLY what is re-included below. The repository
+# directory also holds gitignored secrets and local config (.dev.vars,
+# wrangler.jsonc, config-live/, ...), and the Compose .env sits in
+# src/hosts/node/; none of it may reach an image. Only TypeScript source is
+# re-included from src/. Buildah/Podman drop an excluded directory together
+# with everything under it, so directories can't be excluded and re-entered;
+# instead every file with a dot in its name (.env, .env.*, *.sqlite*,
+# compose.yaml, ...) and every dotfile is dropped, then *.ts is restored.
+# Extensionless files are not matched; the Dockerfile fails the build if one
+# reaches it.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!scripts/build-node.mjs
+!src/
+src/**/*.*
+src/**/.*
+src/**/Dockerfile
+!src/**/*.ts

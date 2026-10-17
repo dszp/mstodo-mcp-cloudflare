@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
-import { OWNER_DO_NAME } from "../src/cache/sql";
-import { seal, unseal, isSealed } from "../src/auth/crypto";
+import { OWNER_DO_NAME } from "../src/core/index/sql";
+import { seal, unseal, isSealed } from "../src/core/auth/crypto";
 import {
   TOKENS_KEY,
   IDENTITY_KEY,
@@ -11,15 +11,19 @@ import {
   reauthReasonFromTokenError,
   TokenExchangeError,
   type StoredTokens,
-} from "../src/auth/microsoft";
-import { parseClaimsChallenge, ReauthRequiredError, isReauthRequired } from "../src/auth/reauth";
-import { grantRefusal, refuseMcpRequest, MAX_GRANT_AGE_MS } from "../src/auth/grant";
-import { GraphClient } from "../src/graph/client";
-import { consentPage } from "../src/auth/consent-page";
-import AuthHandler from "../src/auth/handler";
-import type { Props } from "../src/types";
+} from "../src/core/auth/microsoft";
+import { parseClaimsChallenge, ReauthRequiredError, isReauthRequired } from "../src/core/auth/reauth";
+import { grantRefusal, refuseMcpRequest, MAX_GRANT_AGE_MS } from "../src/core/auth/grant";
+import { GraphClient } from "../src/core/graph/client";
+import { consentPage } from "../src/hosts/shared/consent-page";
+import { authHandler } from "../src/hosts/shared/auth-handler";
+import { appEnv } from "../src/hosts/cloudflare/env";
+import type { Props } from "../src/core/types";
+import { testAppEnv } from "./_app-env";
+import type { AppEnv } from "../src/core/ports";
 
-const E = env as unknown as Env;
+const E = testAppEnv();
+const AuthHandler = authHandler(appEnv);
 
 function index() {
   return env.TODO_INDEX_DO.getByName(OWNER_DO_NAME);
@@ -50,11 +54,16 @@ describe("token sealing", () => {
   });
 
   it("stores tokens sealed, never as plaintext JSON", async () => {
-    await storeTokens(E, TOKENS);
+    // A long sentinel: a short token like "rt" turns up by chance in random
+    // base64 ciphertext (~1 run in 10), which made this test flaky.
+    const sentinel = "refresh-token-sentinel-6f2c9a41";
+    const tokens = { ...TOKENS, refresh_token: sentinel };
+    await storeTokens(E, tokens);
     const raw = (await env.TODO_CACHE.get(TOKENS_KEY))!;
     expect(isSealed(raw)).toBe(true);
-    expect(raw).not.toContain("rt");
-    expect(await loadTokens(E)).toEqual(TOKENS);
+    expect(raw).not.toContain(sentinel);
+    expect(raw).not.toContain("refresh_token");
+    expect(await loadTokens(E)).toEqual(tokens);
   });
 
   it("migrates a legacy plaintext record to sealed on first read", async () => {
@@ -64,7 +73,7 @@ describe("token sealing", () => {
   });
 
   it("reads a record sealed under a different secret as no tokens", async () => {
-    const other = { ...E, MS_CLIENT_SECRET: "rotated-secret" } as Env;
+    const other = { ...E, MS_CLIENT_SECRET: "rotated-secret" } as AppEnv;
     await storeTokens(other, TOKENS);
     expect(await loadTokens(E)).toBeNull();
   });
@@ -288,7 +297,7 @@ describe("authorize flow", () => {
   }
 
   let oauth: ReturnType<typeof oauthStub>;
-  const envWith = () => ({ ...E, OAUTH_PROVIDER: oauth }) as unknown as Env;
+  const envWith = () => ({ ...(env as object), OAUTH_PROVIDER: oauth }) as unknown as Env;
 
   beforeEach(() => {
     calls = [];

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GraphClient, type TokenProvider } from "../src/graph/client";
-import { attachFile } from "../src/upload/graph-upload";
+import { GraphClient, type TokenProvider } from "../src/core/graph/client";
+import { attachFile } from "../src/core/upload/graph-upload";
 
 // A GraphClient backed by a static token (no refresh network calls).
 const tp: TokenProvider = {

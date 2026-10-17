@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { z } from "zod";
-import { GraphClient, GraphError } from "../src/graph/client";
-import { followToTerminal } from "../src/graph/delta";
+import { GraphClient, GraphError } from "../src/core/graph/client";
+import { followToTerminal } from "../src/core/graph/delta";
 
 // A minimal GraphClient stub: followToTerminal only ever calls getJson(url, schema).
 // Scripted pages are keyed by request URL; an unscripted URL is a test bug.

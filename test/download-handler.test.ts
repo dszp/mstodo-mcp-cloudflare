@@ -1,11 +1,12 @@
-import { env as rawEnv } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// The test pool types env as Cloudflare.Env (no runtime-injected OAUTH_PROVIDER);
-// handleDownload takes the global Env. Cast once for the file (see upload-handler).
-const env = rawEnv as unknown as Env;
-import { handleDownload } from "../src/upload/download-handler";
-import { createDownloadCapability, lookupDownloadCapability } from "../src/upload/tokens";
+// The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it
+// before calling core (see test/_app-env.ts).
+const env = testAppEnv();
+import { handleDownload } from "../src/core/upload/download-handler";
+import { createDownloadCapability, lookupDownloadCapability } from "../src/core/upload/tokens";
+import { testAppEnv } from "./_app-env";
+import type { AppEnv } from "../src/core/ports";
 
 const TOKENS_KEY = "tokens:owner";
 const SCOPE = { list_id: "L1", task_id: "T1", attachment_id: "A1" } as const;
@@ -153,7 +154,7 @@ describe("handleDownload serve flow", () => {
 
   it("is gated off when ENABLE_DOWNLOAD_LINKS=false", async () => {
     const { token } = await createDownloadCapability(env, SCOPE);
-    const gatedEnv = { ...(env as object), ENABLE_DOWNLOAD_LINKS: "false" } as unknown as Env;
+    const gatedEnv = { ...(env as object), ENABLE_DOWNLOAD_LINKS: "false" } as unknown as AppEnv;
     const res = await handleDownload(getReq(token), gatedEnv);
     expect(res!.status).toBe(404);
     expect((await res!.json() as { reason: string }).reason).toBe("download_disabled");

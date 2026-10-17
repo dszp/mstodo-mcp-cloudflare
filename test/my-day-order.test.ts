@@ -3,7 +3,7 @@ import {
   isIncompleteRow,
   collectMyDayNeighborOrders,
   findMyDayRowById,
-} from "../src/mcp/my-day-order";
+} from "../src/core/mcp/my-day-order";
 
 // The reorder neighbor helpers operate on cache rows (TaskRow) returned by
 // queryMyDayForDate(day), which has ALREADY filtered to committed_day == day

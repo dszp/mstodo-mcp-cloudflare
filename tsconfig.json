@@ -13,5 +13,5 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": false
   },
-  "include": ["src/**/*", "test/**/*", "worker-configuration.d.ts"]
+  "include": ["src/**/*", "test/**/*", "test-node/**/*", "worker-configuration.d.ts"]
 }

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import type { TodoTask } from "../src/graph/types";
+import type { TodoTask } from "../src/core/graph/types";
 
 function indexStub(name: string) {
   return env.TODO_INDEX_DO.getByName(name);

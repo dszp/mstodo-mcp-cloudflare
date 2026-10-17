@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { GraphClient, type TokenProvider } from "../src/graph/client";
+import { GraphClient, type TokenProvider } from "../src/core/graph/client";
 import {
   newClientState,
   createSubscription,
@@ -7,7 +7,7 @@ import {
   deleteSubscription,
   listGraphSubscriptions,
   desiredExpiration,
-} from "../src/subscriptions/manager";
+} from "../src/core/subscriptions/manager";
 
 const tp: TokenProvider = {
   getAccessToken: async () => "AT",

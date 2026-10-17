@@ -3,12 +3,17 @@
 [![CI](https://github.com/dszp/mstodo-mcp-cloudflare/actions/workflows/ci.yml/badge.svg)](https://github.com/dszp/mstodo-mcp-cloudflare/actions/workflows/ci.yml)
 
 **Use your Microsoft To Do tasks from Claude (or any MCP client), in plain
-language.** This is a personal, self-hosted server you run on your own Cloudflare
-Worker that connects Claude.ai to your Microsoft To Do account — so you can ask
-Claude to find, create, update, complete, search, and organize tasks across all
-your lists without leaving the chat. It keeps a fast local mirror of your lists and
+language.** This is a personal, self-hosted server that connects Claude.ai to your
+Microsoft To Do account, so you can ask Claude to find, create, update, complete,
+search, and organize tasks across all your lists without leaving the chat. It keeps a fast local mirror of your lists and
 tasks, so searching and querying across every list is quick and doesn't hammer
 Microsoft on each request.
+
+It runs on either of two hosts with the same tools and sign-in flow:
+
+- **Cloudflare Worker** — the primary host, documented in [DEPLOYMENT.md](./DEPLOYMENT.md).
+- **Node.js or Docker** — newer, for self-hosting on a VM or container platform you
+  control, documented in [docs/NODE-HOSTING.md](./docs/NODE-HOSTING.md).
 
 It's **single-user by design**: one deployment serves exactly one Microsoft
 account (everyone else is rejected by an owner-identity gate), so it's meant for
@@ -25,22 +30,29 @@ running your own private instance — not a shared/multi-tenant service.
 - [Design decisions to revisit](#design-decisions-to-revisit)
 - [Author](#author)
 - [Deployment guide →](./DEPLOYMENT.md)
+- [Node.js and Docker hosting →](./docs/NODE-HOSTING.md)
 - [Changelog →](./CHANGELOG.md)
 
 ## Requirements
 
 - A **Microsoft 365 (M365)** or personal Microsoft account that uses Microsoft To Do.
-- A **Cloudflare account** — the free plan works for small accounts; **Workers Paid**
+- For the Worker host, a **Cloudflare account** — the free plan works for small accounts; **Workers Paid**
   is recommended once you have **thousands of tasks** (see the plan note in the
   deployment guide).
 - A **Microsoft Entra app registration** — free, created once (walkthrough in the
   [deployment guide](./DEPLOYMENT.md#microsoft-entra-app-registration)).
-- **Node 18+** and Cloudflare's **Wrangler** CLI, to deploy.
+- **Node 24 or later**, for development and tests (they use Node 24's built-in `node:sqlite`
+  module); the Worker host also needs Cloudflare's **Wrangler** CLI, which `npm ci` installs.
+  The Docker image brings its own Node.
 - **Claude.ai** (or another MCP client) to connect to the deployed server.
 
 ➡️ **Setup & deployment:** see **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the full
 step-by-step guide (including the Microsoft Entra app registration), custom-domain
 setup, and troubleshooting. The [Configuration](#configuration) reference is below.
+
+To run without Cloudflare, use the Node.js host: one Node 24 process, or the included Docker
+image, behind your own HTTPS reverse proxy, with the same tools and sign-in flow and a SQLite
+file in place of KV and Durable Objects. See [docs/NODE-HOSTING.md](./docs/NODE-HOSTING.md).
 
 ## Tools
 

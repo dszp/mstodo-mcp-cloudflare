@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { resolveStatusFilter, resolveListScope, OPEN_STATUSES } from "../src/config/query-scope";
-import { ListsConfigSchema, type ListsConfig } from "../src/config/schemas";
+import { resolveStatusFilter, resolveListScope, OPEN_STATUSES } from "../src/core/config/query-scope";
+import { ListsConfigSchema, type ListsConfig } from "../src/core/config/schemas";
 
 const cfg: ListsConfig = ListsConfigSchema.parse({
   patterns: [

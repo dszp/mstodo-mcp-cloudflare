@@ -27,8 +27,33 @@ const poolOptions = {
 };
 
 export default defineConfig({
-  plugins: [cloudflareTest(poolOptions)],
   test: {
-    pool: cloudflarePool(poolOptions),
+    projects: [
+      {
+        plugins: [cloudflareTest(poolOptions)],
+        test: {
+          name: "workers",
+          include: ["test/**/*.test.ts"],
+          pool: cloudflarePool(poolOptions),
+        },
+      },
+      {
+        test: {
+          name: "node",
+          include: ["test-node/**/*.test.ts"],
+          environment: "node",
+          pool: "forks",
+          // node_modules are externalized (loaded by Node, not Vite), which
+          // would bypass the alias below; inline the OAuth library so its
+          // `cloudflare:workers` import goes through it.
+          server: { deps: { inline: ["@cloudflare/workers-oauth-provider"] } },
+        },
+        resolve: {
+          alias: {
+            "cloudflare:workers": new URL("./src/hosts/node/cloudflare-workers-shim.ts", import.meta.url).pathname,
+          },
+        },
+      },
+    ],
   },
 });

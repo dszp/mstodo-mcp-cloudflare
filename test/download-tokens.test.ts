@@ -1,20 +1,21 @@
-import { env as rawEnv } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createUploadCapability,
   lookupUploadCapability,
-} from "../src/upload/tokens";
+} from "../src/core/upload/tokens";
 import {
   consumeDownloadCapability,
   createDownloadCapability,
   downloadLinksEnabled,
   lookupDownloadCapability,
   MAX_DOWNLOAD_TTL_SECONDS,
-} from "../src/upload/tokens";
+} from "../src/core/upload/tokens";
+import { testAppEnv } from "./_app-env";
+import type { AppEnv } from "../src/core/ports";
 
-// The test pool types env as Cloudflare.Env (no runtime-injected OAUTH_PROVIDER);
-// our helpers take the global Env. Cast once for the file (see index-do.test.ts).
-const env = rawEnv as unknown as Env;
+// The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it
+// before calling core (see test/_app-env.ts).
+const env = testAppEnv();
 
 const SCOPE = { list_id: "L1", task_id: "T1", attachment_id: "A1" } as const;
 
@@ -96,9 +97,9 @@ describe("download capability tokens", () => {
   });
 
   it("is enabled by default and disabled only by an explicit false", () => {
-    expect(downloadLinksEnabled({} as unknown as Env)).toBe(true);
-    expect(downloadLinksEnabled({ ENABLE_DOWNLOAD_LINKS: "true" } as unknown as Env)).toBe(true);
-    expect(downloadLinksEnabled({ ENABLE_DOWNLOAD_LINKS: "false" } as unknown as Env)).toBe(false);
-    expect(downloadLinksEnabled({ ENABLE_DOWNLOAD_LINKS: "FALSE" } as unknown as Env)).toBe(false);
+    expect(downloadLinksEnabled({} as unknown as AppEnv)).toBe(true);
+    expect(downloadLinksEnabled({ ENABLE_DOWNLOAD_LINKS: "true" } as unknown as AppEnv)).toBe(true);
+    expect(downloadLinksEnabled({ ENABLE_DOWNLOAD_LINKS: "false" } as unknown as AppEnv)).toBe(false);
+    expect(downloadLinksEnabled({ ENABLE_DOWNLOAD_LINKS: "FALSE" } as unknown as AppEnv)).toBe(false);
   });
 });

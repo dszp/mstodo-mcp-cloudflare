@@ -9,7 +9,7 @@ import {
   SCOPES,
   EXO_TASKS_SCOPE,
   SUBSTRATE_SCOPES,
-} from "../src/auth/microsoft";
+} from "../src/core/auth/microsoft";
 import {
   assertSubstrateUrl,
   redactSubstrateUrl,
@@ -17,10 +17,11 @@ import {
   SubstrateError,
   SubstrateTaskSchema,
   projectSubstrateTaskDetails,
-} from "../src/graph/substrate-client";
+} from "../src/core/graph/substrate-client";
+import type { AppEnv } from "../src/core/ports";
 
 // Minimal Env stub — these helpers only read ENABLE_MY_DAY.
-const env = (enableMyDay?: string): Env => ({ ENABLE_MY_DAY: enableMyDay }) as unknown as Env;
+const env = (enableMyDay?: string): AppEnv => ({ ENABLE_MY_DAY: enableMyDay }) as unknown as AppEnv;
 
 // Build a JWT-shaped string with the given payload claims (base64url, no sig needed).
 function fakeJwt(claims: Record<string, unknown>): string {
@@ -37,7 +38,7 @@ describe("isOwner (single-user gate, fail-closed)", () => {
     userPrincipalName: "owner@example.com",
     ...over,
   });
-  const ownerEnv = (ownerEmail?: string): Env => ({ OWNER_EMAIL: ownerEmail }) as unknown as Env;
+  const ownerEnv = (ownerEmail?: string): AppEnv => ({ OWNER_EMAIL: ownerEmail }) as unknown as AppEnv;
 
   it("matches on mail or userPrincipalName, case/space-insensitively", () => {
     expect(isOwner(ownerEnv("Owner@Example.com"), me({ mail: "  owner@example.com " }))).toBe(true);
