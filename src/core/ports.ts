@@ -60,6 +60,9 @@ export interface AppEnv {
   MS_CLIENT_ID: string;
   MS_CLIENT_SECRET: string;
   OWNER_EMAIL: string;
+  // Optional: the owner's Microsoft account object ID (/me.id). Required when
+  // MS_TENANT_ID is `common` or `organizations`; see isOwner().
+  OWNER_OBJECT_ID?: string;
   TODO_CACHE: KeyValueStore;
   OAUTH_KV: KeyValueStore;
   // Host hook: how core reaches the singleton index (see core/owner-index.ts).

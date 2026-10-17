@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Tool arguments are capped at 10,000 array elements and object keys per call.** The MCP SDK
+  leaves this unlimited unless the server sets `maxToolInputElements`
+  ([GHSA-46jr-4wx8-v453](https://github.com/modelcontextprotocol/typescript-sdk/security/advisories/GHSA-46jr-4wx8-v453)),
+  and upgrading the SDK alone doesn't set it. A call over the cap gets an error result before its
+  arguments are validated. Only clients that already passed OAuth and the owner's consent could
+  reach this, on either host.
+- **New `OWNER_OBJECT_ID` secret binds sign-in to the owner's account, not just the address.**
+  When set, the Microsoft callback also requires `/me.id` to equal it. It's required when
+  `MS_TENANT_ID` is `common` or `organizations`, and sign-in fails closed without it, because an
+  administrator of any tenant can give an account the owner's `mail` address. Get the value from
+  the `id` field of the `whoami` tool.
+
+### Upgrade notes
+- **If `MS_TENANT_ID` is `common` or `organizations`, set `OWNER_OBJECT_ID` before you deploy.**
+  Without it, every sign-in is refused. Existing connections keep working until they next pass
+  through Microsoft sign-in. With a tenant ID or `consumers`, it's optional.
+
 ## [0.17.0] – 2026-10-17
 
 ### Added

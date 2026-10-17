@@ -16,6 +16,7 @@ interface OwnerSecrets {
   MS_CLIENT_ID: string;
   MS_CLIENT_SECRET: string;
   OWNER_EMAIL: string;
+  OWNER_OBJECT_ID?: string;
 }
 
 declare global {

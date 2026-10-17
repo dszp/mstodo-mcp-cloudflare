@@ -3,6 +3,7 @@ import { openDatabase } from "../src/hosts/node/sqlite-db";
 import { buildNodeEnv, InvalidConfigError, MissingConfigError } from "../src/hosts/node/env";
 import { backgroundTasks, createHandler, startScheduler, toPublicOrigin } from "../src/hosts/node/http";
 import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
+import { MAX_TOOL_INPUT_ELEMENTS } from "../src/core/mcp/server";
 import { ORIGIN, oauthClient, stubMicrosoft } from "./_oauth-client";
 
 const vars = {
@@ -164,8 +165,15 @@ describe("node host", () => {
     const [content] = status.body.result!.content as Array<{ text: string }>;
     expect(JSON.parse(content.text)).toMatchObject({ ok: true });
 
+    // Oversized arguments are refused by count before schema validation.
+    const lists = Array.from({ length: MAX_TOOL_INPUT_ELEMENTS + 1 }, (_, i) => `l${i}`);
+    const big = await call(4, "tools/call", { name: "query_tasks", arguments: { lists } });
+    expect(big.status).toBe(200);
+    expect(big.body.result!.isError).toBe(true);
+    expect((big.body.result!.content as Array<{ text: string }>)[0].text).toMatch(/more than the maximum/);
+
     await core.revokeAllGrants();
-    const revoked = await client.send("/mcp", { ...rpc(4, "tools/list"), headers: mcpHeaders(access_token) });
+    const revoked = await client.send("/mcp", { ...rpc(5, "tools/list"), headers: mcpHeaders(access_token) });
     expect(revoked.status).toBe(401);
     expect(((await revoked.json()) as { error: string }).error).toBe("invalid_token");
     await handler.drain();

@@ -21,3 +21,9 @@ MS_CLIENT_SECRET=
 # server reads/writes. The /authorize default handler rejects any signed-in user
 # whose /me response doesn't match this value (case-insensitive).
 OWNER_EMAIL=
+
+# The owner's Microsoft account object ID: the `id` that the whoami tool returns.
+# When set, sign-in also requires /me.id to match, so another account that
+# carries the same address is refused. Required when MS_TENANT_ID is `common`
+# or `organizations`; recommended otherwise.
+OWNER_OBJECT_ID=

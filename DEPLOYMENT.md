@@ -76,7 +76,7 @@ registration**) and collect four values for the Worker's secrets.
 - **Supported account types:** match the account you'll sign in with:
   - A single work/school tenant → *Accounts in this organizational directory only* (single tenant). `MS_TENANT_ID` = the **Directory (tenant) ID** GUID.
   - Personal Microsoft accounts / broad → use `common`, `organizations`, or `consumers` as `MS_TENANT_ID` and pick the matching account-types option.
-  - The `OWNER_EMAIL` gate restricts the server to one identity regardless of how broad this setting is.
+  - The owner gate restricts the server to one identity regardless of how broad this setting is. With `common` or `organizations`, it also requires `OWNER_OBJECT_ID`, because an administrator of any tenant can give an account the owner's address.
 - **Redirect URI:** platform **Web** (not SPA — this is a confidential client). You
   set the exact value after deploying, once you know your Worker domain (see
   [step 6](#6-point-the-entra-redirect-uri-at-your-deployment)):
@@ -164,8 +164,9 @@ You'll put these in `.dev.vars` and push them in [step 4](#4-set-the-secrets):
 | `MS_CLIENT_ID` | Application (client) ID on the registration's Overview. |
 | `MS_CLIENT_SECRET` | The client-secret **Value** from step 3. |
 | `OWNER_EMAIL` | The `mail` or `userPrincipalName` of the account allowed to use this server (case-insensitive; everyone else is rejected at `/authorize`). |
+| `OWNER_OBJECT_ID` | Optional, unless `MS_TENANT_ID` is `common` or `organizations`. The account's object ID: the `id` that the `whoami` tool returns, or **Object ID** on the user's Entra profile. When set, sign-in also requires this ID, not just the address. |
 
-Switching to a different Microsoft account later is just `OWNER_EMAIL` (re-push, then
+Switching to a different Microsoft account later is just `OWNER_EMAIL`, plus `OWNER_OBJECT_ID` if you set it (re-push, then
 re-authorize — see [README → Reset](./README.md#reset)). Changing tenants means a new
 registration and all four values.
 

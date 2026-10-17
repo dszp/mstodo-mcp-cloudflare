@@ -364,8 +364,29 @@ export function isOwner(env: AppEnv, me: MeIdentity): boolean {
   const candidates = [me.mail, me.userPrincipalName]
     .filter((v): v is string => typeof v === "string" && v.length > 0)
     .map((v) => v.trim().toLowerCase());
-  return candidates.includes(expected);
+  if (!candidates.includes(expected)) return false;
+
+  // The address alone is not an identity: `mail` is a directory attribute an
+  // admin can set, so under a `common`/`organizations` authority anyone who
+  // runs their own tenant could present the owner's address. /me.id (the
+  // account's object ID) can't be chosen, so bind to it — required when any
+  // tenant may sign in, optional (but checked when set) otherwise.
+  const expectedId = (env.OWNER_OBJECT_ID ?? "").trim().toLowerCase();
+  if (expectedId === "") {
+    if (MULTI_TENANT_AUTHORITIES.has((env.MS_TENANT_ID ?? "").trim().toLowerCase())) {
+      log.warn("owner_object_id_required", {
+        hint: "MS_TENANT_ID allows any tenant to sign in; set OWNER_OBJECT_ID (whoami's id). Denying all callers.",
+      });
+      return false;
+    }
+    return true;
+  }
+  return me.id.trim().toLowerCase() === expectedId;
 }
+
+// Authorities that accept work accounts from any tenant. `consumers` is not
+// here: a personal account's sign-in address is unique across Microsoft.
+const MULTI_TENANT_AUTHORITIES = new Set(["common", "organizations"]);
 
 // Owner identity record — written on every successful /authorize. Used by
 // the handler to detect when the underlying Microsoft account changes (e.g.

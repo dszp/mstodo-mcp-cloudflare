@@ -1,9 +1,9 @@
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { AlarmScheduler, StateStore } from "../../core/ports";
 import type { IndexCore } from "../../core/index/index-core";
 import { registerTools } from "../../core/mcp/register-tools";
+import { createMcpServer } from "../../core/mcp/server";
 import { handleUpload, json } from "../../core/upload/handler";
 import { handleDownload } from "../../core/upload/download-handler";
 import { handleWebhook } from "../../core/subscriptions/webhook-handler";
@@ -28,7 +28,7 @@ const nodeMcpHandler: McpHandler<ProviderNodeEnv> = {
     if (req.method !== "POST") {
       return new Response(null, { status: 405, headers: { allow: "POST" } });
     }
-    const server = new McpServer({ name: "mstodo-mcp", version: VERSION });
+    const server = createMcpServer();
     registerTools(server, { env });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

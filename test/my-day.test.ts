@@ -56,6 +56,31 @@ describe("isOwner (single-user gate, fail-closed)", () => {
     expect(isOwner(ownerEnv("   "), me())).toBe(false);
     expect(isOwner(ownerEnv(undefined), me())).toBe(false);
   });
+
+  describe("OWNER_OBJECT_ID", () => {
+    const env = (over: Partial<AppEnv>): AppEnv =>
+      ({ OWNER_EMAIL: "owner@example.com", MS_TENANT_ID: "11111111-2222-3333-4444-555555555555", ...over }) as AppEnv;
+
+    it("requires /me.id to match as well as the address when set", () => {
+      expect(isOwner(env({ OWNER_OBJECT_ID: " ABC-123 " }), me({ id: "abc-123" }))).toBe(true);
+      // Right address, different account: the address alone no longer passes.
+      expect(isOwner(env({ OWNER_OBJECT_ID: "abc-123" }), me({ id: "other" }))).toBe(false);
+      // Right account id, wrong address: both must match.
+      expect(isOwner(env({ OWNER_OBJECT_ID: "abc-123" }), me({ id: "abc-123", mail: "x@evil.com", userPrincipalName: "x@evil.com" }))).toBe(false);
+    });
+
+    it("stays optional for a single-tenant or consumers authority", () => {
+      expect(isOwner(env({}), me())).toBe(true);
+      expect(isOwner(env({ MS_TENANT_ID: "consumers" }), me())).toBe(true);
+    });
+
+    it("is required for a multi-tenant authority, failing closed without it", () => {
+      for (const tenant of ["common", "organizations", " Common "]) {
+        expect(isOwner(env({ MS_TENANT_ID: tenant }), me()), tenant).toBe(false);
+        expect(isOwner(env({ MS_TENANT_ID: tenant, OWNER_OBJECT_ID: "id" }), me()), tenant).toBe(true);
+      }
+    });
+  });
 });
 
 describe("myDayEnabled", () => {
