@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] – 2026-10-17
+
 ### Security
 - **Tool arguments are capped at 10,000 array elements and object keys per call.** The MCP SDK
   leaves this unlimited unless the server sets `maxToolInputElements`
