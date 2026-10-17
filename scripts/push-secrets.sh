@@ -20,7 +20,7 @@ if [[ ! -f "$DEV_VARS" ]]; then
 fi
 
 # Keep in sync with .dev.vars.example. Order doesn't matter; we look each up.
-SECRETS=(MS_TENANT_ID MS_CLIENT_ID MS_CLIENT_SECRET OWNER_EMAIL)
+SECRETS=(MS_TENANT_ID MS_CLIENT_ID MS_CLIENT_SECRET OWNER_EMAIL OWNER_OBJECT_ID)
 
 pushed=0
 skipped=0

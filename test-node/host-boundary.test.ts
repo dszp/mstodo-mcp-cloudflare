@@ -41,3 +41,20 @@ describe("host import boundary", () => {
     for (const spec of imports(src)) expect(spec).not.toMatch(/(^|\/)(cloudflare|node)\/|^agents|^cloudflare:/);
   });
 });
+
+// Every host must build its McpServer through core's createMcpServer(), which
+// sets the tool-input element limit; a direct `new McpServer(` would silently
+// drop it. The Cloudflare agent can't run under the workers test pool, so this
+// source check is what covers it.
+describe("McpServer construction", () => {
+  const all = [...sources("cloudflare"), ...sources("node"), ...sources("shared")];
+
+  it("finds both hosts' server sites (guards against a vacuous pass)", () => {
+    const users = all.filter(([, src]) => src.includes("createMcpServer()")).map(([p]) => p);
+    expect(users).toEqual(expect.arrayContaining(["cloudflare/mcp-agent.ts", "node/http.ts"]));
+  });
+
+  it.each(all)("%s never constructs McpServer directly", (_p, src) => {
+    expect(src).not.toMatch(/new\s+McpServer\s*\(/);
+  });
+});

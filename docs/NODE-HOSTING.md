@@ -48,6 +48,7 @@ These variables are required:
 | `MS_CLIENT_ID` | The Entra application (client) ID. |
 | `MS_CLIENT_SECRET` | The Entra client secret value. |
 | `OWNER_EMAIL` | The Microsoft account allowed to sign in. Every other account is refused before any token is stored. |
+| `OWNER_OBJECT_ID` | Optional, unless `MS_TENANT_ID` is `common` or `organizations`, or `OWNER_EMAIL` is the account's `mail` address rather than its `userPrincipalName`. The account's object ID (the `id` from the `whoami` tool). When set, sign-in also requires this ID. |
 
 `SERVICE_BASE_URL` fixes the OAuth issuer, the token audience, and the Microsoft redirect URI.
 The server ignores the `Host` and `X-Forwarded-*` request headers, so a request that arrives

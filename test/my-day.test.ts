@@ -40,11 +40,20 @@ describe("isOwner (single-user gate, fail-closed)", () => {
   });
   const ownerEnv = (ownerEmail?: string): AppEnv => ({ OWNER_EMAIL: ownerEmail }) as unknown as AppEnv;
 
-  it("matches on mail or userPrincipalName, case/space-insensitively", () => {
-    expect(isOwner(ownerEnv("Owner@Example.com"), me({ mail: "  owner@example.com " }))).toBe(true);
+  it("matches on userPrincipalName, case/space-insensitively", () => {
+    expect(isOwner(ownerEnv("Owner@Example.com"), me({ userPrincipalName: "  owner@example.com " }))).toBe(true);
     expect(
       isOwner(ownerEnv("owner@example.com"), me({ mail: null, userPrincipalName: "OWNER@example.com" })),
     ).toBe(true);
+  });
+
+  it("refuses a match on mail alone unless OWNER_OBJECT_ID is set and matches", () => {
+    // mail is admin-settable; the UPN here is on a domain the owner doesn't use.
+    const viaMail = me({ id: "abc", mail: "owner@example.com", userPrincipalName: "someone@tenant.onmicrosoft.com" });
+    expect(isOwner(ownerEnv("owner@example.com"), viaMail)).toBe(false);
+    const withId = { OWNER_EMAIL: "owner@example.com", OWNER_OBJECT_ID: "abc" } as unknown as AppEnv;
+    expect(isOwner(withId, viaMail)).toBe(true);
+    expect(isOwner(withId, { ...viaMail, id: "other" })).toBe(false);
   });
 
   it("denies a non-matching identity", () => {
@@ -55,6 +64,31 @@ describe("isOwner (single-user gate, fail-closed)", () => {
     expect(isOwner(ownerEnv(""), me())).toBe(false);
     expect(isOwner(ownerEnv("   "), me())).toBe(false);
     expect(isOwner(ownerEnv(undefined), me())).toBe(false);
+  });
+
+  describe("OWNER_OBJECT_ID", () => {
+    const env = (over: Partial<AppEnv>): AppEnv =>
+      ({ OWNER_EMAIL: "owner@example.com", MS_TENANT_ID: "11111111-2222-3333-4444-555555555555", ...over }) as AppEnv;
+
+    it("requires /me.id to match as well as the address when set", () => {
+      expect(isOwner(env({ OWNER_OBJECT_ID: " ABC-123 " }), me({ id: "abc-123" }))).toBe(true);
+      // Right address, different account: the address alone no longer passes.
+      expect(isOwner(env({ OWNER_OBJECT_ID: "abc-123" }), me({ id: "other" }))).toBe(false);
+      // Right account id, wrong address: both must match.
+      expect(isOwner(env({ OWNER_OBJECT_ID: "abc-123" }), me({ id: "abc-123", mail: "x@evil.com", userPrincipalName: "x@evil.com" }))).toBe(false);
+    });
+
+    it("stays optional for a single-tenant or consumers authority", () => {
+      expect(isOwner(env({}), me())).toBe(true);
+      expect(isOwner(env({ MS_TENANT_ID: "consumers" }), me())).toBe(true);
+    });
+
+    it("is required for a multi-tenant authority, failing closed without it", () => {
+      for (const tenant of ["common", "organizations", " Common "]) {
+        expect(isOwner(env({ MS_TENANT_ID: tenant }), me()), tenant).toBe(false);
+        expect(isOwner(env({ MS_TENANT_ID: tenant, OWNER_OBJECT_ID: "id" }), me()), tenant).toBe(true);
+      }
+    });
   });
 });
 
