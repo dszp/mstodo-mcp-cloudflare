@@ -19,8 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MS_TENANT_ID` is `common` or `organizations`, and sign-in fails closed without it, because an
   administrator of any tenant can give an account the owner's `mail` address. Get the value from
   the `id` field of the `whoami` tool.
+- **`OWNER_EMAIL` now matches the `userPrincipalName`.** A UPN has to be on one of the tenant's
+  verified domains; `mail` is an attribute an administrator can set to any address. A match on
+  `mail` alone still works, but only when `OWNER_OBJECT_ID` is set and matches.
 
 ### Upgrade notes
+- **If `OWNER_EMAIL` is your `mail` address and differs from your UPN, set `OWNER_OBJECT_ID`
+  before you deploy.** Otherwise your next Microsoft sign-in is refused (the log says
+  `owner_mail_match_needs_object_id`). Compare the two with the `whoami` tool.
 - **If `MS_TENANT_ID` is `common` or `organizations`, set `OWNER_OBJECT_ID` before you deploy.**
   Without it, every sign-in is refused. Existing connections keep working until they next pass
   through Microsoft sign-in. With a tenant ID or `consumers`, it's optional.

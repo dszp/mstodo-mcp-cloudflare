@@ -17,13 +17,14 @@ MS_TENANT_ID=
 MS_CLIENT_ID=
 MS_CLIENT_SECRET=
 
-# The mail or userPrincipalName of the Microsoft account whose To Do data this
-# server reads/writes. The /authorize default handler rejects any signed-in user
-# whose /me response doesn't match this value (case-insensitive).
+# The userPrincipalName of the Microsoft account whose To Do data this server
+# reads/writes (case-insensitive). Sign-in rejects every other account. A match
+# on the account's mail address instead also needs OWNER_OBJECT_ID below.
 OWNER_EMAIL=
 
 # The owner's Microsoft account object ID: the `id` that the whoami tool returns.
 # When set, sign-in also requires /me.id to match, so another account that
 # carries the same address is refused. Required when MS_TENANT_ID is `common`
-# or `organizations`; recommended otherwise.
+# or `organizations`, or when OWNER_EMAIL is the mail address rather than the
+# userPrincipalName; recommended otherwise.
 OWNER_OBJECT_ID=

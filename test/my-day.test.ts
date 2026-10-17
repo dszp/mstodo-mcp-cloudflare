@@ -40,11 +40,20 @@ describe("isOwner (single-user gate, fail-closed)", () => {
   });
   const ownerEnv = (ownerEmail?: string): AppEnv => ({ OWNER_EMAIL: ownerEmail }) as unknown as AppEnv;
 
-  it("matches on mail or userPrincipalName, case/space-insensitively", () => {
-    expect(isOwner(ownerEnv("Owner@Example.com"), me({ mail: "  owner@example.com " }))).toBe(true);
+  it("matches on userPrincipalName, case/space-insensitively", () => {
+    expect(isOwner(ownerEnv("Owner@Example.com"), me({ userPrincipalName: "  owner@example.com " }))).toBe(true);
     expect(
       isOwner(ownerEnv("owner@example.com"), me({ mail: null, userPrincipalName: "OWNER@example.com" })),
     ).toBe(true);
+  });
+
+  it("refuses a match on mail alone unless OWNER_OBJECT_ID is set and matches", () => {
+    // mail is admin-settable; the UPN here is on a domain the owner doesn't use.
+    const viaMail = me({ id: "abc", mail: "owner@example.com", userPrincipalName: "someone@tenant.onmicrosoft.com" });
+    expect(isOwner(ownerEnv("owner@example.com"), viaMail)).toBe(false);
+    const withId = { OWNER_EMAIL: "owner@example.com", OWNER_OBJECT_ID: "abc" } as unknown as AppEnv;
+    expect(isOwner(withId, viaMail)).toBe(true);
+    expect(isOwner(withId, { ...viaMail, id: "other" })).toBe(false);
   });
 
   it("denies a non-matching identity", () => {

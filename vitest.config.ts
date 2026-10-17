@@ -15,6 +15,8 @@ const poolOptions = {
       DELTA_SYNC_INTERVAL_MIN: "15",
       LIST_METADATA_SOFT_TTL_SEC: "900",
       OWNER_EMAIL: "test-owner@example.com",
+      // Pinned so a developer's .dev.vars (which the pool also loads) can't leak in.
+      OWNER_OBJECT_ID: "",
       MS_TENANT_ID: "test-tenant",
       MS_CLIENT_ID: "test-client",
       MS_CLIENT_SECRET: "test-secret",

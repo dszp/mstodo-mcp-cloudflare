@@ -163,8 +163,8 @@ You'll put these in `.dev.vars` and push them in [step 4](#4-set-the-secrets):
 | `MS_TENANT_ID` | Directory (tenant) ID GUID, or `common`/`organizations`/`consumers`. |
 | `MS_CLIENT_ID` | Application (client) ID on the registration's Overview. |
 | `MS_CLIENT_SECRET` | The client-secret **Value** from step 3. |
-| `OWNER_EMAIL` | The `mail` or `userPrincipalName` of the account allowed to use this server (case-insensitive; everyone else is rejected at `/authorize`). |
-| `OWNER_OBJECT_ID` | Optional, unless `MS_TENANT_ID` is `common` or `organizations`. The account's object ID: the `id` that the `whoami` tool returns, or **Object ID** on the user's Entra profile. When set, sign-in also requires this ID, not just the address. |
+| `OWNER_EMAIL` | The `userPrincipalName` of the account allowed to use this server (case-insensitive; everyone else is rejected at `/authorize`). It can be the account's `mail` address instead only when `OWNER_OBJECT_ID` is also set. |
+| `OWNER_OBJECT_ID` | Optional, unless `MS_TENANT_ID` is `common` or `organizations`, or `OWNER_EMAIL` is the `mail` address rather than the `userPrincipalName`. The account's object ID: the `id` that the `whoami` tool returns, or **Object ID** on the user's Entra profile. When set, sign-in also requires this ID, not just the address. |
 
 Switching to a different Microsoft account later is just `OWNER_EMAIL`, plus `OWNER_OBJECT_ID` if you set it (re-push, then
 re-authorize — see [README → Reset](./README.md#reset)). Changing tenants means a new
@@ -276,8 +276,9 @@ Add a custom / remote MCP connector pointing at:
 https://<your-worker-domain>/mcp
 ```
 
-Complete the Microsoft sign-in. The signed-in account's `mail`/`userPrincipalName`
-**must match `OWNER_EMAIL`** (case-insensitive) or `/authorize` rejects it with 403.
+Complete the Microsoft sign-in. The signed-in account's `userPrincipalName` **must match
+`OWNER_EMAIL`** (case-insensitive), or its `mail` must match with `OWNER_OBJECT_ID` set, or
+`/authorize` rejects it with 403.
 
 ### 8. Verify
 

@@ -361,27 +361,32 @@ export function isOwner(env: AppEnv, me: MeIdentity): boolean {
     });
     return false;
   }
-  const candidates = [me.mail, me.userPrincipalName]
-    .filter((v): v is string => typeof v === "string" && v.length > 0)
-    .map((v) => v.trim().toLowerCase());
-  if (!candidates.includes(expected)) return false;
+  const norm = (v: string | null | undefined) => (v ?? "").trim().toLowerCase();
 
-  // The address alone is not an identity: `mail` is a directory attribute an
-  // admin can set, so under a `common`/`organizations` authority anyone who
-  // runs their own tenant could present the owner's address. /me.id (the
-  // account's object ID) can't be chosen, so bind to it — required when any
-  // tenant may sign in, optional (but checked when set) otherwise.
-  const expectedId = (env.OWNER_OBJECT_ID ?? "").trim().toLowerCase();
-  if (expectedId === "") {
-    if (MULTI_TENANT_AUTHORITIES.has((env.MS_TENANT_ID ?? "").trim().toLowerCase())) {
-      log.warn("owner_object_id_required", {
-        hint: "MS_TENANT_ID allows any tenant to sign in; set OWNER_OBJECT_ID (whoami's id). Denying all callers.",
-      });
-      return false;
-    }
-    return true;
+  // The address alone is not an identity. /me.id (the account's object ID)
+  // can't be chosen, so when OWNER_OBJECT_ID is set it must match. It's
+  // required under a `common`/`organizations` authority, where any tenant may
+  // sign in.
+  const expectedId = norm(env.OWNER_OBJECT_ID);
+  if (expectedId !== "" && norm(me.id) !== expectedId) return false;
+  if (expectedId === "" && MULTI_TENANT_AUTHORITIES.has(norm(env.MS_TENANT_ID))) {
+    log.warn("owner_object_id_required", {
+      hint: "MS_TENANT_ID allows any tenant to sign in; set OWNER_OBJECT_ID (whoami's id). Denying all callers.",
+    });
+    return false;
   }
-  return me.id.trim().toLowerCase() === expectedId;
+
+  // A UPN must sit on one of the tenant's verified domains, so another tenant
+  // can't present it. `mail` is a directory attribute an admin can set, so a
+  // match on it alone counts only when the object ID was checked above.
+  if (norm(me.userPrincipalName) === expected) return true;
+  if (norm(me.mail) === expected) {
+    if (expectedId !== "") return true;
+    log.warn("owner_mail_match_needs_object_id", {
+      hint: "OWNER_EMAIL matches this account's mail but not its userPrincipalName; set OWNER_OBJECT_ID (whoami's id) to allow it.",
+    });
+  }
+  return false;
 }
 
 // Authorities that accept work accounts from any tenant. `consumers` is not

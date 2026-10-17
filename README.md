@@ -138,11 +138,12 @@ The server is **strictly single-user** by design, and a few invariants are load-
 worth stating in one place:
 
 - **One owner, fail-closed.** Every sign-in is gated at the OAuth callback: the Microsoft `/me`
-  `mail`/`userPrincipalName` must equal the `OWNER_EMAIL` secret, and a non-matching identity is
+  `userPrincipalName` must equal the `OWNER_EMAIL` secret, and a non-matching identity is
   **403'd before any token is stored**. A missing or mistyped `OWNER_EMAIL` makes the check fail
   for *everyone* — it locks the owner out, it never opens access. Setting `OWNER_OBJECT_ID` also
   binds sign-in to the account's object ID, which no one can choose. It's required when
-  `MS_TENANT_ID` is `common` or `organizations`.
+  `MS_TENANT_ID` is `common` or `organizations`, and when `OWNER_EMAIL` matches the account's
+  `mail` address instead of its UPN, because an administrator can set `mail` to any address.
 - **Per-client consent.** Any MCP client can register itself (dynamic client registration), so
   `/authorize` shows a consent page naming the client and the address its access will be sent to,
   and starts the Microsoft sign-in only after you approve. Without it, one click on a crafted
