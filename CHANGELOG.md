@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] – 2026-10-17
+
 ### Added
 - **Node.js host and container image.** The server can run as one Node 24 process, or from the
   Docker image in `src/hosts/node/`, behind your own HTTPS reverse proxy. A SQLite file replaces
