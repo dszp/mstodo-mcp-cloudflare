@@ -1,4 +1,4 @@
-// Entry worker for @cloudflare/vitest-pool-workers. The pool instantiates DO
+// Entry worker for @cloudflare/vitest-plugin. The pool instantiates DO
 // classes from this module lazily (only when a test addresses the binding), so
 // we re-export TodoIndex here. MSToDoMCP is intentionally NOT re-exported: it
 // pulls in the MCP SDK → ajv, which the workers pool can't resolve, and no DO
