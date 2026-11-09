@@ -44,3 +44,6 @@ PLAN-MOVE-TASK.md
 
 # Local design specs / brainstorming docs (not tracked)
 docs/superpowers/
+
+# Claude Code per-user files: they can hold tokens copied from approved commands
+**/CLAUDE.local.md
