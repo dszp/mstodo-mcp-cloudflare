@@ -38,7 +38,7 @@ truth. This document designs both modes and scopes the build to write-through on
 10. [After Graph: the gap list](#10-after-graph-the-gap-list)
 11. [What stays unchanged](#11-what-stays-unchanged)
 12. [Build order](#12-build-order)
-13. [Open questions for review](#13-open-questions-for-review)
+13. [Decisions from review](#13-decisions-from-review)
 
 ---
 
@@ -55,7 +55,7 @@ gaps have to close before an app can be built on it. Each fix is in the build or
 | Linked resources | Not stored | Stored | New `linked_resources` table, filled by the same per-task scan. |
 | Attachments | `has_attachments` flag only | Metadata (name, size, type) per attachment. Bytes are fetched on demand. | New `attachments` table, filled by the same scan when `has_attachments = 1`. |
 | My Day fields | Filled by a budgeted Substrate scan plus a targeted refresh on each webhook | Same | No change. |
-| Skipped lists (`no_sync` in `config:lists`, plus the built-in `flaggedEmails`) | Not mirrored at all | Unknown — see [open question 1](#13-open-questions-for-review) | Depends on the answer. |
+| Skipped lists (`no_sync` in `config:lists`, plus the built-in `flaggedEmails`) | Not mirrored at all | Kept, but shown only in an archive area of the app | New `archive` sync policy (section 1.2). |
 | List groups, sidebar order | Not stored; Graph doesn't expose them | Stored | Section 10.4. |
 
 ### 1.1 One per-task sub-resource scan
@@ -86,6 +86,30 @@ build adds a one-time backfill mode that raises the per-cycle budget until the
 `/sync/changes` (`backfill: {remaining}`) so the app can show it.
 
 The MCP tools keep working the whole time; they read the same tables.
+
+### 1.2 Archive lists
+
+Lists that aren't mirrored today are mostly ones no longer in active use. Their tasks
+must not be lost, and they should be cleaned up over time from the app, but they
+shouldn't sit in the main sidebar.
+
+A third value joins the per-list sync policy in `config:lists`: `archive`, alongside
+the default (mirrored) and `no_sync`.
+
+- **Mirrored like any other list,** on a slower cadence: archive lists sync after
+  every active list in each cycle, and get no Graph subscription (no webhook), so they
+  add no latency to active lists and spend none of the tenant's subscription budget.
+- **Flagged in the feed:** the list entity carries `"archived": true`. The app shows
+  archive lists in a separate, collapsed area and leaves their tasks out of My Day
+  suggestions and smart lists.
+- **Unchanged for the MCP tools:** cross-list queries (`query_tasks`,
+  `get_pending_across_lists`, `search_tasks`) skip archive lists unless a call names
+  one explicitly. That keeps MCP results the same as today, when these lists aren't in
+  the mirror at all.
+- **Moving a list to `archive`** is a config edit (`set_list_config`); moving the
+  existing `no_sync` lists over is a one-time edit after the migration ships.
+  `flaggedEmails` becomes `archive` by default, since its tasks come from flagged mail
+  that should stay findable.
 
 ---
 
@@ -262,10 +286,11 @@ first version.
 ### 4.1 Request
 
 ```
-GET /api/v1/sync/changes?cursor=<epoch>.<seq>&limit=500
+GET /api/v1/sync/changes?cursor=<epoch>.<seq>&limit=500&scope=active
 Authorization: Bearer <access token>
 ```
 
+- `scope` selects how much history this device keeps (section 4.5).
 - No `cursor` (or `cursor=0`) means a full sync. Deletion records are skipped, because
   the client has nothing to delete.
 - `limit` caps entities per page (default 500, max 1000). The server also stops a page
@@ -342,6 +367,46 @@ About 2,500 tasks, a few thousand steps, and the lists fit in roughly 10 to 15 p
 Each page is one indexed range scan on `sync_log` plus primary-key lookups. On
 Cloudflare it's one Durable Object RPC per page.
 
+### 4.5 Per-device scope
+
+Completed tasks grow without limit, and task bodies sometimes hold semi-confidential
+details, so each device chooses how much it keeps. The choice is an app preference,
+sent as `scope` on every pull:
+
+| `scope` | Tasks sent | Default on |
+|---|---|---|
+| `active` | Open tasks, plus tasks completed in the last 30 days | iPhone |
+| `all` | Every task | Mac |
+
+Archive lists (section 1.2) follow the same rule: under `active` only their open
+tasks arrive. Steps, links and attachment metadata follow their task.
+
+How the filter stays correct:
+
+- The server leaves out of-scope tasks when serving a page. The change log itself is
+  shared by every device; there is no per-device state on the server.
+- A task that changes is sent with its current state. A task completed 40 days ago
+  and reopened today arrives as an open task, because reopening wrote a new `seq`.
+- A task that leaves scope only by aging past 30 days produces no change. The app
+  prunes those itself, using the same rule, after each pull.
+- Changing a device's scope means a full sync.
+
+What an `active` device can still reach without holding everything:
+
+- `GET /api/v1/tasks/{sid}` returns one task with its steps, links and attachment
+  metadata, for a search hit or a link to an old task.
+- `GET /api/v1/search?q=…` runs the server's existing FTS search over every task. The
+  app uses it when a local search finds nothing, or offers it as "search all history".
+
+**Attachment bytes** are downloaded ahead of time only for open tasks, on every
+device. Other attachments download when opened. This is app behavior; the server
+serves the bytes either way.
+
+**At rest on the device**, the local database must use iOS Data Protection class
+`complete` (unreadable while the phone is locked), and signing out deletes it. On the
+Mac it relies on FileVault. These are app requirements, listed here because they're
+the other half of the scope decision.
+
 ---
 
 ## 5. Sending edits
@@ -371,8 +436,9 @@ Content-Type: application/json
 - `id`: a UUID the app generates once per edit and keeps across retries.
 - `at`: when the edit was made on the device. Used for conflicts (section 6).
 - `client_id`: a per-install ID. Used in logs and, later, for APNs device routing.
-- At most 25 mutations per request. See [open question 3](#13-open-questions-for-review)
-  for why the cap is this low.
+- At most 100 mutations per request. A mutation can take two or three Graph or
+  Substrate calls, and the Worker is on the paid plan, so the subrequest limit isn't
+  the constraint; the cap keeps one request's run time short.
 
 ### 5.2 Operations
 
@@ -586,23 +652,17 @@ same consent page, the same Microsoft sign-in, the same `OWNER_EMAIL` gate, and 
 same grant epoch, so `revoke_all_connections` signs the app out like any MCP
 connector.
 
-The flow is authorization code with PKCE (S256) through `ASWebAuthenticationSession`.
-For the redirect URI there are two choices:
+The flow is authorization code with PKCE (S256) through `ASWebAuthenticationSession`,
+with an **`https` callback on this server's own host** — for example
+`https://<host>/app/oauth/callback` — that the app claims through an Associated
+Domains entitlement. The Worker serves `/.well-known/apple-app-site-association`.
+`ASWebAuthenticationSession` supports `https` callbacks from iOS 17.4 and macOS 14.4;
+the app targets the current iOS and macOS releases, so that's no constraint. The OAuth
+library already accepts `https` redirect URIs, so no library option changes.
 
-1. **An `https` callback on this server's own host** — for example
-   `https://<host>/app/oauth/callback` — with the app claiming that URL through an
-   Associated Domains entitlement. The Worker serves
-   `/.well-known/apple-app-site-association`. `ASWebAuthenticationSession` supports
-   `https` callbacks from iOS 17.4 and macOS 14.4. The OAuth library already accepts
-   `https` redirect URIs, so no library option changes.
-2. **A custom URL scheme** (`<scheme>://oauth/callback`). Needs
-   `allowPrivateUseRedirectUris: true` in `oauthProviderOptions`. Any app on the device
-   can register the same scheme. PKCE stops a hijacking app from redeeming the code,
-   but the `https` callback stops it from receiving the code at all.
-
-I recommend option 1. It is also more convenient: nothing to register except the
-domain, which the server already owns. Option 2 is the fallback if the deployment
-targets older OS versions.
+A custom URL scheme is not used. Any app on the device can register the same scheme
+and receive the code; PKCE stops it redeeming the code, but the `https` callback stops
+it receiving the code at all. `allowPrivateUseRedirectUris` stays off.
 
 **Client registration.** Register the app once as a public client (no secret) with
 `getOAuthApi().createClient()` from a small admin script, and build its `client_id`
@@ -622,6 +682,51 @@ owner, but neither needs the other's access. The proposal: the app requests scop
 `sync`; the `/api/v1/sync/*` handler requires it; `/mcp` refuses a token whose only
 scope is `sync`. Because `/mcp` refuses only `sync`-only tokens, existing connector
 grants keep working whatever scopes they were issued with.
+
+### 8.1 Cloudflare Access in front of the app
+
+Access stays a second, independent gate: a request must pass Access at the edge and
+then present a valid OAuth token with scope `sync`. Neither layer trusts the other.
+
+**Which paths Access covers.** One Access application on this hostname, scoped to
+`/api/v1/sync/*`, `/api/v1/tasks/*`, `/api/v1/search`, `/api/v1/attachments/*`, and
+the app's sign-in path (below). These paths stay **outside** Access, because their
+callers can't complete an Access login: `/mcp` and the OAuth endpoints Claude's
+connectors use, `/webhook` (Microsoft Graph), and the single-use-link `/upload` and
+`/download`.
+
+**How a native app passes Access.** Access accepts its session token in a
+`cf-access-token` request header, which is how non-browser clients call
+Access-protected APIs. The app gets that token during sign-in:
+
+1. The app opens `https://<host>/app/signin` in `ASWebAuthenticationSession`. That path
+   is behind Access, so the session shows the Access login first.
+2. After Access lets the request through, the Worker reads the validated
+   `Cf-Access-Jwt-Assertion` header, checks its signature and audience against the
+   team's Access keys, and starts the OAuth authorization (consent page, Microsoft
+   sign-in, `OWNER_EMAIL` gate).
+3. The final redirect to the `https` app callback carries the OAuth code and the Access
+   token. The callback is a universal link handled inside the session, so neither
+   value crosses the network again.
+4. The app sends `cf-access-token` and `Authorization: Bearer` on every request,
+   including the WebSocket upgrade. When Access answers with its login redirect
+   instead of the API response, the session has expired and the app repeats sign-in.
+   If the identity provider's session is still valid, that completes without a prompt.
+
+Step 3 is this server's own addition to the redirect, not something Access documents
+for native apps. **To verify in the build:** that Access accepts the assertion JWT from
+step 2 in the `cf-access-token` header (the documented flows use the `CF_Authorization`
+token, and the two may differ), and how long the Access session lasts for this
+application.
+
+**Passkeys instead of emailed codes.** Access's one-time PIN is the emailed code.
+Replacing it is an Access configuration change, not server code: add Microsoft Entra
+ID as the Access identity provider and remove one-time PIN from this application. Entra
+supports passkeys as a sign-in method, so a passkey stored in 1Password signs in to both
+Access and the OAuth flow's Microsoft step, which is the same account the `OWNER_EMAIL`
+gate already checks. **To verify:** that the tenant's Entra policy allows synced
+passkeys from a third-party provider such as 1Password, not only device-bound ones in
+Microsoft Authenticator. I haven't confirmed the current state of that policy option.
 
 The bearer-token idea in ROADMAP §1 (`HTTP_API_TOKEN`) is for n8n. It isn't the app's
 auth: a static secret can't be revoked per device and doesn't go through Microsoft
@@ -735,9 +840,11 @@ for Node). Nothing ships until this document is approved.
 2. **Migration v4:** `entity_map`, `sync_log`, triggers, `field_clock`, mark-and-sweep
    for `resync`/410. No API yet; tests assert log rows for every writer.
 3. **Mirror completeness:** body columns, `linked_resources`, `attachments`, step
-   order, the generalized sub-resource scan with backfill mode.
+   order, the generalized sub-resource scan with backfill mode, the `archive` list
+   policy.
 4. **`ops/` extraction** from `register-tools.ts`. MCP behavior unchanged.
-5. **Router and auth:** `/api/v1` mount on both hosts, `sync` scope, `GET /sync/changes`.
+5. **Router and auth:** `/api/v1` mount on both hosts, `sync` scope, the Access
+   sign-in path, `GET /sync/changes` with `scope`, `GET /tasks/{sid}`, `GET /search`.
 6. **`POST /sync/mutations`** with idempotency and field clocks.
 7. **WebSocket push** on both hosts, plus hot-list-first sync.
 8. **End-to-end check:** a script holds a WebSocket to the deployed Worker, I edit a
@@ -746,19 +853,20 @@ for Node). Nothing ships until this document is approved.
 
 ---
 
-## 13. Open questions for review
+## 13. Decisions from review
 
-1. **Skipped lists.** `no_sync` lists and `flaggedEmails` aren't mirrored, so the app
-   wouldn't see them. Should the app see them (which means mirroring them), or is "the
-   app shows what the server syncs" right?
-2. **Completed-task steps.** Section 1.1 backfills steps, links and attachments for
-   about 2,000 completed tasks. The alternative is to fetch them only when a completed
-   task is opened, through a `GET /api/v1/tasks/{sid}` that the app calls on demand.
-   Full backfill is simpler for the app and works offline; on-demand is cheaper on the
-   server. I lean toward full backfill.
-3. **Workers plan.** The 25-mutation cap assumes the free plan's 50 subrequests per
-   request (a mutation can take two Graph or Substrate calls). The paid plan's limit
-   is much higher, so the cap can rise to 100 there. Which plan is the Worker on?
-4. **Redirect URI.** Is the `https` callback (section 8, option 1) acceptable, given it
-   needs iOS 17.4 / macOS 14.4 or later and an Associated Domains entitlement on the
-   app?
+Answered 2026-11-23:
+
+1. **Unmirrored lists** are kept, shown only in an archive area of the app (section 1.2).
+2. **History on devices** is a per-device preference: the Mac keeps everything by
+   default, the iPhone keeps open and recently completed tasks (section 4.5). The server
+   still backfills every task's steps, links and attachment metadata, open tasks first,
+   so the Mac's full copy and on-demand fetches work. Attachment bytes download ahead
+   of time only for open tasks.
+3. **Workers plan** is paid: mutation batches go up to 100.
+4. **Sign-in** uses the `https` callback; the app targets current OS releases.
+   Cloudflare Access stays in front of the app's paths, and passkey sign-in through
+   Entra replaces Access's emailed codes (section 8.1).
+
+Nothing is open. The items marked **To verify** above are checks for the build, not
+decisions.
