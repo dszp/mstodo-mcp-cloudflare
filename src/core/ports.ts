@@ -24,6 +24,12 @@ export interface SqlDb {
 }
 export type SqlValue = string | number | null | ArrayBuffer;
 
+// Runs fn as one SQLite transaction: every write inside lands, or none does.
+// Cloudflare: ctx.storage.transactionSync. Node: a savepoint on the one
+// connection. fn must be synchronous; an exception rolls back and rethrows.
+// Don't nest calls.
+export type Transact = <T>(fn: () => T) => T;
+
 export interface StateStore {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;

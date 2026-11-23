@@ -1320,7 +1320,9 @@ class ToDoTools implements TokenProvider {
               // Best-effort cache re-key. Reuse srcTask's expansions so the
               // has_checklist/has_attachments flags carry to the new id; delta
               // sync (source removal + dest add) self-heals any gap next cycle.
-              await this.#indexDeleteTask(task_id);
+              // One transaction keeps the task's steps and My Day fields; the
+              // upsert then refreshes its Graph columns from srcTask.
+              await this.#indexMoveTask(task_id, to_list_id, newId);
               await this.#indexUpsertTask({ ...srcTask, id: newId }, to_list_id);
               return jsonResult({
                 ok: true,
@@ -4670,6 +4672,13 @@ class ToDoTools implements TokenProvider {
       await this.#index().upsertTask(task, listId);
     } catch (e) {
       log.warn("index_upsert_task_failed", { task_id: task.id, error: String(e) });
+    }
+  }
+  async #indexMoveTask(taskId: string, toListId: string, newTaskId?: string): Promise<void> {
+    try {
+      await this.#index().moveTask(taskId, toListId, newTaskId);
+    } catch (e) {
+      log.warn("index_move_task_failed", { task_id: taskId, error: String(e) });
     }
   }
   async #indexDeleteTask(taskId: string): Promise<void> {

@@ -24,7 +24,7 @@ import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import { followToTerminal, type DeltaRow } from "../graph/delta";
 import { encodeCursor, decodeCursor } from "../util/cursor";
 import { log } from "../log";
-import type { AlarmScheduler, AppEnv, SqlDb, SqlValue, StateStore } from "../ports";
+import type { AlarmScheduler, AppEnv, SqlDb, SqlValue, StateStore, Transact } from "../ports";
 import {
   SCHEMA_DDL,
   TASK_COLUMNS,
@@ -115,7 +115,12 @@ const UPSERT_TASK_SQL = (() => {
   const updates = TASK_COLUMNS.filter((c) => c !== "task_id")
     .map((c) => `${c}=excluded.${c}`)
     .join(", ");
-  return `INSERT INTO tasks (${cols}) VALUES (${placeholders}) ON CONFLICT(task_id) DO UPDATE SET ${updates}`;
+  // The WHERE keeps an older copy from overwriting a newer one: a delta page
+  // fetched before an MCP write-through landed must not revert it (the write's
+  // own Graph response carries the newer lastModifiedDateTime). Rows without a
+  // timestamp on either side update as before.
+  return `INSERT INTO tasks (${cols}) VALUES (${placeholders}) ON CONFLICT(task_id) DO UPDATE SET ${updates}
+    WHERE excluded.modified_at IS NULL OR tasks.modified_at IS NULL OR excluded.modified_at >= tasks.modified_at`;
 })();
 
 const DEFAULT_LIMIT = 50;
@@ -226,8 +231,11 @@ export class IndexCore implements TokenProvider {
   readonly #alarms: AlarmScheduler;
   readonly #env: AppEnv;
 
-  constructor(deps: { sql: SqlDb; state: StateStore; alarms: AlarmScheduler; env: AppEnv }) {
+  readonly #transact: Transact;
+
+  constructor(deps: { sql: SqlDb; transact: Transact; state: StateStore; alarms: AlarmScheduler; env: AppEnv }) {
     this.#sql = deps.sql;
+    this.#transact = deps.transact;
     this.#state = deps.state;
     this.#alarms = deps.alarms;
     this.#env = deps.env;
@@ -474,6 +482,43 @@ export class IndexCore implements TokenProvider {
     this.#sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
   }
 
+  // A task moved to another list, as one transaction. Replaces the old
+  // delete-then-upsert re-key, which dropped the task's steps and My Day fields
+  // in between (and would read as a deletion to a change feed). newTaskId is
+  // the ID after the move when it differs (plain Graph IDs change on a
+  // re-parent); omit it when the ID is stable. If delta already inserted the
+  // destination row, its Graph columns win and the Substrate-only fields the
+  // destination lacks are carried over from the source.
+  moveTask(taskId: string, toListId: string, newTaskId?: string): void {
+    this.#transact(() => {
+      const to = newTaskId ?? taskId;
+      const destExists =
+        to !== taskId &&
+        this.#sql.exec("SELECT 1 FROM tasks WHERE task_id = ?", to).toArray().length > 0;
+      if (destExists) {
+        this.#sql.exec(
+          `UPDATE tasks AS d SET
+             committed_day   = COALESCE(d.committed_day,   s.committed_day),
+             committed_order = COALESCE(d.committed_order, s.committed_order),
+             order_datetime  = COALESCE(d.order_datetime,  s.order_datetime),
+             postponed_day   = COALESCE(d.postponed_day,   s.postponed_day)
+           FROM tasks AS s WHERE d.task_id = ? AND s.task_id = ?`,
+          to,
+          taskId,
+        );
+        this.#sql.exec("DELETE FROM tasks WHERE task_id = ?", taskId);
+      } else {
+        this.#sql.exec("UPDATE tasks SET task_id = ?, list_id = ? WHERE task_id = ?", to, toListId, taskId);
+      }
+      this.#sql.exec(
+        "UPDATE checklist_items SET task_id = ?, list_id = ? WHERE task_id = ?",
+        to,
+        toListId,
+        taskId,
+      );
+    });
+  }
+
   // Best-effort flag bump from a sub-resource mutation result (e.g. a checklist
   // item was just added → has_checklist=1). No-op if the task isn't indexed yet
   // (a later sync fills it in). Note: delta sync carries no expansions, so a
@@ -711,6 +756,7 @@ export class IndexCore implements TokenProvider {
     // Drop the list and its tasks (FTS rows cascade via the AFTER DELETE
     // trigger as each task row is removed).
     this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+    this.#sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
     this.#sql.exec("DELETE FROM lists WHERE list_id = ?", listId);
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
