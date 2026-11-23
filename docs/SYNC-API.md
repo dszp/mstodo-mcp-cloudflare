@@ -51,7 +51,7 @@ gaps have to close before an app can be built on it. Each fix is in the build or
 | Data | Mirror today | App needs | Fix |
 |---|---|---|---|
 | Task body | `body_plain` only: HTML stripped (`taskToRow` → `stripHtml`) | The body as stored, with its content type | Add `body_content` and `body_type` to `TASK_COLUMNS`. Delta already carries `body`. |
-| Checklist items (steps) | Opt-in cache (`ENABLE_CHECKLIST_CACHE`, default off). **Open tasks only.** Order not stored. | Every task's steps, including completed tasks, with order | Turn the cache on, extend the scan to completed tasks, and store `order_datetime` per step (section 1.1). |
+| Checklist items (steps) | Cache behind `ENABLE_CHECKLIST_CACHE` (default off; on in this deployment). **Open tasks only**, by design. Order not stored. | Every task's steps, including completed tasks, with order | Extend the scan to completed tasks and archive lists, and store `order_datetime` per step (section 1.1). |
 | Linked resources | Not stored | Stored | New `linked_resources` table, filled by the same per-task scan. |
 | Attachments | `has_attachments` flag only | Metadata (name, size, type) per attachment. Bytes are fetched on demand. | New `attachments` table, filled by the same scan when `has_attachments = 1`. |
 | My Day fields | Filled by a budgeted Substrate scan plus a targeted refresh on each webhook | Same | No change. |
@@ -75,8 +75,18 @@ The proposal generalizes that scan instead of adding two more:
   whose Graph checklist is non-empty. Order is null until a step is first dragged, so
   most of these calls return nulls; that is accepted for the app, because showing
   steps in the wrong order is visible.
-- Scope: every task in a mirrored list, open or completed. Open tasks drain first,
-  newest change first.
+- Scope: every task in a mirrored list, open or completed, archive lists included.
+  Open tasks drain first, newest change first; completed tasks follow. This reverses
+  the checklist cache's current rule that completed tasks are deliberately excluded
+  (CLAUDE.md). That rule fit a cache for follow-up queries; it doesn't fit a store
+  that becomes the only copy once Graph is gone, so the old steps, links and
+  attachment details are filled in now, while Graph can still supply them.
+- **Gating.** The scan runs when the sync API is enabled, whatever
+  `ENABLE_CHECKLIST_CACHE` says: an app can't work with steps missing. Fetching steps,
+  links and attachments uses Graph alone. Only step **order** needs Substrate (the
+  Exchange Online scope behind `ENABLE_MY_DAY`); a deployment without it syncs steps
+  in creation order with `order: null`, the same fallback `list_checklist_items` uses
+  today.
 
 **First-sync cost.** Using the numbers in the decisions note (512 open, about 1,971
 completed as of 2026-10), the backfill is roughly 2,500 task GETs plus the steps and
@@ -764,6 +774,11 @@ Building the §1 routes isn't part of this work. Only the shared router, auth la
 ## 10. After Graph: the gap list
 
 This section is design only. Nothing here is built until the switch is near.
+
+**Precondition for the switch:** the sub-resource backfill (section 1.1) reports
+`remaining: 0` and every attachment's bytes are in the blob store (section 10.2).
+Anything not captured before Graph is turned off is lost, so the switch refuses to run
+until both hold.
 
 One setting selects the mode: `SYNC_SOURCE=graph` (the default and the only built
 mode) or `local`. In `local` mode the mutation handler writes the mirror directly;
