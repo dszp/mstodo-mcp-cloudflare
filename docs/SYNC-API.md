@@ -40,6 +40,9 @@ truth. This document designs both modes and scopes the build to write-through on
 12. [Build order](#12-build-order)
 13. [Decisions from review](#13-decisions-from-review)
 14. [Multiple accounts](#14-multiple-accounts)
+15. [Sign-in providers beyond Microsoft](#15-sign-in-providers-beyond-microsoft)
+16. [Running without Cloudflare](#16-running-without-cloudflare)
+17. [Sharing with other users](#17-sharing-with-other-users)
 
 ---
 
@@ -194,6 +197,7 @@ CREATE TABLE sync_log (
   kind    TEXT NOT NULL,
   sid     TEXT NOT NULL,
   deleted INTEGER NOT NULL DEFAULT 0,   -- 1 = deletion record ("tombstone")
+  list_sid TEXT,                         -- the list it belongs to; for sharing (section 17.3)
   at_ms   INTEGER NOT NULL,
   UNIQUE (kind, sid)
 );
@@ -516,6 +520,7 @@ CREATE TABLE applied_mutations (
   mutation_id TEXT PRIMARY KEY,
   state       TEXT NOT NULL,      -- 'pending' | 'done'
   result_json TEXT,
+  principal   TEXT NOT NULL,      -- who sent it (section 15.2); "edited by" for sharing
   at_ms       INTEGER NOT NULL
 );
 ```
@@ -703,7 +708,7 @@ grants keep working whatever scopes they were issued with.
 
 ### 8.1 Cloudflare Access in front of the app
 
-Access stays a second, independent gate: a request must pass Access at the edge and
+On deployments that use it (section 16), Access stays a second, independent gate: a request must pass Access at the edge and
 then present a valid OAuth token with scope `sync`. Neither layer trusts the other.
 
 **Which paths Access covers.** One Access application on this hostname, scoped to
@@ -844,9 +849,8 @@ Microsoft To Do keeps its own separate grouping until the switch.
 - **Webhooks and delta sync.** Same triggers and budgets. Changes: hot lists sync
   first (section 7.2), and `resync`/410 use mark and sweep (section 3.3).
 - **Single owner.** Every new route goes through the existing grant check.
-  **Sharing later** would need an owner column on `sync_log` and `entity_map` and one
-  `TodoIndex` per owner. Nothing here prevents that: the `sid`, cursor and mutation
-  formats don't assume one owner.
+  Sharing with other users is designed in section 17; the parts that must exist
+  from the start are built with the change log.
 
 ---
 
@@ -859,8 +863,9 @@ for Node). Nothing ships until this document is approved.
    Object SQLite; whether a re-parented task keeps `createdDateTime`; whether
    `Prefer: IdType="ImmutableId"` works on `todoTask`; the Substrate list-group probe.
    Results go in the decisions note and adjust sections 2, 3 and 10.4.
-2. **Migration v4:** `entity_map`, `sync_log`, triggers, `field_clock`, mark-and-sweep
-   for `resync`/410. No API yet; tests assert log rows for every writer.
+2. **Migration v4:** `entity_map`, `sync_log` (with `list_sid`), triggers,
+   `field_clock`, mark-and-sweep for `resync`/410, and `Props.principal` on new grants
+   (section 15.2). No API yet; tests assert log rows for every writer.
 3. **Mirror completeness:** body columns, `linked_resources`, `attachments`, step
    order, the generalized sub-resource scan with backfill mode, the `archive` list
    policy.
@@ -936,11 +941,11 @@ to build now:
   callback domain (section 8). With a built-in `client_id` and per-server callbacks,
   adding a second server would need an app release.
 
-**To verify** before relying on a personal account: whether this server runs against
-a personal Microsoft account (outlook.com) at all. The owner gate and the
-`MS_TENANT_ID` handling were written for a work tenant, and ROADMAP §4 records that
-Graph change notifications for To Do don't support personal accounts, so such a
-deployment would fall back to timer-driven sync.
+**Personal Microsoft accounts** (outlook.com) are not expected to work as a back end
+today: the owner gate and tenant handling were written for a work tenant, and Graph
+doesn't send To Do change notifications for personal accounts. Section 15 separates
+who may sign in from where the data comes from, which is the change that would make
+such a deployment possible later.
 
 ### 14.2 What the app must get right from the start
 
@@ -977,3 +982,175 @@ them even with one account:
 
 With 14.1 and 14.2 in place, adding these later is UI work only.
 
+---
+
+## 15. Sign-in providers beyond Microsoft
+
+Today one Microsoft sign-in does two jobs at once:
+
+- **Identity:** it decides who the owner is (`isOwner()` against `OWNER_EMAIL` and
+  `OWNER_OBJECT_ID`).
+- **Data access:** the same authorization returns the Graph and Substrate tokens the
+  server uses to read and write To Do.
+
+After Graph is gone the second job disappears, and the server still needs the first.
+So the design separates them:
+
+- **An identity provider** answers "who is signing in". It is the upstream of this
+  server's OAuth flow (`beginUpstream` / `finishUpstream` in
+  `src/hosts/shared/auth-handler.ts`, which today always goes to Microsoft).
+- **A data source** answers "where do tasks come from". Graph is the only one built
+  (`SYNC_SOURCE=graph`); `local` comes later (section 10). Connecting Graph remains a
+  Microsoft authorization, but it becomes a connection the owner makes, not the
+  sign-in itself.
+
+### 15.1 One mechanism: OpenID Connect
+
+Every identity provider worth supporting speaks OpenID Connect, so the server
+implements one generic OIDC upstream (authorization code with PKCE, ID token
+validated against the provider's published keys) instead of one integration per
+vendor:
+
+| Provider | How it fits |
+|---|---|
+| Microsoft Entra ID | Today's provider, expressed as OIDC. Passkeys from 1Password already work. |
+| Cloudflare Access, as an OIDC provider ("Access for SaaS") | Access issues the ID token, and behind it any login method Access offers: Entra, Google, GitHub, one-time PIN. One Access configuration can then gate the API (section 8.1) and supply identity. |
+| A self-hosted provider (Pocket ID, Authentik, Keycloak) | For deployments without Cloudflare or Microsoft (section 16). Pocket ID is built around passkeys. |
+| Google, Apple | Possible through the same OIDC code; no need identified. |
+
+Microsoft keeps one extra step in Graph mode: after OIDC sign-in, the server also
+needs delegated Graph and Exchange tokens. When the identity provider *is* Entra, one
+authorization yields both, as it does today. When it isn't, the owner connects
+Microsoft separately once, from a settings page.
+
+### 15.2 The owner is an issuer and subject, not an email
+
+`Props.user` in each grant holds an email today, and `isOwner()` already had to learn
+that an email alone can't be trusted (`/me.mail` is admin-settable; the UPN check plus
+`OWNER_OBJECT_ID` closed that). With several providers, the rule becomes general:
+
+- A principal is the pair **(issuer, subject)** from the validated ID token. The
+  subject is the provider's stable, non-reassignable user ID.
+- The owner is configured as one such pair (or bootstrapped from an email on first
+  sign-in, then pinned to the pair, the way `OWNER_OBJECT_ID` pins the Microsoft
+  account today).
+- Email is display data only. It never decides access.
+- Grants carry the principal pair from the start (`Props.principal`), so adding a
+  second provider later doesn't invalidate existing grants or the MCP connectors.
+
+**Built now:** `Props.principal` alongside `Props.user`, set from the Microsoft sign-in
+(issuer `https://login.microsoftonline.com/<tenant>/v2.0`, subject = the object ID).
+**Built later:** the generic OIDC upstream and the provider setting.
+
+---
+
+## 16. Running without Cloudflare
+
+The Node host (`src/hosts/node`, `docs/NODE-HOSTING.md`) already runs the MCP server
+with no Cloudflare services. Everything in this document is designed to work there
+too:
+
+| Piece | Cloudflare host | Node host |
+|---|---|---|
+| Change log, cursor, sync endpoints | Durable Object SQLite | The same code over the SQLite file |
+| Push | Hibernating WebSockets in `TodoIndex` | `ws` on the HTTP server (section 7.3) |
+| Attachment storage after Graph | R2 | A directory (`BlobStore` port, section 10.2) |
+| Edge gate | Cloudflare Access (section 8.1) | Optional: Cloudflare Tunnel plus Access in front of the Node host, a VPN such as Tailscale, or none |
+| Identity | Microsoft, or Access as OIDC | Microsoft, or any OIDC provider (section 15) |
+| Background push to phones (later) | APNs from the Worker | APNs from Node; the same ES256 signing |
+
+Three consequences for the design:
+
+- **The edge gate is per account, and the app detects it.** The app requests
+  `GET /api/v1/sync/info` before signing in. If the answer is a redirect to a
+  `cloudflareaccess.com` login, Access is in front and the app runs the Access step of
+  section 8.1; if it's the JSON response, there's no edge gate. Nothing about Access is
+  hard-coded into the app's notion of an account.
+- **Reverse proxies must pass WebSocket upgrades.** A Node deployment behind nginx,
+  Caddy or Traefik needs the upgrade headers forwarded for `/api/v1/sync/socket`.
+  `NODE-HOSTING.md` gets the snippet when push ships.
+- **Backups become the operator's job once the server is primary storage.** Durable
+  Object SQLite has Cloudflare's point-in-time recovery. A Node deployment has
+  whatever the operator sets up. Before `SYNC_SOURCE=local` is allowed on Node, the
+  host gets a built-in periodic snapshot (`VACUUM INTO` a timestamped file, keeping the
+  last N) and `NODE-HOSTING.md` documents copying it off the machine. In Graph mode
+  this doesn't matter, since Microsoft holds the data.
+
+---
+
+## 17. Sharing with other users
+
+Microsoft To Do lets the owner of a list share it with specific people, who can then
+read and edit its tasks. This isn't built now, but the design must not rule it out.
+
+### 17.1 Topology: several users on one deployment
+
+Two models were considered:
+
+- **Federation:** each person runs their own server, and servers exchange shared
+  lists. Every server would need to trust other servers, resolve conflicts between
+  two copies, and handle one side going away. Too much machinery for the need.
+- **Several users on one deployment (recommended):** a deployment admits more than
+  one principal (section 15.2). A shared list is stored once, in that deployment, and
+  each member syncs it like their own lists. This is what To Do does inside
+  Microsoft's service.
+
+With the second model, "the server is single-owner" becomes "the server has one
+administrator and an allowlist of principals". The `OWNER_EMAIL` gate becomes the
+first entry on that allowlist. The singleton `TodoIndex` can hold several users' data
+for the scale that matters here — a family or a small team. Splitting into one Durable
+Object per user is possible later but isn't required by anything above.
+
+To share across deployments — for example, the work server and someone else's — a
+person is added to the deployment that owns the list, and their app adds it as an
+extra account (section 14). No federation needed.
+
+### 17.2 Data model
+
+- **The unit of sharing is the list.** Tasks, steps, links and attachments belong to
+  exactly one list and inherit its access.
+- `list_members(list_sid, principal, role, added_ms)`, with roles `owner` and
+  `editor`. Every list has exactly one owner.
+- Each user's private data stays per user: My Day membership and order, and possibly
+  list order in the sidebar. To Do shows a shared task in My Day for whoever added it,
+  not for every member. So the My Day fields move from the task row to a per-principal
+  table when sharing is built: `my_day(principal, task_sid, committed_day,
+  committed_order, postponed_day)`.
+
+### 17.3 What must exist from the start
+
+These are cheap in migration v4 and expensive to retrofit, so they're built now:
+
+- **Every `sync_log` row records its list.** A new `list_sid` column, filled by the
+  triggers (a task's own list; a step's task's list). Serving a filtered feed — "only
+  lists this principal can see" — is then an indexed condition, the same kind of
+  filter as the per-device scope in section 4.5.
+- **Every applied mutation records its principal.** `applied_mutations.principal`,
+  from `Props.principal`. This is also the "edited by" data a shared list shows.
+- **The feed already tolerates filtering.** Section 4.5 established that a filtered
+  feed over the shared log stays correct as long as the client prunes what leaves its
+  view. Losing access to a list is the one case the client can't detect on its own,
+  so removing a member writes a deletion record for that list into the removed
+  member's view, and the client deletes the list and everything in it.
+
+### 17.4 What changes when sharing is built
+
+- The grant check admits any allowlisted principal, not only the owner.
+- `/sync/changes` filters by membership; the WebSocket announces a change only to
+  sockets whose principal can see the list it touched, so one member can't watch
+  another's private lists change.
+- The MCP tools take the calling principal into account. Today every MCP call is the
+  owner's.
+- In Graph mode, sharing stays Microsoft's: lists shared through To Do already appear
+  in the mirror with `is_shared` set. Lists other people share *with* the owner belong
+  to those people's Microsoft accounts, so they disappear when Graph is turned off
+  unless they are copied first. The switch to local mode lists them so the owner can
+  decide.
+
+---
+
+## Revisions
+
+- 2026-11-23: sections 15 to 17 added after review (sign-in providers, hosts other
+  than Cloudflare, sharing). Items built now: `Props.principal`, `sync_log.list_sid`,
+  `applied_mutations.principal`.
