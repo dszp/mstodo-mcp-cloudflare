@@ -43,6 +43,7 @@ truth. This document designs both modes and scopes the build to write-through on
 15. [Sign-in providers beyond Microsoft](#15-sign-in-providers-beyond-microsoft)
 16. [Running without Cloudflare](#16-running-without-cloudflare)
 17. [Sharing with other users](#17-sharing-with-other-users)
+18. [Revisions from the Fable review](#18-revisions-from-the-fable-review-2026-11-23)
 
 ---
 
@@ -160,22 +161,14 @@ CREATE UNIQUE INDEX entity_map_graph ON entity_map(kind, graph_id) WHERE graph_i
 - **Moves through this server** (`move_task`, an app move) re-point the map row from
   the old Graph ID to the new one *before* the mirror rows are re-keyed, so the `sid`
   carries on.
-- **Moves made in Microsoft To Do** arrive as a delta "removed" in one list and a new
-  task in another, possibly in different sync cycles, in either order. The server
-  matches the pair on Graph `createdDateTime` plus title within one sync window and
-  keeps the old `sid`. A brief removal followed by the same `sid` reappearing is legal
-  in the change feed (section 4.3), so a match that lands a cycle late is still
-  correct.
-- **To verify in the first build PR:** whether a re-parented task keeps its
-  `createdDateTime` (the match key), and whether Graph's `Prefer: IdType="ImmutableId"`
-  header applies to `todoTask`. Microsoft documents immutable IDs for Outlook
-  messages, events and contacts; I haven't found it documented for To Do tasks. If it
-  works, Microsoft To Do moves keep their ID and the matcher becomes unnecessary — but
-  switching ID type changes every ID the MCP tools have ever returned, so it would be a
-  separate decision.
+- **Moves made in Microsoft To Do** keep their ID, because the mirror switches to
+  Graph **immutable** task IDs (decided 2026-11-23 after the spike and review; the
+  migration is in section 18.2). The `createdDateTime`-plus-title matcher is dropped.
+  `entity_map` stays: app creates, the copy-and-delete move fallback and local mode
+  still need a server ID that isn't Graph's.
 
-The MCP tools keep using Graph IDs. They call `IndexCore` methods that take Graph IDs,
-and the map is maintained underneath them (section 3.2).
+The MCP tools keep using Graph IDs, now in immutable form. A plain ID from an older
+conversation is translated once at the tool boundary (section 18.2).
 
 ---
 
@@ -331,17 +324,14 @@ Authorization: Bearer <access token>
         "created_at": "2026-11-20T15:04:05Z", "modified_at": "2026-11-23T21:00:00Z",
         "order": "2026-11-23T21:00:00.000Z",
         "my_day": { "committed_day": "2026-11-23", "committed_order": "…", "postponed_day": null },
-        "subresources_complete": true
+        "subresources_complete": true,
+        "steps": [ { "id": "0190…", "title": "…", "checked": false, "checked_at": null,
+                     "created_at": "…", "order": null } ],
+        "links": [ { "id": "0190…", "url": "https://…", "title": "…", "app": "…" } ],
+        "attachments": [ { "id": "0190…", "name": "invoice.pdf", "size": 48213,
+                           "content_type": "application/pdf" } ]
       },
       "field_clock": { "title": 1795470000000, "status": 1795470100000 } },
-    { "kind": "step", "id": "0190…", "seq": 18003, "deleted": false,
-      "data": { "task_id": "0190…", "title": "…", "checked": false, "checked_at": null,
-                "created_at": "…", "order": null } },
-    { "kind": "link", "id": "0190…", "seq": 18004, "deleted": false,
-      "data": { "task_id": "0190…", "url": "https://…", "title": "…", "app": "…" } },
-    { "kind": "attachment", "id": "0190…", "seq": 18005, "deleted": false,
-      "data": { "task_id": "0190…", "name": "invoice.pdf", "size": 48213,
-                "content_type": "application/pdf" } },
     { "kind": "task", "id": "0190…", "seq": 18006, "deleted": true }
   ],
   "backfill": { "remaining": 0 }
@@ -451,9 +441,11 @@ Content-Type: application/json
 - `id`: a UUID the app generates once per edit and keeps across retries.
 - `at`: when the edit was made on the device. Used for conflicts (section 6).
 - `client_id`: a per-install ID. Used in logs and, later, for APNs device routing.
-- At most 100 mutations per request. A mutation can take two or three Graph or
-  Substrate calls, and the Worker is on the paid plan, so the subrequest limit isn't
-  the constraint; the cap keeps one request's run time short.
+- At most 25 mutations per request, plus a per-request time budget: mutations left
+  when the budget runs out come back `skipped`. A mutation takes two or three
+  sequential Graph or Substrate calls, so 100 would outlast client timeouts and cause
+  the very retries idempotency then has to absorb (section 18.4). The subrequest limit
+  on the paid plan isn't the constraint.
 
 ### 5.2 Operations
 
@@ -697,19 +689,24 @@ from last use (`src/hosts/shared/oauth.ts`). An iPhone app left unused for two w
 has to sign in again. That's the existing connector policy; changing it for the app
 alone is possible later through the `tokenExchangeCallback`.
 
-**Keeping an app token out of MCP, and an MCP token out of the sync API.** The library
-binds every token to one canonical resource (`<origin>/mcp`) and accepts it on every
-`apiRoute`. So without a scope check, a Claude connector's token could call
-`/api/v1/sync/mutations`, and the app's token could call `/mcp`. Both belong to the
-owner, but neither needs the other's access. The proposal: the app requests scope
-`sync`; the `/api/v1/sync/*` handler requires it; `/mcp` refuses a token whose only
-scope is `sync`. Because `/mcp` refuses only `sync`-only tokens, existing connector
-grants keep working whatever scopes they were issued with.
+**Keeping an app token out of MCP, and an MCP token out of the sync API** (revised
+after review, section 18.1). The earlier version of this paragraph said the library
+accepts an `/mcp` token on every API route; that was wrong. In 1.2.3 the constructor
+refuses an API route outside the canonical resource (`assertRouteCoveredByResource`),
+and a token is accepted only on its own resource and its path descendants
+(`audienceMatches`). So separation comes from **audience binding**, not a scope:
+the provider moves to the library's role-based form (`OAuthAuthorizationServer` with
+`resources: [<origin>/mcp, <origin>/api/v1]`, one `OAuthResourceServer` each). Claude's
+connectors keep `<origin>/mcp` tokens; the app requests `resource=<origin>/api/v1`. A
+token for one is refused by the other. The `sync` scope is dropped. **Before build:**
+test that existing `/mcp` grants survive the change (the library keeps
+`legacyGrantResource` for this).
 
 ### 8.1 Cloudflare Access in front of the app
 
 On deployments that use it (section 16), Access stays a second, independent gate: a request must pass Access at the edge and
-then present a valid OAuth token with scope `sync`. Neither layer trusts the other.
+then present a valid OAuth token for the `/api/v1` resource. Neither layer trusts the
+other.
 
 **Which paths Access covers.** One Access application on this hostname, scoped to
 `/api/v1/sync/*`, `/api/v1/tasks/*`, `/api/v1/search`, `/api/v1/attachments/*`, and
@@ -769,11 +766,12 @@ src/core/api/
 src/core/ops/   # write logic shared by MCP tools, the sync API and §1 routes (section 5.5)
 ```
 
-- The OAuth provider moves from `apiRoute: "/mcp"` to `apiHandlers`, with `/mcp` and
-  `/api/v1` as separate entries. The grant check runs in both.
+- The OAuth provider moves to the library's role-based form, with `/mcp` and
+  `/api/v1` as separate resources (section 8, 18.1). The grant check runs in both.
 - A static `HTTP_API_TOKEN` for n8n enters through the provider's
-  `resolveExternalToken` hook, compared in constant time, and maps to scope `api`. It
-  never carries `sync`. Cloudflare Access service tokens, the other §1 option, are
+  `resolveExternalToken` hook, compared in constant time, and is valid only for the
+  `/api/v1` routes n8n uses, never the sync routes (to verify: how the role-based form
+  exposes `resolveExternalToken`). Cloudflare Access service tokens, the other §1 option, are
   checked at the edge before the Worker runs and need no code here.
 - `router.ts` is in `src/core`, so both hosts get it. On Node it is mounted in
   `createHandler`, behind the existing body caps.
@@ -859,22 +857,25 @@ Microsoft To Do keeps its own separate grouping until the switch.
 Each step is one PR with tests on both hosts (`test/` for the Workers pool, `test-node/`
 for Node). Nothing ships until this document is approved.
 
-1. **Spike, behind no flag:** check `AUTOINCREMENT` and trigger-based UUIDs in Durable
-   Object SQLite; whether a re-parented task keeps `createdDateTime`; whether
-   `Prefer: IdType="ImmutableId"` works on `todoTask`; the Substrate list-group probe.
-   Results go in the decisions note and adjust sections 2, 3 and 10.4.
-2. **Migration v4:** `entity_map`, `sync_log` (with `list_sid`), triggers,
+1. **Spike** (done; results at the end of this document).
+2. **Foundations from the review:** a `transaction(fn)` port on both hosts; one
+   atomic `IndexCore.moveTask`; the delta-overwrite guard; the switch to immutable task
+   IDs, re-baselined, with subscriptions recreated (section 18.2). Lands before v4 so
+   the change log starts on immutable IDs.
+3. **Migration v4:** `entity_map`, `sync_log` (with `list_sid`), triggers,
    `field_clock`, mark-and-sweep for `resync`/410, and `Props.principal` on new grants
    (section 15.2). No API yet; tests assert log rows for every writer.
-3. **Mirror completeness:** body columns, `linked_resources`, `attachments`, step
+4. **Mirror completeness:** body columns, `linked_resources`, `attachments`, step
    order, the generalized sub-resource scan with backfill mode, the `archive` list
    policy.
-4. **`ops/` extraction** from `register-tools.ts`. MCP behavior unchanged.
-5. **Router and auth:** `/api/v1` mount on both hosts, `sync` scope, the Access
+5. **`ops/` extraction** from `register-tools.ts`, plus the single mutation queue in
+   `IndexCore` (section 18.4). MCP behavior unchanged.
+6. **Router and auth:** `/api/v1` mount on both hosts, role-based resources (section
+   18.1), the Access
    sign-in path, `GET /sync/info`, `GET /sync/changes` with `scope`, `GET /tasks/{sid}`, `GET /search`.
-6. **`POST /sync/mutations`** with idempotency and field clocks.
-7. **WebSocket push** on both hosts, plus hot-list-first sync.
-8. **End-to-end check:** a script holds a WebSocket to the deployed Worker, I edit a
+7. **`POST /sync/mutations`** with idempotency and field clocks.
+8. **WebSocket push** on both hosts, plus hot-list-first sync.
+9. **End-to-end check:** a script holds a WebSocket to the deployed Worker, I edit a
    task in Microsoft To Do, and the script reports the time from the webhook log line to
    the `changed` message, then confirms `/sync/changes` returns the edit.
 
@@ -1201,4 +1202,109 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
   response carries the task's new **plain** ID (`AAMk…`), so code that re-keys from
   `reparentTask`'s returned `Id` (today's `move_task`) must stop doing that; and a
   Graph GET of the immutable ID under the **old** list returns `400`, not `404`.
+
+---
+
+## 18. Revisions from the Fable review (2026-11-23)
+
+An independent review (Claude Fable, reading the code) found these. Each changes the
+design above; where an earlier section said otherwise, this section wins.
+
+### 18.1 Auth: audience binding, not a scope
+Section 8 is corrected in place. The library binds each token to one resource, so the
+app and the MCP connectors get separate resources and the `sync` scope is dropped. It
+would have been weak anyway: `scopesSupported` is unset and the authorization handler
+grants whatever scopes a client asks for (`auth-handler.ts`). The existing `/mcp`
+grants must be shown to survive the switch to the role-based provider before it ships.
+
+### 18.2 Immutable task IDs: how to switch safely
+- **Substrate returns plain IDs.** The My Day scan writes by Substrate's `t.Id`
+  (`index-core.ts`, `#runMyDayScanBatch`), and `move_task` re-keys from the
+  re-parent response's `Id`. Against an immutable-keyed mirror the first would
+  silently write nothing (My Day empties) and the second would add a duplicate row.
+  Fix: translate at the Substrate boundary (batch `translateExchangeIds` per scanned
+  folder, or send the `Prefer` header to Substrate if it honors it — untested), and
+  make a move an atomic `IndexCore.moveTask` that changes `list_id` and ignores the
+  returned ID.
+- **Step reorder** matches Substrate `Subtasks[].Id` to Graph checklist item IDs.
+  Untested: whether checklist item, linked resource and attachment IDs change form
+  under the header. Test before switching.
+- **Migration:** its own step, before v4 creates the triggers. Drop task rows and every
+  `tasks:*` delta link, re-baseline with the header (a delta link issued without it may
+  keep returning plain IDs — untested), and recreate Graph subscriptions with the
+  header so a notification's `resourceId` matches the mirror (inference: today's
+  subscriptions send plain IDs). Run it before the sub-resource backfill, because a
+  re-baseline currently nulls every task's backfill marker.
+- **MCP callers holding plain IDs:** on a mirror miss, translate once at the tool
+  boundary. `previous_task_id` stays in `move_task`'s output and now equals `task_id`.
+- **Errors:** a task looked up under a list it has left now returns `400`, not `404`.
+  `#recheckSource` already treats that as "unknown → treat as moved" (safe); the
+  `task_not_found` mapping needs the inner error code, and the list should be resolved
+  from the mirror by task ID.
+- **Test:** which ID a completed recurring instance keeps.
+
+### 18.3 The task is the unit of sync
+With per-device scope (section 4.5) and later sharing, a step logged separately from its
+task can sit below the cursor while its task is out of scope, and never arrive when the
+task comes back. So steps, links and attachment metadata are embedded in the task entity
+(section 4.2 example is updated), and a change to any of them bumps the parent task's log
+row. This also removes the parent-before-child rule in section 4.3 for those kinds; lists
+remain separate entities. `entity_map` still gives each child a `sid` so edits can name
+it.
+
+### 18.4 Serializing writes
+Every Graph call yields the Durable Object's input gate, so a retried batch, a second
+device or an MCP tool can interleave with a running batch. One write queue in
+`IndexCore` (modelled on `#refreshChain`) carries sync mutations and MCP writes alike. A
+`pending` idempotency row gets a lease: a retry that finds a live lease waits or returns
+`skipped`; an expired lease is re-checked before re-running. Batches are capped at 25 with
+a time budget (section 5.1).
+
+### 18.5 Atomicity and stale writes
+- **A `transaction(fn)` port** on both hosts. `SqlDb` has only `exec`, and the Node host
+  autocommits each statement, so "the same transaction" in section 5.4 had no mechanism.
+- **Delta can't overwrite a newer write-through.** A delta page fetched before a
+  write-through lands would revert it, and the feed and `field_clock` would record the
+  old value. The delta upsert is guarded by `excluded.modified_at >= tasks.modified_at`.
+- **Create adoption by title and time is ambiguous**, and doesn't cover step or link
+  creates or the copy-and-delete move. Test Graph open extensions on `todoTask` for
+  stamping the `sid` at create time.
+- **Replaying a completion** of a repeating task may complete the next occurrence if
+  the ID moves with it. Test before treating updates as safe to repeat.
+
+### 18.6 Change-log details
+- The `sid` mint and the log write go in **one trigger** with two statements; SQLite
+  doesn't guarantee the order of separate triggers on the same event.
+- `replaceChecklistItems` deletes and re-inserts every step on each scan; it changes
+  to a diff, so unchanged steps log nothing.
+- `deleteList` leaves the list's steps behind; it cascades to them.
+- **Mark and sweep:** rows written through during a multi-cycle baseline carry the
+  baseline's generation so the sweep keeps them. The roster-level 410 (which today drops
+  every task) gets its own handling. The backfill marker is nulled only when a task's
+  `modified_at` changed, so a re-baseline doesn't re-run the whole backfill.
+- **Restores:** a cursor whose `seq` is above the current maximum gets `410`, and the
+  restore runbook rotates the epoch. With scope filtering, the returned cursor is the
+  last `seq` scanned, not the last one sent.
+
+### 18.7 Security
+- `GET /sync/info` before sign-in returns only what sign-in needs (that the server
+  exists, its `server_id`, and whether Access is in front); name, email hint and
+  version need a token.
+- The Access token is not put in a redirect URL. The server holds it and hands it
+  over at code redemption, bound to the app's exact redirect URI.
+- The Node WebSocket upgrade validates with the library's resource-checking validator,
+  not `unwrapToken`, which checks neither audience nor scope.
+- A socket is bound to its grant and epoch and has a lifetime cap, rather than being
+  checked only when an announcement goes out.
+- Task bodies are raw HTML, and archived flagged-email tasks hold email content. The
+  app renders bodies sanitized, with no remote loads.
+
+### 18.8 Later
+- Expose the `sid` in MCP outputs and accept either ID form now, so the after-Graph
+  switch doesn't change MCP IDs a second time. Write the switch as a one-way procedure:
+  final drain, subscription teardown, snapshot.
+- Sharing needs a per-list deletion record: one compacted row can't tell a member of
+  list A that a task moved to list B, which they can't see.
+- Measure the one-GET `$expand=checklistItems,linkedResources` and Substrate step-order
+  cost, and throttling, before raising the backfill budget.
 
