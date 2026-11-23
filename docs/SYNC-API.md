@@ -1169,6 +1169,23 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
   ID changed. The move matcher in section 2 can key on it. Moves made in the To Do app
   use the same Substrate re-parent (see `reparentTask`), so I expect the same result
   there; the end-to-end test in step 8 confirms it.
-- Still open, needing a deployed probe: `Prefer: IdType="ImmutableId"` on `todoTask`,
-  and Substrate list groups (section 10.4).
+- 2026-11-23, live on the Servant Voice test worker (`mstodo-mcp-sv`), with a
+  temporary token-gated probe from the unmerged `scratch/sync-probe` branch:
+  - **Immutable IDs work for To Do tasks.** With `Prefer: IdType="ImmutableId"`,
+    Graph returns task IDs in a different form (`AAkAL…`). A task created, re-parented
+    through Substrate, and read back kept the same immutable ID, while its plain ID
+    changed. The old immutable ID still resolved after the move.
+  - `…/tasks/delta` honors the header (every row came back as an immutable ID). List
+    IDs are unaffected by the header, and lists never change ID anyway.
+  - Substrate accepts an immutable task ID (`GET …/taskfolders/{list}/tasks/{immutable}`
+    returned 200), and `POST /me/translateExchangeIds` converts between the two forms.
+  - **Sidebar order and list groups exist in Substrate.** Each folder in
+    `GET …/taskfolders` carries `OrderDateTime` (sidebar position, null for the
+    default list) and `ParentFolderGroupId`, plus `ThemeColor` and `ThemeBackground`.
+    `GET …/foldergroups` exists and returns a delta link; the test account has no
+    groups, so the group object's fields are still unseen. (`taskgroups` and
+    `taskfoldergroups` return "Endpoint not supported".)
+  - Graph's `/me/todo/lists` and `…/tasks` reject `$select` with `ParseUri` errors.
+- Not yet checked: re-parenting by immutable ID (the move test passed the plain ID),
+  and the shape of a list-group object.
 
