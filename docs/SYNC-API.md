@@ -39,6 +39,7 @@ truth. This document designs both modes and scopes the build to write-through on
 11. [What stays unchanged](#11-what-stays-unchanged)
 12. [Build order](#12-build-order)
 13. [Decisions from review](#13-decisions-from-review)
+14. [Multiple accounts](#14-multiple-accounts)
 
 ---
 
@@ -663,9 +664,14 @@ same grant epoch, so `revoke_all_connections` signs the app out like any MCP
 connector.
 
 The flow is authorization code with PKCE (S256) through `ASWebAuthenticationSession`,
-with an **`https` callback on this server's own host** — for example
-`https://<host>/app/oauth/callback` — that the app claims through an Associated
-Domains entitlement. The Worker serves `/.well-known/apple-app-site-association`.
+with an **`https` callback on one fixed domain the app owns** — for example
+`https://todo-app.<your domain>/oauth/callback` — that the app claims through an
+Associated Domains entitlement. That domain serves
+`/.well-known/apple-app-site-association`; a static page or a small Worker route is
+enough. The callback is deliberately **not** on each server's host: Associated Domains
+are fixed when the app is built, so a per-server callback would need an app update for
+every new server. An OAuth redirect URI doesn't have to share the server's host, so
+every server can send its code to the same domain (section 14).
 `ASWebAuthenticationSession` supports `https` callbacks from iOS 17.4 and macOS 14.4;
 the app targets the current iOS and macOS releases, so that's no constraint. The OAuth
 library already accepts `https` redirect URIs, so no library option changes.
@@ -674,10 +680,12 @@ A custom URL scheme is not used. Any app on the device can register the same sch
 and receive the code; PKCE stops it redeeming the code, but the `https` callback stops
 it receiving the code at all. `allowPrivateUseRedirectUris` stays off.
 
-**Client registration.** Register the app once as a public client (no secret) with
-`getOAuthApi().createClient()` from a small admin script, and build its `client_id`
-into the app. Dynamic registration from the app would also work, but a fixed client
-shows a stable name on the consent page and in the grant list.
+**Client registration.** The app registers itself as a public client (no secret)
+through dynamic client registration (`/register`) the first time it signs in to a
+server, and stores the returned `client_id` with that account. Each server is its own
+OAuth issuer, so a `client_id` built into the app would only work on one server
+(section 14). The registration sends a fixed client name, so the consent page and the
+grant list show the app the same way on every server.
 
 **Token lifetimes.** Access tokens last one hour, and refresh tokens slide to 14 days
 from last use (`src/hosts/shared/oauth.ts`). An iPhone app left unused for two weeks
@@ -734,9 +742,8 @@ Replacing it is an Access configuration change, not server code: add Microsoft E
 ID as the Access identity provider and remove one-time PIN from this application. Entra
 supports passkeys as a sign-in method, so a passkey stored in 1Password signs in to both
 Access and the OAuth flow's Microsoft step, which is the same account the `OWNER_EMAIL`
-gate already checks. **To verify:** that the tenant's Entra policy allows synced
-passkeys from a third-party provider such as 1Password, not only device-bound ones in
-Microsoft Authenticator. I haven't confirmed the current state of that policy option.
+gate already checks. Confirmed 2026-11-23: Microsoft sign-in with a passkey stored in
+1Password works on this tenant.
 
 The bearer-token idea in ROADMAP §1 (`HTTP_API_TOKEN`) is for n8n. It isn't the app's
 auth: a static secret can't be revoked per device and doesn't go through Microsoft
@@ -859,7 +866,7 @@ for Node). Nothing ships until this document is approved.
    policy.
 4. **`ops/` extraction** from `register-tools.ts`. MCP behavior unchanged.
 5. **Router and auth:** `/api/v1` mount on both hosts, `sync` scope, the Access
-   sign-in path, `GET /sync/changes` with `scope`, `GET /tasks/{sid}`, `GET /search`.
+   sign-in path, `GET /sync/info`, `GET /sync/changes` with `scope`, `GET /tasks/{sid}`, `GET /search`.
 6. **`POST /sync/mutations`** with idempotency and field clocks.
 7. **WebSocket push** on both hosts, plus hot-list-first sync.
 8. **End-to-end check:** a script holds a WebSocket to the deployed Worker, I edit a
@@ -885,3 +892,88 @@ Answered 2026-11-23:
 
 Nothing is open. The items marked **To verify** above are checks for the build, not
 decisions.
+
+---
+
+## 14. Multiple accounts
+
+The app will hold more than one account at once — for example a work and a personal
+To Do — each backed by its **own deployment of this server** on its own Cloudflare
+account. It shows them together, the way Outlook's unified inbox does, while keeping
+each account's data separate. Microsoft To Do on iOS could switch between two
+accounts, but only one at a time, and each switch meant a slow full re-sync; macOS
+couldn't do it at all. Here every account stays synced all the time, so there is
+nothing to switch.
+
+### 14.1 The server stays single-owner
+
+Nothing in sections 1 to 13 changes. Each deployment serves one owner, and the app
+talks to several deployments. The server needs only two additions, both small enough
+to build now:
+
+- **`GET /api/v1/sync/info`** returns what the app needs to set up and label an
+  account:
+
+  ```json
+  {
+    "server_id": "c1b0…",
+    "account": { "name": "David (work)", "email_hint": "d…@…" },
+    "version": "0.18.0",
+    "capabilities": { "my_day": true, "step_order": true, "push": "websocket",
+                      "source": "graph" }
+  }
+  ```
+
+  `server_id` is a random ID created once and stored in DO storage. It never changes,
+  unlike the cursor epoch, which changes on an identity reset. The app keys the
+  account's local data by it, so re-adding the same server is recognized.
+  `capabilities` tells the app what this server supports: a deployment without the
+  Exchange Online scope has no My Day and no step order, and a deployment whose
+  Microsoft account can't receive Graph change notifications has slower push. The
+  app hides or degrades features per account instead of assuming every server is the
+  same.
+- **Sign-in that works for any server:** dynamic client registration and one shared
+  callback domain (section 8). With a built-in `client_id` and per-server callbacks,
+  adding a second server would need an app release.
+
+**To verify** before relying on a personal account: whether this server runs against
+a personal Microsoft account (outlook.com) at all. The owner gate and the
+`MS_TENANT_ID` handling were written for a work tenant, and ROADMAP §4 records that
+Graph change notifications for To Do don't support personal accounts, so such a
+deployment would fall back to timer-driven sync.
+
+### 14.2 What the app must get right from the start
+
+These are cheap on day one and expensive to retrofit, so the first app version builds
+them even with one account:
+
+- **One local database file per account**, named by `server_id`. Removing an account
+  deletes its file; nothing is left behind in a shared table. Unified views query
+  across files with SQLite `ATTACH`, which allows up to 10 attached databases by
+  default.
+- **Every local key includes the account.** `sid`s are random UUIDs and won't collide
+  across servers, but view state, selection, queued edits and notifications are keyed
+  by `(server_id, sid)`, so nothing in the app assumes one server.
+- **One sync engine per account:** its own cursor, mutation queue, WebSocket, OAuth
+  tokens and Access token in the Keychain. A slow or signed-out account never blocks
+  another.
+- **The account is a field of every entity in the view model,** even when only one
+  account exists, so a row can show an account color or badge later without a model
+  change.
+
+### 14.3 What can wait
+
+- **Unified views** — My Day, Important, Planned and search across accounts. Built on
+  the `ATTACH` queries above, with each row marked by account color. Within a unified
+  My Day, manual order stays per account: each server owns its own order, so the
+  unified view groups by account instead of interleaving. A cross-account manual order
+  would need storage that belongs to no server; the doc records it as possible later,
+  not designed here.
+- **Moving a task between accounts.** No server can do this atomically, because the
+  two accounts don't share a back end. The app would create the task in the
+  destination, confirm it, then delete it from the source, and tell the user that the
+  task's history doesn't move with it.
+- **Account management UI** — add, rename, color, reorder and remove accounts.
+
+With 14.1 and 14.2 in place, adding these later is UI work only.
+
