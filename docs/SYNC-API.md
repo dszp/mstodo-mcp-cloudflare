@@ -1,6 +1,6 @@
 # Client sync API — design
 
-Status: **proposal, for review.** No code exists for anything here yet.
+Status: **approved 2026-11-23.** Building in the order of section 12; each build step is its own PR.
 
 This server becomes the back end for a native macOS and iOS app that keeps a local
 SQLite copy of every list and task and syncs with the server. The design has five
