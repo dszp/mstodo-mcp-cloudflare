@@ -1195,5 +1195,10 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
   No collapsed or expanded state is stored server-side; the app keeps that locally.
   Section 10.4 can therefore mirror groups read-only in Graph mode instead of making
   them app-owned.
-- Not yet checked: re-parenting by immutable ID (the move test passed the plain ID).
+- 2026-11-23, SV: re-parenting **by immutable ID** works. Substrate moved the task and
+  confirmed the destination, the immutable ID resolved in the destination list
+  afterward, and the test task was deleted. Two details for the ID switch: Substrate's
+  response carries the task's new **plain** ID (`AAMk…`), so code that re-keys from
+  `reparentTask`'s returned `Id` (today's `move_task`) must stop doing that; and a
+  Graph GET of the immutable ID under the **old** list returns `400`, not `404`.
 
