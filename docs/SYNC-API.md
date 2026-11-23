@@ -1186,6 +1186,14 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
     groups, so the group object's fields are still unseen. (`taskgroups` and
     `taskfoldergroups` return "Endpoint not supported".)
   - Graph's `/me/todo/lists` and `…/tasks` reject `$select` with `ParseUri` errors.
-- Not yet checked: re-parenting by immutable ID (the move test passed the plain ID),
-  and the shape of a list-group object.
+- 2026-11-23, after David created two list groups in the Servant Voice account and
+  moved one list into one of them: a group record from `GET …/foldergroups` has exactly
+  `Id`, `Name` and `OrderDateTime`. The grouped list's `ParentFolderGroupId` equals the
+  group's `Id`, and moving the list into the group gave it a new `OrderDateTime`; its
+  Graph list ID did not change. Groups and ungrouped lists both carry `OrderDateTime`,
+  so I read the sidebar as one ordering across both (to confirm with a reorder test).
+  No collapsed or expanded state is stored server-side; the app keeps that locally.
+  Section 10.4 can therefore mirror groups read-only in Graph mode instead of making
+  them app-owned.
+- Not yet checked: re-parenting by immutable ID (the move test passed the plain ID).
 
