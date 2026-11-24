@@ -32,8 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sync API: lists in the change feed carry `sync` (`todo` | `reference`); `list.update` accepts
   `sync`; `GET /api/v1/lists/excluded` lists the excluded lists by sid. Task, My Day, step and
   link mutations that touch an excluded list are rejected with `list_excluded`.
+- Sync API: `GET /api/v1/attachments/{sid}` streams an attachment's bytes from Graph to the
+  app, with an `/api/v1` token (docs/SYNC-API.md section 4.6). `GET /api/v1/sync/info`
+  reports `capabilities.attachment_download`.
 
 ### Fixed
+- The `/download` link's `Content-Disposition` now percent-encodes `'`, `(`, `)`, `*` and `!`
+  in `filename*`, as RFC 5987 requires; a `'` in a filename could end the charset prefix early.
 - `set_list_config` no longer clears the `archive` list, and `set_list_alias` no longer clears
   every pin and the `archive` list.
 - A list excluded while the sync cycle was fetching it is no longer filled back in and
