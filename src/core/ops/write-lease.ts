@@ -3,7 +3,7 @@ import type { IndexBackend } from "../ports";
 
 // The single write queue (docs/SYNC-API.md section 18.4), client side.
 //
-// Every op in src/core/ops runs inside WriteLease.run(), so an MCP tool, a sync
+// Every op in src/core/ops runs inside ctx.writes.run(), so an MCP tool, a sync
 // mutation and (later) an n8n route never interleave their Graph/Substrate
 // calls. Each Graph call yields, so without this a retried sync batch, a second
 // device and an MCP tool could all be mid-write on the same task at once.
@@ -11,26 +11,35 @@ import type { IndexBackend } from "../ports";
 // Topology: the ops run where the request is — the per-session McpAgent on
 // Cloudflare, the request handler on Node — and only the index (the TodoIndex
 // Durable Object, or IndexCore in process) is shared. A closure can't cross DO
-// RPC, so the queue is a lease held by the index (IndexCore.acquireWriteLease)
-// and this class is the waiting side:
+// RPC, so the queue is a lease held by the index (IndexCore.acquireWriteLease),
+// which also does the waiting: pending acquires queue FIFO inside the index and
+// the call returns when the lease is ours or the wait ran out. This class:
 //
-//   - acquire: poll with capped backoff until granted or `waitMs` runs out,
-//     then throw WriteBusyError (surfaced as `write_busy`, retryable). Waiters
-//     are not FIFO; for one owner's handful of clients that is acceptable.
-//   - renew: while the work runs, re-acquire every ttl/3 so a long write (a
-//     move copying attachments, a throttled Substrate call) keeps the lease. A
-//     holder that dies stops renewing and the TTL frees the lease.
-//   - release: in `finally`. A failed release is logged; the TTL covers it.
-//   - reentrant: one WriteLease is one writer. A nested run() on the same
-//     instance (a sync batch holding the lease around an op that also takes
-//     it) runs inline instead of deadlocking on itself.
+//   - acquires with the whole wait budget (one RPC that waits server-side),
+//     re-asking only if the index clamped the wait shorter or a call failed
+//     mid-wait; out of budget → WriteBusyError (`write_busy`, retryable).
+//   - renews every ~ttl/3 while the work runs (TTL 10 s), so a long write keeps
+//     the lease and a dead writer frees it within seconds.
+//   - releases in `finally`; a failed release is logged and the TTL covers it.
+//   - serializes its own run() calls: one WriteLease is one writer, so two
+//     concurrent run() calls on it queue behind each other locally rather than
+//     sharing one lease. To hold the lease across several ops (a sync batch
+//     around its mutations), use hold(): the ops get a `held` queue that runs
+//     inline. Calling run() from inside run() on the same instance deadlocks.
 //
-// If the index can't be reached to acquire, the write proceeds unserialized
-// and logs `write_lease_unavailable`: that is the behavior before the queue
-// existed, and refusing every write while the index is unreachable would turn
-// a consistency feature into an outage. A *busy* lease never proceeds.
+// If the FIRST acquire can't reach the index, the write proceeds unserialized
+// and logs `write_lease_unavailable` — the behavior before the queue existed;
+// refusing every write while the index is unreachable would turn a consistency
+// feature into an outage. Once the index has answered, a later failure is
+// retried within the wait and ends in WriteBusyError, never an unserialized
+// write.
 
 export type WriteLeasePort = Pick<IndexBackend, "acquireWriteLease" | "releaseWriteLease">;
+
+// What an op needs: run this write in the queue.
+export interface WriteQueue {
+  run<T>(fn: () => Promise<T>): Promise<T>;
+}
 
 export class WriteBusyError extends Error {
   readonly reason = "write_busy";
@@ -48,21 +57,22 @@ export interface WriteLeaseOptions {
   now?: () => number;
 }
 
-export const WRITE_LEASE_TTL_MS = 30_000;
-export const WRITE_LEASE_WAIT_MS = 15_000;
-const MIN_POLL_MS = 25;
-const MAX_POLL_MS = 500;
+export const WRITE_LEASE_TTL_MS = 10_000;
+// Long enough for a burst of parallel tool calls, each a few Graph calls, plus
+// a throttled (429) write ahead in the queue; under an MCP client's timeout.
+export const WRITE_LEASE_WAIT_MS = 50_000;
+const RETRY_AFTER_ERROR_MS = 250;
 
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export class WriteLease {
+export class WriteLease implements WriteQueue {
   readonly holder: string;
   readonly #port: WriteLeasePort;
   readonly #ttlMs: number;
   readonly #waitMs: number;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #now: () => number;
-  #depth = 0;
+  #chain: Promise<unknown> = Promise.resolve();
 
   constructor(port: WriteLeasePort, opts: WriteLeaseOptions = {}) {
     this.#port = port;
@@ -73,22 +83,24 @@ export class WriteLease {
     this.#now = opts.now ?? Date.now;
   }
 
-  async run<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.#depth > 0) {
-      this.#depth++;
-      try {
-        return await fn();
-      } finally {
-        this.#depth--;
-      }
-    }
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const p = this.#chain.then(() => this.#runHeld(fn));
+    this.#chain = p.catch(() => undefined);
+    return p;
+  }
+
+  // Holds the lease for all of fn; ops given `held` run inline under it.
+  // `held` is only valid until fn settles.
+  hold<T>(fn: (held: WriteQueue) => Promise<T>): Promise<T> {
+    return this.run(() => fn({ run: (g) => g() }));
+  }
+
+  async #runHeld<T>(fn: () => Promise<T>): Promise<T> {
     const held = await this.#acquire();
-    this.#depth = 1;
     const stopRenewing = held ? this.#renewWhileRunning() : () => {};
     try {
       return await fn();
     } finally {
-      this.#depth = 0;
       stopRenewing();
       if (held) {
         await this.#port.releaseWriteLease(this.holder).catch((e) => log.warn("write_lease_release_failed", { error: String(e) }));
@@ -96,28 +108,33 @@ export class WriteLease {
     }
   }
 
-  // True when granted; false when the index couldn't be reached (proceed
-  // unserialized). Throws WriteBusyError when another writer kept it too long.
+  // True when granted; false when the first call couldn't reach the index
+  // (proceed unserialized). Throws WriteBusyError when the wait runs out.
   async #acquire(): Promise<boolean> {
     const started = this.#now();
-    let poll = MIN_POLL_MS;
+    let first = true;
     while (true) {
-      let res: Awaited<ReturnType<WriteLeasePort["acquireWriteLease"]>>;
+      const left = this.#waitMs - (this.#now() - started);
       try {
-        res = await this.#port.acquireWriteLease(this.holder, this.#ttlMs);
+        const res = await this.#port.acquireWriteLease(this.holder, this.#ttlMs, Math.max(left, 0));
+        if (res.granted) return true;
+        // Refused with budget left (the index clamped the wait): ask again,
+        // without spinning.
+        if (this.#waitMs - (this.#now() - started) > 0) await this.#sleep(RETRY_AFTER_ERROR_MS);
       } catch (e) {
-        log.warn("write_lease_unavailable", { error: String(e) });
-        return false;
+        if (first) {
+          log.warn("write_lease_unavailable", { error: String(e) });
+          return false;
+        }
+        log.warn("write_lease_acquire_failed", { error: String(e) });
+        if (this.#waitMs - (this.#now() - started) > 0) await this.#sleep(RETRY_AFTER_ERROR_MS);
       }
-      if (res.granted) return true;
+      first = false;
       const waited = this.#now() - started;
-      const left = this.#waitMs - waited;
-      if (left <= 0) {
+      if (waited >= this.#waitMs) {
         log.warn("write_lease_busy", { waitedMs: waited });
         throw new WriteBusyError(waited);
       }
-      await this.#sleep(Math.min(poll, res.retryInMs, left));
-      poll = Math.min(poll * 2, MAX_POLL_MS);
     }
   }
 
@@ -128,7 +145,7 @@ export class WriteLease {
       timer = setTimeout(async () => {
         if (stopped) return;
         try {
-          const res = await this.#port.acquireWriteLease(this.holder, this.#ttlMs);
+          const res = await this.#port.acquireWriteLease(this.holder, this.#ttlMs, 0);
           // Lost: our lease expired and another writer holds it now. The work
           // can't be undone mid-flight; say so and stop renewing.
           if (!res.granted) {

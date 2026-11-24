@@ -1,23 +1,22 @@
 // The single write queue (docs/SYNC-API.md section 18.4): the lease IndexCore
-// holds, and WriteLease, the side that waits for it, renews it and releases it.
+// holds (and the FIFO of writers waiting for it), and WriteLease, the side
+// that acquires, renews and releases it.
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
 import { IndexCore } from "../src/core/index/index-core";
 import { WriteBusyError, WriteLease, type WriteLeasePort } from "../src/core/ops/write-lease";
 
-function core() {
-  const db = openDatabase(":memory:");
+function core(db = openDatabase(":memory:")) {
   const state = stateStore(db);
   const c = new IndexCore({ sql: sqlDb(db), transact: transactor(db), state, alarms: state, env: { TIMEZONE: "UTC" } as never });
   c.bootstrap();
   return c;
 }
 
-// IndexCore as the port, async like the DO stub / Node proxy.
 const port = (c: IndexCore): WriteLeasePort => ({
-  acquireWriteLease: async (h, t) => c.acquireWriteLease(h, t),
-  releaseWriteLease: async (h) => c.releaseWriteLease(h),
+  acquireWriteLease: (h: string, t: number, w?: number) => c.acquireWriteLease(h, t, w),
+  releaseWriteLease: (h: string) => c.releaseWriteLease(h),
 });
 
 beforeEach(() => {
@@ -30,49 +29,67 @@ afterEach(() => {
 });
 
 describe("IndexCore write lease", () => {
-  it("refuses a second holder until the first releases", () => {
+  it("refuses a second holder without a wait, and frees on release", async () => {
     const c = core();
-    expect(c.acquireWriteLease("a", 10_000)).toMatchObject({ granted: true });
-    expect(c.acquireWriteLease("b", 10_000)).toEqual({ granted: false, retryInMs: expect.any(Number) });
-    expect(c.releaseWriteLease("a")).toBe(true);
-    expect(c.acquireWriteLease("b", 10_000)).toMatchObject({ granted: true });
+    expect(await c.acquireWriteLease("a", 10_000)).toMatchObject({ granted: true });
+    expect(await c.acquireWriteLease("b", 10_000)).toEqual({ granted: false });
+    expect(await c.releaseWriteLease("b")).toBe(false);
+    expect(await c.releaseWriteLease("a")).toBe(true);
+    expect(await c.acquireWriteLease("b", 10_000)).toMatchObject({ granted: true });
   });
 
-  it("lets only the holder release it", () => {
+  it("hands the lease to waiters in arrival order", async () => {
     const c = core();
-    c.acquireWriteLease("a", 10_000);
-    expect(c.releaseWriteLease("b")).toBe(false);
-    expect(c.acquireWriteLease("b", 10_000).granted).toBe(false);
+    await c.acquireWriteLease("a", 10_000);
+    const order: string[] = [];
+    const b = c.acquireWriteLease("b", 10_000, 5_000).then((r) => order.push(`b:${r.granted}`));
+    const d = c.acquireWriteLease("d", 10_000, 5_000).then((r) => order.push(`d:${r.granted}`));
+    await c.releaseWriteLease("a");
+    // A newcomer can't jump the queue.
+    expect(await c.acquireWriteLease("e", 10_000)).toEqual({ granted: false });
+    await b;
+    await c.releaseWriteLease("b");
+    await d;
+    expect(order).toEqual(["b:true", "d:true"]);
   });
 
-  it("extends for the same holder and expires for everyone else", () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
+  it("passes a dead holder's lease on at its expiry, and times a waiter out", async () => {
+    vi.useFakeTimers();
     vi.setSystemTime(0);
     const c = core();
-    expect(c.acquireWriteLease("a", 10_000)).toEqual({ granted: true, expiresAt: 10_000 });
-    vi.setSystemTime(8_000);
-    expect(c.acquireWriteLease("a", 10_000)).toEqual({ granted: true, expiresAt: 18_000 });
-    expect(c.acquireWriteLease("b", 10_000)).toEqual({ granted: false, retryInMs: 10_000 });
-    vi.setSystemTime(18_000);
-    expect(c.acquireWriteLease("b", 10_000)).toMatchObject({ granted: true });
+    await c.acquireWriteLease("dead", 2_000);
+    const next = c.acquireWriteLease("next", 2_000, 10_000);
+    const late = c.acquireWriteLease("late", 2_000, 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await late).toEqual({ granted: false });
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(await next).toMatchObject({ granted: true });
     // The expired holder can't release the new owner's lease.
-    expect(c.releaseWriteLease("a")).toBe(false);
+    expect(await c.releaseWriteLease("dead")).toBe(false);
   });
 
-  it("clamps the TTL so no caller holds it indefinitely or for no time", () => {
+  it("extends for the same holder and clamps the TTL", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(0);
     const c = core();
-    expect(c.acquireWriteLease("a", 86_400_000)).toEqual({ granted: true, expiresAt: 120_000 });
-    c.releaseWriteLease("a");
-    expect(c.acquireWriteLease("a", 0)).toEqual({ granted: true, expiresAt: 1_000 });
-    c.releaseWriteLease("a");
-    expect(c.acquireWriteLease("a", Number.NaN)).toEqual({ granted: true, expiresAt: 1_000 });
+    expect(await c.acquireWriteLease("a", 86_400_000)).toEqual({ granted: true, expiresAt: 120_000 });
+    vi.setSystemTime(8_000);
+    expect(await c.acquireWriteLease("a", 0)).toEqual({ granted: true, expiresAt: 9_000 });
+    expect(await c.acquireWriteLease("b", Number.NaN)).toEqual({ granted: false });
+  });
+
+  it("survives a restart of the index (persisted in the state store)", async () => {
+    const db = openDatabase(":memory:");
+    await core(db).acquireWriteLease("a", 10_000);
+    const restarted = core(db);
+    expect(await restarted.acquireWriteLease("b", 10_000)).toEqual({ granted: false });
+    expect(await restarted.releaseWriteLease("a")).toBe(true);
+    expect(await core(db).acquireWriteLease("b", 10_000)).toMatchObject({ granted: true });
   });
 });
 
 describe("WriteLease", () => {
-  it("runs writers one at a time", async () => {
+  it("runs writers one at a time, queued in the index", async () => {
     const c = core();
     const events: string[] = [];
     let releaseFirst!: () => void;
@@ -95,62 +112,104 @@ describe("WriteLease", () => {
     expect(events).toEqual(["first:start", "first:end", "second:start"]);
   });
 
-  it("gives up with WriteBusyError after the wait and never runs the write", async () => {
+  it("lets a burst of 20 writers through, one at a time, without write_busy", async () => {
     const c = core();
-    c.acquireWriteLease("other", 60_000);
-    let t = 0;
-    const lease = new WriteLease(port(c), {
-      waitMs: 1_000,
-      now: () => t,
-      sleep: async (ms) => {
-        t += ms;
-      },
-    });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const results = await Promise.allSettled(
+      Array.from({ length: 20 }, (_, i) =>
+        new WriteLease(port(c)).run(async () => {
+          maxInFlight = Math.max(maxInFlight, ++inFlight);
+          await new Promise((r) => setTimeout(r, 5));
+          inFlight--;
+          return i;
+        }),
+      ),
+    );
+    expect(results.every((r) => r.status === "fulfilled")).toBe(true);
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("gives up with WriteBusyError after the wait and never runs the write", async () => {
+    vi.useFakeTimers();
+    const c = core();
+    await c.acquireWriteLease("other", 60_000);
     const fn = vi.fn(async () => "ran");
-    const e = await lease.run(fn).catch((x) => x);
+    const run = new WriteLease(port(c), { waitMs: 1_000 }).run(fn).catch((x) => x);
+    await vi.advanceTimersByTimeAsync(1_500);
+    const e = await run;
     expect(e).toBeInstanceOf(WriteBusyError);
     expect((e as WriteBusyError).reason).toBe("write_busy");
     expect(fn).not.toHaveBeenCalled();
-    expect(t).toBeGreaterThanOrEqual(1_000);
   });
 
-  it("is reentrant: a nested run on the same lease doesn't wait on itself", async () => {
+  it("serializes concurrent run() calls on one instance; hold() runs ops inline", async () => {
     const c = core();
-    const lease = new WriteLease(port(c), { waitMs: 100 });
-    const out = await lease.run(async () => lease.run(async () => "inner"));
-    expect(out).toBe("inner");
-    // Released once the outer run finished.
-    expect(c.acquireWriteLease("next", 1_000).granted).toBe(true);
+    const lease = new WriteLease(port(c), { waitMs: 200 });
+    const events: string[] = [];
+    let releaseA!: () => void;
+    const gate = new Promise<void>((r) => (releaseA = r));
+    const a = lease.run(async () => {
+      events.push("a:start");
+      await gate;
+      events.push("a:end");
+    });
+    const b = lease.run(async () => {
+      events.push("b");
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toEqual(["a:start"]);
+    releaseA();
+    await Promise.all([a, b]);
+    expect(events).toEqual(["a:start", "a:end", "b"]);
+    expect(await lease.hold(async (held) => held.run(async () => "inner"))).toBe("inner");
+    expect((await c.acquireWriteLease("next", 1_000)).granted).toBe(true);
   });
 
   it("releases when the write throws", async () => {
     const c = core();
     await expect(new WriteLease(port(c)).run(async () => Promise.reject(new Error("graph down")))).rejects.toThrow("graph down");
-    expect(c.acquireWriteLease("next", 1_000).granted).toBe(true);
+    expect((await c.acquireWriteLease("next", 1_000)).granted).toBe(true);
   });
 
-  it("proceeds unserialized when the index can't be reached", async () => {
+  it("proceeds unserialized only when the FIRST acquire can't reach the index", async () => {
     const down: WriteLeasePort = {
       acquireWriteLease: async () => Promise.reject(new Error("DO unavailable")),
       releaseWriteLease: vi.fn(async () => true),
     };
     expect(await new WriteLease(down).run(async () => "ran")).toBe("ran");
     expect(down.releaseWriteLease).not.toHaveBeenCalled();
+
+    // Refused once, then unreachable: never unserialized — busy at the deadline.
+    let t = 0;
+    let calls = 0;
+    const flaky: WriteLeasePort = {
+      acquireWriteLease: async () => {
+        t += 100;
+        if (++calls === 1) return { granted: false };
+        throw new Error("DO reset");
+      },
+      releaseWriteLease: async () => true,
+    };
+    const fn = vi.fn(async () => "ran");
+    const e = await new WriteLease(flaky, { waitMs: 1_000, now: () => t, sleep: async (ms) => void (t += ms) }).run(fn).catch((x) => x);
+    expect(e).toBeInstanceOf(WriteBusyError);
+    expect(fn).not.toHaveBeenCalled();
   });
 
   it("renews while a long write runs, so a waiter can't take it over", async () => {
-    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.useFakeTimers();
     vi.setSystemTime(0);
     const c = core();
     let finish!: () => void;
     const done = new Promise<void>((r) => (finish = r));
-    const run = new WriteLease(port(c), { ttlMs: 3_000 }).run(() => done);
+    const run = new WriteLease(port(c)).run(() => done);
     await vi.advanceTimersByTimeAsync(0);
-    // Well past the original 3 s TTL: still held thanks to renewal every 1 s.
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(c.acquireWriteLease("waiter", 3_000).granted).toBe(false);
+    // Well past the 10 s TTL: still held thanks to renewal every ~3 s.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect((await c.acquireWriteLease("waiter", 3_000)).granted).toBe(false);
     finish();
     await run;
-    expect(c.acquireWriteLease("waiter", 3_000).granted).toBe(true);
+    expect((await c.acquireWriteLease("waiter", 3_000)).granted).toBe(true);
   });
 });

@@ -68,7 +68,22 @@ export type LinkRulesOutcome = {
   created: LinkRuleMatch[];
   skipped: Array<{ match: LinkRuleMatch; reason: string }>;
   failed: Array<{ match: LinkRuleMatch; error: string }>;
+  // Set when the rules couldn't run at all (config read, the re-fetch of the
+  // task's links). The task write itself already succeeded.
+  error?: string;
 };
+
+// The link-rule step after a committed task write: never throws, so a failure
+// here can't turn an applied create/update into an error that invites a retry
+// (and, for a create, a duplicate task).
+async function linkRulesAfterWrite(ctx: OpsContext, listId: string, load: () => Promise<TodoTask>): Promise<LinkRulesOutcome> {
+  try {
+    return await applyLinkRules(ctx, listId, await load());
+  } catch (e) {
+    log.warn("link_rules_failed", { error: String(e) });
+    return { created: [], skipped: [], failed: [], error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 // Run the configured link rules against a task and POST the single match (if
 // any) as a linked resource. To Do allows one linked resource per task, so this
@@ -148,15 +163,17 @@ export function createTask(
     if (input.isReminderOn !== undefined) graphBody.isReminderOn = input.isReminderOn;
     if (input.categories !== undefined) graphBody.categories = input.categories;
     if (input.recurrence !== undefined) graphBody.recurrence = input.recurrence;
+    let task: TodoTask;
     try {
-      const task = await ctx.graph.postJson(tasksUrl(list_id), graphBody, TodoTaskSchema);
-      await upsertTask(ctx, task, list_id);
-      const link_rules = await applyLinkRules(ctx, list_id, task);
-      return ok({ list_id, task, link_rules });
+      task = await ctx.graph.postJson(tasksUrl(list_id), graphBody, TodoTaskSchema);
     } catch (e) {
       if (isGraphNotFound(e)) return err("list_not_found", { list_id });
       throw e;
     }
+    // Committed: nothing below may fail the op.
+    await upsertTask(ctx, task, list_id);
+    const link_rules = await linkRulesAfterWrite(ctx, list_id, async () => task);
+    return ok({ list_id, task, link_rules });
   });
 }
 
@@ -237,16 +254,9 @@ export function updateTask(
       }
     }
 
+    let task: TodoTask;
     try {
-      const task = await ctx.graph.patchJson(url, graphBody, TodoTaskSchema, { ifMatch: mainIfMatch });
-      await upsertTask(ctx, task, list_id);
-      if (input.title === undefined && input.body === undefined) return ok({ list_id, task });
-      // The PATCH response has no linkedResources; re-fetch with them so the
-      // rules see an existing link and don't add a second.
-      const expandUrl = new URL(url);
-      expandUrl.searchParams.set("$expand", "linkedResources");
-      const taskWithLinks = await ctx.graph.getJson(expandUrl.toString(), TodoTaskSchema);
-      return ok({ list_id, task, link_rules: await applyLinkRules(ctx, list_id, taskWithLinks) });
+      task = await ctx.graph.patchJson(url, graphBody, TodoTaskSchema, { ifMatch: mainIfMatch });
     } catch (e) {
       if (isGraphNotFound(e)) return err("task_not_found", { list_id, task_id });
       if (e instanceof GraphError && e.status === 412) {
@@ -258,6 +268,15 @@ export function updateTask(
       }
       throw e;
     }
+    // Committed: nothing below may fail the op.
+    await upsertTask(ctx, task, list_id);
+    if (input.title === undefined && input.body === undefined) return ok({ list_id, task });
+    // The PATCH response has no linkedResources; re-fetch with them so the
+    // rules see an existing link and don't add a second.
+    const expandUrl = new URL(url);
+    expandUrl.searchParams.set("$expand", "linkedResources");
+    const link_rules = await linkRulesAfterWrite(ctx, list_id, () => ctx.graph.getJson(expandUrl.toString(), TodoTaskSchema));
+    return ok({ list_id, task, link_rules });
   });
 }
 
@@ -389,10 +408,12 @@ async function copyThenDelete(
   { task_id, from_list_id, to_list_id }: { task_id: string; from_list_id: string; to_list_id: string },
 ): Promise<ToolResult<MoveTaskOutcome>> {
   const { graph } = ctx;
+  // The index isn't touched until the outcome is known: on success the
+  // source's row is re-keyed to the copy (so its stable id follows the task),
+  // on abort there is nothing to undo.
   let newTask: TodoTask;
   try {
     newTask = await graph.postJson(tasksUrl(to_list_id), buildMoveCopyBody(srcTask), TodoTaskSchema);
-    await upsertTask(ctx, newTask, to_list_id);
   } catch (e) {
     if (isGraphNotFound(e)) return err("list_not_found", { list_id: to_list_id });
     throw e;
@@ -405,7 +426,6 @@ async function copyThenDelete(
     let cleanup_succeeded = true;
     try {
       await graph.deleteResource(taskUrl(to_list_id, newId));
-      await deleteTaskRow(ctx, newId);
     } catch (e) {
       cleanup_succeeded = false;
       log.warn("move_fallback_cleanup_failed", { newId, error: String(e) });
@@ -460,8 +480,14 @@ async function copyThenDelete(
   // with its files.
   let attachments_copied = 0;
   if (srcTask.hasAttachments) {
-    const cfg = await loadAttachmentConfig(ctx.env);
-    const accessToken = await ctx.accessToken();
+    let cfg: Awaited<ReturnType<typeof loadAttachmentConfig>>;
+    let accessToken: string;
+    try {
+      cfg = await loadAttachmentConfig(ctx.env);
+      accessToken = await ctx.accessToken();
+    } catch (e) {
+      return abort("attachment_setup_failed", { detail: String(e), checklist_copied, linked_resources_copied });
+    }
     let srcAttachments: Attachment[];
     try {
       srcAttachments = await listAttachments(graph, from_list_id, task_id);
@@ -519,14 +545,25 @@ async function copyThenDelete(
   // Delete the source. A failure still returns success with a warning, so the
   // caller keeps the new id and can retry the delete.
   let warning: string | undefined;
+  let sourceDeleted = false;
   try {
     await graph.deleteResource(taskUrl(from_list_id, task_id));
-    await deleteTaskRow(ctx, task_id);
+    sourceDeleted = true;
   } catch (e) {
     const detail = e instanceof GraphError ? e.detail : String(e);
     warning = `Copied to destination (task_id: ${newId}) but source delete failed: ${detail ?? "unknown"}. Retry: delete_task({ list_id: "${from_list_id}", task_id: "${task_id}" }).`;
     log.warn("move_task_delete_failed", { from_list_id, task_id, detail });
   }
+
+  // Moved: re-key the source's row to the copy (its stable id and My Day
+  // fields follow), then refresh the Graph columns from the copy. The
+  // re-keyed step rows carry the source's item ids, so mark the steps for
+  // re-fetch. If the source survived, the copy is a second task with its own row.
+  if (sourceDeleted) {
+    await bestEffort("index_move_task_failed", { task_id }, () => ctx.index.moveTask(task_id, to_list_id, newId));
+    await bestEffort("index_mark_checklist_dirty_failed", { task_id: newId }, () => ctx.index.markChecklistDirty(newId));
+  }
+  await upsertTask(ctx, newTask, to_list_id);
 
   // The bare POST response had no sub-resource state; set the flags from
   // what was copied.

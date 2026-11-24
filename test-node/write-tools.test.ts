@@ -79,7 +79,9 @@ async function harness(opts: { myDay?: boolean; routes: Route[] }) {
     return { isError: res.isError ?? false, result: JSON.parse(res.content[0].text) as Record<string, unknown> };
   };
   const tasks = () => db.prepare("SELECT task_id AS id, list_id, title FROM tasks ORDER BY task_id").all();
-  return { env, core, db, calls, call, tasks };
+  const sid = (graphId: string) =>
+    (db.prepare("SELECT sid FROM entity_map WHERE kind = 'task' AND graph_id = ?").get(graphId) as { sid: string } | undefined)?.sid;
+  return { env, core, db, calls, call, tasks, sid };
 }
 
 const on = (method: string, url: string, res: (body: unknown) => Response): Route => (m, u, b) =>
@@ -123,6 +125,7 @@ describe("task write tools", () => {
       ],
     });
     expect(await h.call("update_task", { list: "L1", task_id: "T1", title: "renamed", due: null, if_match: "W/\"1\"" })).toMatchSnapshot();
+    expect(h.tasks()).toEqual([{ id: "T1", list_id: "L1", title: "renamed" }]);
     expect(await h.call("update_task", { list: "L1", task_id: "T1", importance: "low" })).toMatchSnapshot();
     expect(h.calls).toMatchSnapshot();
   });
@@ -172,9 +175,12 @@ describe("move_task", () => {
       ],
     });
     h.core.upsertTask(task("T1") as never, "L1");
+    h.core.upsertChecklistItem("T1", "L1", { id: "c1", displayName: "step" });
     expect(await h.call("move_task", { task_id: "T1", from_list: "L1", to_list: "L2" })).toMatchSnapshot();
     expect(h.calls).toMatchSnapshot();
     expect(h.tasks()).toEqual([{ id: "T1", list_id: "L2", title: "title T1" }]);
+    // The re-key moves the task's steps with it (an upsert alone would not).
+    expect(h.db.prepare("SELECT list_id FROM checklist_items WHERE item_id = 'c1'").get()).toEqual({ list_id: "L2" });
   });
 
   it("treats an ambiguous re-parent as moved when the source is gone", async () => {
@@ -211,9 +217,34 @@ describe("move_task", () => {
       ],
     });
     h.core.upsertTask(task("T1") as never, "L1");
+    const sid = h.sid("T1");
+    expect(sid).toBeTruthy();
     expect(await h.call("move_task", { task_id: "T1", from_list: "L1", to_list: "L2" })).toMatchSnapshot();
     expect(h.calls).toMatchSnapshot();
     expect(h.tasks()).toEqual([{ id: "T2", list_id: "L2", title: "title T2" }]);
+    // The copy takes over the source's stable id, and its flags reflect what was copied.
+    expect(h.sid("T2")).toBe(sid);
+    expect(h.db.prepare("SELECT has_checklist FROM tasks WHERE task_id = 'T2'").get()).toEqual({ has_checklist: 1 });
+  });
+
+  it("falls back to a copy when a re-parent is unconfirmed and carries My Day", async () => {
+    const h = await harness({
+      myDay: true,
+      routes: [
+        on("GET", `${G}/L1/tasks/T1?%24expand=checklistItems%2ClinkedResources%2Cattachments`, () => json(task("T1"))),
+        // 200 that ignored ParentFolderId: not confirmed.
+        on("PATCH", `${S}/taskfolders/L2/tasks/T1`, () => json({ Id: "T1", ParentFolderId: "L1" })),
+        on("GET", `${G}/L1/tasks/T1`, () => json(task("T1"))),
+        on("POST", `${G}/L2/tasks`, () => json(task("T2"), 201)),
+        on("GET", `${S}/taskfolders/L1/tasks/T1`, () => json({ Id: "T1", CommittedDay: "2026-11-24T00:00:00Z" })),
+        on("PATCH", `${S}/taskfolders/L2/tasks/T2`, (b) => json({ Id: "T2", ...(b as object) })),
+        on("DELETE", `${G}/L1/tasks/T1`, noContent),
+      ],
+    });
+    h.core.upsertTask(task("T1") as never, "L1");
+    const r = await h.call("move_task", { task_id: "T1", from_list: "L1", to_list: "L2" });
+    expect(r.result).toMatchObject({ ok: true, method: "copy_delete", task_id: "T2", my_day_carried: true });
+    expect(h.calls).toContainEqual({ method: "PATCH", url: `${S}/taskfolders/L2/tasks/T2`, body: { CommittedDay: "2026-11-24", PostponedDay: null } });
   });
 
   it("aborts the copy and cleans up the destination when a step copy fails", async () => {
@@ -256,11 +287,15 @@ describe("list write tools", () => {
         on("DELETE", `${G}/DEF`, () => json({ error: { code: "MethodNotAllowed" } }, 405)),
       ],
     });
+    const listName = () => (h.db.prepare("SELECT display_name FROM lists WHERE list_id = 'L9'").get() as { display_name: string } | undefined)?.display_name;
     expect(await h.call("create_list", { display_name: "Errands" })).toMatchSnapshot();
+    expect(listName()).toBe("Errands");
     expect(await h.call("update_list", { list: "L9", display_name: "Chores" })).toMatchSnapshot();
+    expect(listName()).toBe("Chores");
     expect(await h.call("update_list", { list: "NOPE", display_name: "x" })).toMatchSnapshot();
     expect(await h.call("delete_list", { list: "DEF" })).toMatchSnapshot();
     expect(await h.call("delete_list", { list: "L9" })).toMatchSnapshot();
+    expect(listName()).toBeUndefined();
     expect(h.calls).toMatchSnapshot();
   });
 });
@@ -390,5 +425,50 @@ describe("My Day and manual-order write tools", () => {
     expect(await h.call("reorder_my_day_task", { task_id: "T9", list: "L1", position: "top", date: "2026-11-24" })).toMatchSnapshot();
     expect(await h.call("reorder_my_day_task", { task_id: "T1", position: "set", committed_order: "2026-11-30T00:00:00.000Z", date: "2026-11-24" })).toMatchSnapshot();
     expect(h.calls).toMatchSnapshot();
+  });
+});
+
+describe("error mapping at the tool boundary", () => {
+  it("maps a Conditional Access claims challenge to reauth_required", async () => {
+    const claims = btoa(JSON.stringify({ access_token: { acrs: { essential: true, value: "c1" } } }));
+    const h = await harness({
+      routes: [
+        on("DELETE", `${G}/L1/tasks/T1`, () =>
+          new Response("{}", { status: 401, headers: { "www-authenticate": `Bearer error="insufficient_claims", claims="${claims}"` } }),
+        ),
+      ],
+    });
+    const r = await h.call("delete_task", { list: "L1", task_id: "T1" });
+    expect(r).toMatchObject({ isError: true, result: { ok: false, reason: "reauth_required" } });
+  });
+
+  it("maps Graph throttling past the retry budget to graph_429", async () => {
+    const h = await harness({
+      routes: [on("DELETE", `${G}/L1/tasks/T1`, () => new Response("{}", { status: 429, headers: { "retry-after": "0" } }))],
+    });
+    const r = await h.call("delete_task", { list: "L1", task_id: "T1" });
+    expect(r).toMatchObject({ isError: true, result: { ok: false, reason: "graph_429" } });
+  });
+
+  it("maps a write that never got the write lease to write_busy, without writing", async () => {
+    const h = await harness({ routes: [on("DELETE", `${G}/L1/tasks/T1`, noContent)] });
+    // Another writer holds it past the whole wait: the index answers "no" and time has run out.
+    vi.spyOn(h.core, "acquireWriteLease").mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 120_000);
+      return { granted: false };
+    });
+    const r = await h.call("delete_task", { list: "L1", task_id: "T1" });
+    expect(r).toMatchObject({ isError: true, result: { ok: false, reason: "write_busy" } });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("maps a busy lease to write_busy on the My Day tools too", async () => {
+    const h = await harness({ myDay: true, routes: [] });
+    vi.spyOn(h.core, "acquireWriteLease").mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 120_000);
+      return { granted: false };
+    });
+    const r = await h.call("remove_from_my_day", { task_id: "T1", list: "L1" });
+    expect(r).toMatchObject({ isError: true, result: { ok: false, reason: "write_busy" } });
   });
 });

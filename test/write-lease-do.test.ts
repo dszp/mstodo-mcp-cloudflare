@@ -10,13 +10,16 @@ describe("write lease on the TodoIndex Durable Object", () => {
   it("grants one holder at a time and frees on release", async () => {
     const index = ownerIndex(testAppEnv());
     expect(await index.acquireWriteLease("a", 5_000)).toMatchObject({ granted: true });
-    const refused = await index.acquireWriteLease("b", 5_000);
-    expect(refused.granted).toBe(false);
-    expect(refused.granted === false && refused.retryInMs).toBeGreaterThan(0);
+    expect(await index.acquireWriteLease("b", 5_000)).toEqual({ granted: false });
     expect(await index.releaseWriteLease("b")).toBe(false);
     expect(await index.releaseWriteLease("a")).toBe(true);
     expect(await index.acquireWriteLease("b", 5_000)).toMatchObject({ granted: true });
+    // A waiter's wait crosses RPC: it resolves when the holder releases.
+    const waiting = index.acquireWriteLease("c", 5_000, 5_000);
+    await new Promise((r) => setTimeout(r, 20));
     expect(await index.releaseWriteLease("b")).toBe(true);
+    expect(await waiting).toMatchObject({ granted: true });
+    expect(await index.releaseWriteLease("c")).toBe(true);
   });
 
   it("serializes two WriteLease runs through the stub", async () => {
