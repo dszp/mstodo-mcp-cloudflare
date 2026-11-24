@@ -1,25 +1,22 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { openDatabase } from "../src/hosts/node/sqlite-db";
 import { buildNodeEnv, type NodeEnv } from "../src/hosts/node/env";
 import { refusalDescription } from "../src/core/auth/grant";
 import { TOKENS_KEY } from "../src/core/auth/microsoft";
-import { oauthProviderOptions } from "../src/hosts/shared/oauth";
-import type { ProviderEnv } from "../src/hosts/shared/auth-handler";
+import { oauthFront } from "../src/hosts/shared/oauth";
 import type { Props } from "../src/core/types";
 import { ORIGIN, REDIRECT_URI, oauthClient, stubMicrosoft } from "./_oauth-client";
 
 // Spike (Task 9), kept as a drift guard: @cloudflare/workers-oauth-provider
-// runs on Node with the SAME provider options both hosts use
-// (oauthProviderOptions in src/hosts/shared/oauth.ts) driving OUR auth front
+// runs on Node with the SAME OAuth front both hosts use (oauthFront in
+// src/hosts/shared/oauth.ts) driving OUR auth flow
 // (consent page, Microsoft callback, OWNER_EMAIL gate, grant epoch) over
 // SQLite-backed KV and an in-process IndexCore. Only the /mcp handler differs:
 // it echoes the grant's epoch instead of serving MCP.
 
-// The env the provider and auth-handler see: the Node host's env (whose
-// OAUTH_KV type is where the compiler checks our KV against the surface the
-// library calls) plus the helpers the library injects.
-type SpikeEnv = NodeEnv & ProviderEnv;
+// The env the front sees: the Node host's env, whose OAUTH_KV type is where
+// the compiler checks our KV against the surface the library calls.
+type SpikeEnv = NodeEnv;
 
 function nodeEnv() {
   return buildNodeEnv(openDatabase(":memory:"), {
@@ -33,17 +30,15 @@ function nodeEnv() {
 }
 
 function buildProvider() {
-  return new OAuthProvider<SpikeEnv>(
-    oauthProviderOptions<SpikeEnv>({
-      origin: ORIGIN,
-      toAppEnv: (e) => e,
-      mcpHandler: {
-        async fetch(_req, _env, ctx) {
-          return Response.json({ epoch: (ctx.props as Partial<Props> | undefined)?.epoch });
-        },
+  return oauthFront<SpikeEnv>({
+    origin: ORIGIN,
+    toAppEnv: (e) => e,
+    mcpHandler: {
+      async fetch(_req, _env, ctx) {
+        return Response.json({ epoch: (ctx.props as Partial<Props> | undefined)?.epoch });
       },
-    }),
-  );
+    },
+  });
 }
 
 function harness() {
