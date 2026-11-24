@@ -39,3 +39,40 @@ export function withListSync(cfg: ListsConfig, listId: string, sync: ListSync): 
     archive: cfg.archive.filter((x) => x !== listId),
   };
 }
+
+// One change to config:lists, as data so it can cross Durable Object RPC: the
+// index applies it to the newest config it knows (IndexCore.updateListsConfig).
+// `patterns` and `no_sync` replace; `overrides` and `aliases` merge per key,
+// with null removing that key, so a caller holding an old copy of the map
+// changes only the keys it names.
+export interface ListsConfigChange {
+  patterns?: ListsConfig["patterns"];
+  overrides?: Record<string, ListSync | null>;
+  no_sync?: string[];
+  sync_flagged_emails?: boolean;
+  aliases?: Record<string, string | null>;
+  clear_aliases?: boolean;
+}
+
+// Pure. A pin also drops its list ID from the legacy arrays (withListSync), so
+// removing the pin later leaves the list to patterns rather than to a stale
+// legacy entry. Applied after `no_sync`, so a pin in the same change wins.
+export function applyListsConfigChange(cfg: ListsConfig, change: ListsConfigChange): ListsConfig {
+  let next: ListsConfig = {
+    ...cfg,
+    patterns: change.patterns ?? cfg.patterns,
+    no_sync: change.no_sync ?? cfg.no_sync,
+    sync_flagged_emails: change.sync_flagged_emails ?? cfg.sync_flagged_emails,
+    aliases: change.clear_aliases ? {} : { ...cfg.aliases },
+    overrides: { ...cfg.overrides },
+  };
+  for (const [alias, id] of Object.entries(change.aliases ?? {})) {
+    if (id === null) delete next.aliases[alias];
+    else next.aliases[alias] = id;
+  }
+  for (const [listId, sync] of Object.entries(change.overrides ?? {})) {
+    if (sync === null) delete next.overrides[listId];
+    else next = withListSync(next, listId, sync);
+  }
+  return next;
+}

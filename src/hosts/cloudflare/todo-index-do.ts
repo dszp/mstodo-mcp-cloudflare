@@ -118,6 +118,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   syncChanges(...a: Parameters<IndexCore["syncChanges"]>) { return this.#core.syncChanges(...a); }
   syncInfo(...a: Parameters<IndexCore["syncInfo"]>) { return this.#core.syncInfo(...a); }
   refreshListSync(...a: Parameters<IndexCore["refreshListSync"]>) { return this.#core.refreshListSync(...a); }
+  updateListsConfig(...a: Parameters<IndexCore["updateListsConfig"]>) { return this.#core.updateListsConfig(...a); }
   excludedLists(...a: Parameters<IndexCore["excludedLists"]>) { return this.#core.excludedLists(...a); }
   syncSearch(...a: Parameters<IndexCore["syncSearch"]>) { return this.#core.syncSearch(...a); }
   syncTask(...a: Parameters<IndexCore["syncTask"]>) { return this.#core.syncTask(...a); }

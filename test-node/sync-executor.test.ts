@@ -181,38 +181,30 @@ describe("completion", () => {
 
 describe("list.update sync (docs/SYNC-API.md section 1.2)", () => {
   function syncCtx() {
-    const kv = new Map<string, string>();
     const patchJson = vi.fn(async () => ({ id: "L1", displayName: "renamed" }));
-    const refreshListSync = vi.fn(async () => ({ changed: 1 }));
+    const updateListsConfig = vi.fn(async () => ({}));
     const ctx = {
-      env: {
-        TIMEZONE: "UTC",
-        TODO_CACHE: {
-          get: async (k: string) => (kv.has(k) ? JSON.parse(kv.get(k)!) : null),
-          put: async (k: string, v: string) => void kv.set(k, v),
-        },
-      },
+      env: { TIMEZONE: "UTC" },
       graph: { patchJson },
-      index: { refreshListSync, upsertList: async () => {} },
+      index: { updateListsConfig, upsertList: async () => {} },
       writes: { run: (fn: () => Promise<unknown>) => fn() },
     } as unknown as OpsContext;
-    return { ctx, kv, patchJson, refreshListSync };
+    return { ctx, patchJson, updateListsConfig };
   }
   const update = (fields: Record<string, unknown>): ExecInput => ({ ...listUpdate, fields });
 
-  it("pins the setting in config:lists, skips Graph, and applies it in the index", async () => {
+  it("pins the setting through the index's config write path and skips Graph", async () => {
     const h = syncCtx();
     expect(await syncExecutor(h.ctx)(update({ sync: "excluded" }))).toEqual({ ok: true, graphId: "L1" });
-    expect(JSON.parse(h.kv.get("config:lists")!).overrides).toEqual({ L1: "excluded" });
+    expect(h.updateListsConfig).toHaveBeenCalledExactlyOnceWith({ overrides: { L1: "excluded" } });
     expect(h.patchJson).not.toHaveBeenCalled();
-    expect(h.refreshListSync).toHaveBeenCalledOnce();
   });
 
   it("renames and sets the setting in one mutation", async () => {
     const h = syncCtx();
     expect(await syncExecutor(h.ctx)(update({ name: "renamed", sync: "reference" }))).toEqual({ ok: true, graphId: "L1" });
     expect(h.patchJson).toHaveBeenCalledOnce();
-    expect(JSON.parse(h.kv.get("config:lists")!).overrides).toEqual({ L1: "reference" });
+    expect(h.updateListsConfig).toHaveBeenCalledExactlyOnceWith({ overrides: { L1: "reference" } });
   });
 
   it.each([
@@ -222,6 +214,6 @@ describe("list.update sync (docs/SYNC-API.md section 1.2)", () => {
   ])("rejects %s", async (_label, fields, error) => {
     const h = syncCtx();
     expect(await syncExecutor(h.ctx)(update(fields))).toEqual({ ok: false, error, retry: false, rejected: true });
-    expect(h.refreshListSync).not.toHaveBeenCalled();
+    expect(h.updateListsConfig).not.toHaveBeenCalled();
   });
 });

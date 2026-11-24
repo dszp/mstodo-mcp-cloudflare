@@ -46,9 +46,9 @@ import {
   type TodoTask,
   type TodoTaskList,
 } from "../graph/types";
-import { loadAttachmentConfig, loadLinkRules, loadListsConfig, storeAttachmentConfig, storeLinkRules, storeListsConfig } from "../config/loader";
+import { loadAttachmentConfig, loadLinkRules, loadListsConfig, storeAttachmentConfig, storeLinkRules } from "../config/loader";
 import { runLinkRules, type LinkRuleMatch } from "../config/link-rules-engine";
-import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema, ListsConfigSchema } from "../config/schemas";
+import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema } from "../config/schemas";
 import { classifyList, pinClassifications, stripEmoji } from "../config/classifier";
 import { resolveListId } from "../config/aliases";
 import { patternProblem } from "../config/regex-safety";
@@ -650,10 +650,15 @@ class ToDoTools implements TokenProvider {
               config,
             );
             if (added > 0) {
-              config = { ...config, overrides };
-              await storeListsConfig(this.ctx.env, config).catch((e) =>
-                log.warn("list_pin_persist_failed", { error: String(e) }),
-              );
+              // Write only the new pins (overrides merge per key), so a pin
+              // another writer set meanwhile isn't reverted.
+              const pins = Object.fromEntries(Object.entries(overrides).filter(([id]) => !config.overrides[id]));
+              config = await this.#index()
+                .updateListsConfig({ overrides: pins })
+                .catch((e) => {
+                  log.warn("list_pin_persist_failed", { error: String(e) });
+                  return { ...config, overrides };
+                });
             }
           }
 
@@ -2144,8 +2149,9 @@ class ToDoTools implements TokenProvider {
           "Update list config. Omitted fields are preserved (not reset). A list's class is also its sync " +
           "setting: todo = mirrored with live updates; reference = mirrored on a slower cadence, no live " +
           "updates; excluded = not mirrored (still listed and readable live). Unclassified lists sync as todo. " +
-          "`overrides` replaces the ID-pinned class map (Graph list ID → class); a pin wins over everything " +
-          "else and survives renames, so set a list's class here. `patterns` replaces the name-pattern list " +
+          "`overrides` sets ID pins (Graph list ID → class), merged key by key: listed keys are set, null " +
+          "removes a pin, unlisted pins stay. A pin wins over everything else and survives renames, so set a " +
+          "list's class here. `patterns` replaces the name-pattern list " +
           "(pass [] to clear; first match wins, emoji stripped, each must be valid JS RegExp); list_lists " +
           "auto-pins newly name-matched lists. `no_sync` (legacy) marks lists excluded by wellknownListName or " +
           "Graph list ID, below pins. `sync_flagged_emails` makes the flaggedEmails list default to reference " +
@@ -2159,12 +2165,12 @@ class ToDoTools implements TokenProvider {
               "(RegExp source), flags (default 'i'), type ('todo' | 'reference' | 'excluded').",
             ),
           overrides: z
-            .record(z.string().min(1), z.enum(["todo", "reference", "excluded"]))
+            .record(z.string().min(1), z.enum(["todo", "reference", "excluded"]).nullable())
             .optional()
             .describe(
-              "Full replacement map of Graph list ID → class (omit to leave unchanged; {} to clear all pins). " +
-              "Pinned classes win over name patterns and survive renames. Dropping a key reverts that list to " +
-              "pattern-based — it will re-pin from patterns on the next list_lists.",
+              "Pins to change, Graph list ID → class, merged into the existing pins: only the listed lists " +
+              "change. Pass null for a list to remove its pin, which reverts it to pattern-based (it re-pins " +
+              "from patterns on the next list_lists). Pinned classes win over name patterns and survive renames.",
             ),
           no_sync: z
             .array(z.string().min(1))
@@ -2198,21 +2204,9 @@ class ToDoTools implements TokenProvider {
             }
           }
 
-          const existing = await loadListsConfig(this.ctx.env);
-          const config = ListsConfigSchema.parse({
-            patterns: patterns ?? existing.patterns,
-            aliases: existing.aliases,
-            overrides: overrides ?? existing.overrides,
-            no_sync: no_sync ?? existing.no_sync,
-            archive: existing.archive,
-            sync_flagged_emails: sync_flagged_emails ?? existing.sync_flagged_emails,
-          });
-          await storeListsConfig(this.ctx.env, config);
-          // Apply the sync settings now (purge an excluded list, re-baseline a
-          // re-included one) instead of waiting for the next cycle.
-          await this.#index()
-            .refreshListSync()
-            .catch((e) => log.warn("index_refresh_list_sync_failed", { error: String(e) }));
+          // The index writes config:lists and applies the sync settings at once
+          // (purge an excluded list, re-baseline a re-included one).
+          const config = await this.#index().updateListsConfig({ patterns, overrides, no_sync, sync_flagged_emails });
           return {
             content: [
               {
@@ -2283,17 +2277,9 @@ class ToDoTools implements TokenProvider {
             });
           }
 
-          const existing = await loadListsConfig(this.ctx.env);
-          const updatedAliases = { ...existing.aliases, [alias]: match.list_id };
-          // Preserve no_sync / sync_flagged_emails — omitting them here would let
-          // Zod re-apply their defaults and silently wipe the user's sync policy.
-          const config = ListsConfigSchema.parse({
-            patterns: existing.patterns,
-            aliases: updatedAliases,
-            no_sync: existing.no_sync,
-            sync_flagged_emails: existing.sync_flagged_emails,
-          });
-          await storeListsConfig(this.ctx.env, config);
+          // Through the index's config write path, which changes only this
+          // alias and keeps every other field (pins included) as stored.
+          await this.#index().updateListsConfig({ aliases: { [alias]: match.list_id } });
           return {
             content: [
               {

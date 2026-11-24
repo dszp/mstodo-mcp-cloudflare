@@ -2,8 +2,7 @@ import { GraphError } from "../graph/client";
 import { TodoTaskListSchema, type TodoTaskList } from "../graph/types";
 import { bestEffort, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { err, ok, type ToolResult } from "./result";
-import { loadListsConfig, storeListsConfig } from "../config/loader";
-import { withListSync, type ListSync } from "../config/sync-policy";
+import type { ListSync } from "../config/sync-policy";
 
 // list.create / list.update / list.delete (docs/SYNC-API.md section 5.2).
 
@@ -69,16 +68,14 @@ export function updateList(
 
 // A list's sync setting (docs/SYNC-API.md section 1.2). It lives in
 // config:lists, not in Microsoft To Do, so nothing goes to Graph. The index
-// applies it at once: an excluded list's tasks leave the feed as deletion
-// records, and a list switched back on is baselined again.
+// writes it and applies it at once: an excluded list's tasks leave the feed
+// as deletion records, and a list switched back on is baselined again.
 export function setListSync(
   ctx: OpsContext,
   input: { list_id: string; sync: ListSync },
 ): Promise<ToolResult<{ list_id: string; sync: ListSync }>> {
   return ctx.writes.run(async () => {
-    const cfg = await loadListsConfig(ctx.env);
-    await storeListsConfig(ctx.env, withListSync(cfg, input.list_id, input.sync));
-    await ctx.index.refreshListSync();
+    await ctx.index.updateListsConfig({ overrides: { [input.list_id]: input.sync } });
     return ok({ list_id: input.list_id, sync: input.sync });
   });
 }

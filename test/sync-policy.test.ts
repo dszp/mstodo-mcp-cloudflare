@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isArchiveList, listSync, shouldSkipSync, withListSync } from "../src/core/config/sync-policy";
+import { applyListsConfigChange, isArchiveList, listSync, shouldSkipSync, withListSync } from "../src/core/config/sync-policy";
 import { pinClassifications } from "../src/core/config/classifier";
 import { ListsConfigSchema } from "../src/core/config/schemas";
 
@@ -69,5 +69,31 @@ describe("pinClassifications", () => {
       c,
     );
     expect(overrides).toEqual({ L3: "todo" });
+  });
+});
+
+describe("applyListsConfigChange", () => {
+  const base = cfg({
+    patterns: [{ pattern: "^A", type: "todo" }],
+    aliases: { a: "L1", b: "L2" },
+    overrides: { L1: "todo", L2: "reference" },
+    no_sync: ["L3", "flaggedEmails"],
+    archive: ["L4"],
+  });
+
+  it("merges pins per key and null removes one", () => {
+    expect(applyListsConfigChange(base, { overrides: { L1: "excluded", L2: null } }).overrides).toEqual({ L1: "excluded" });
+  });
+
+  it("a pin drops its list from the legacy arrays, even when no_sync is replaced in the same change", () => {
+    const next = applyListsConfigChange(base, { no_sync: ["L3", "L4"], overrides: { L3: "todo", L4: "todo" } });
+    expect(next.no_sync).toEqual([]);
+    expect(next.archive).toEqual([]);
+  });
+
+  it("merges and clears aliases, and leaves unnamed fields as they were", () => {
+    expect(applyListsConfigChange(base, { aliases: { a: null, c: "L3" } }).aliases).toEqual({ b: "L2", c: "L3" });
+    expect(applyListsConfigChange(base, { clear_aliases: true }).aliases).toEqual({});
+    expect(applyListsConfigChange(base, {})).toEqual(base);
   });
 });

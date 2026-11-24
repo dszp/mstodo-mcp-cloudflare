@@ -4,6 +4,7 @@ import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
 import { IndexCore } from "../src/core/index/index-core";
 import { runListSyncChecks } from "../test/_list-sync-checks";
+import { runListSyncCycleChecks } from "../test/_list-sync-cycle-checks";
 
 function memoryKv() {
   const m = new Map<string, string>();
@@ -21,5 +22,15 @@ describe("list sync setting (node)", async () => {
   const c = new IndexCore({ sql: sqlDb(db), transact: transactor(db), state, alarms: state, env });
   c.bootstrap();
   const r = await runListSyncChecks(c, env);
+  for (const [name, ok] of Object.entries(r)) it(name, () => expect(ok).toBe(true));
+});
+
+describe("list sync setting in the sync cycle (node)", async () => {
+  const db = openDatabase(":memory:");
+  const state = stateStore(db);
+  const env = { TIMEZONE: "UTC", OWNER_EMAIL: "o@example.com", MS_CLIENT_SECRET: "test-secret", TODO_CACHE: memoryKv() } as never;
+  const c = new IndexCore({ sql: sqlDb(db), transact: transactor(db), state, alarms: state, env });
+  c.bootstrap();
+  const r = await runListSyncCycleChecks(c, env, () => state.getAlarm());
   for (const [name, ok] of Object.entries(r)) it(name, () => expect(ok).toBe(true));
 });

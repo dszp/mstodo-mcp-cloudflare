@@ -44,9 +44,16 @@ import {
 } from "./sql";
 import { applyMigrations } from "./migrations";
 import { changesSince, currentCursor, taskBySid, taskSids, type FeedResult } from "./change-feed";
-import { loadListsConfig } from "../config/loader";
-import type { ListsConfig } from "../config/schemas";
-import { isArchiveList, listSync, shouldSkipSync, type ListSync } from "../config/sync-policy";
+import { loadListsConfig, storeListsConfig } from "../config/loader";
+import { ListsConfigSchema, type ListsConfig } from "../config/schemas";
+import {
+  applyListsConfigChange,
+  isArchiveList,
+  listSync,
+  shouldSkipSync,
+  type ListsConfigChange,
+  type ListSync,
+} from "../config/sync-policy";
 import {
   taskSubscriptionsEnabled,
   webhookUrl,
@@ -237,6 +244,10 @@ export interface SubscriptionStatus {
 // DO-storage keys for the MCP grant epoch and the re-auth flag (see authState).
 const AUTH_EPOCH_KEY = "auth:epoch";
 const REAUTH_KEY = "auth:reauth";
+// The pending lists config (refreshListSync) and how long it outranks KV:
+// KV's 60 s worst-case staleness after a write, plus margin.
+const PENDING_LISTS_CONFIG_KEY = "config:lists:pending";
+const LISTS_CONFIG_PENDING_MS = 90_000;
 
 export class IndexCore implements TokenProvider {
   readonly #sql: SqlDb;
@@ -250,8 +261,14 @@ export class IndexCore implements TokenProvider {
   readonly #notifier: ChangeNotifier | null;
   // The highest change-log seq announced to push clients.
   #announcedSeq = -1;
-  // Lists named by webhooks since the last sync cycle; synced first.
+  // Lists named by webhooks, or whose sync setting just changed, since the
+  // last sync cycle; synced first.
   #hotLists = new Set<string>();
+  // The last lists config handed to refreshListSync (see there). undefined
+  // until read back from storage.
+  #pendingListsConfig: { cfg: ListsConfig; at: number } | null | undefined = undefined;
+  // Serializes updateListsConfig.
+  #configChain: Promise<void> = Promise.resolve();
 
   constructor(deps: {
     sql: SqlDb;
@@ -1000,20 +1017,76 @@ export class IndexCore implements TokenProvider {
     return changed;
   }
 
-  // Apply config:lists now rather than at the next cycle: record every list's
-  // setting, drop the mirrored rows of a list that became excluded (its tasks
-  // leave the feed as deletion records), and start a cycle when a list came
-  // back from excluded, so its baseline brings the tasks back under their old
-  // sids. Called after any config:lists write (set_list_config, list.update).
-  async refreshListSync(): Promise<{ changed: number }> {
-    const cfg = await loadListsConfig(this.#env);
+  // Apply a lists config now rather than at the next cycle: record every
+  // list's setting, drop the mirrored rows of a list that became excluded (its
+  // tasks leave the feed as deletion records), and sync the changed lists
+  // first in a cycle that starts now, so a list switched back on is baselined
+  // at once and its tasks come back under their old sids.
+  //
+  // The caller hands over the config it just wrote instead of this re-reading
+  // KV: a KV read can serve the previous value for up to 60 s after a write.
+  // For the same reason the config is kept here as pending, and #listsConfig()
+  // prefers it to KV for LISTS_CONFIG_PENDING_MS, so the next sync cycle can't
+  // read the old value and flip the setting back (purging or re-baselining a
+  // list for nothing). Past that window KV has caught up and is read again.
+  async refreshListSync(cfg: ListsConfig): Promise<{ changed: number }> {
+    // Set in memory before any await, so a cycle that is reading KV right now
+    // sees it when its read returns.
+    const pending = { cfg, at: Date.now() };
+    this.#pendingListsConfig = pending;
+    await this.#state.put(PENDING_LISTS_CONFIG_KEY, pending);
     const changed = this.#transact(() => {
       const c = this.#storeListSync(this.listLists(), cfg);
       for (const x of c) if (x.to === "excluded") this.#purgeSkippedList(x.list_id);
       return c;
     });
-    if (changed.some((x) => x.from === "excluded" || x.to === "excluded")) await this.#alarms.setAlarm(Date.now() + 1);
+    // Hot lists also make alarm() re-arm at once when this lands mid-cycle,
+    // instead of being pushed back a whole interval by the cycle's own re-arm.
+    for (const x of changed) this.#hotLists.add(x.list_id);
+    if (changed.length > 0) await this.#alarms.setAlarm(Date.now() + 1);
     return { changed: changed.length };
+  }
+
+  // The one write path for config:lists (set_list_config, set_list_alias,
+  // list_lists pinning, the app's list.update and list.create): read, apply
+  // the change, write, apply the result here. Running it in the index
+  // serializes the writers, and the base is the pending config when it is
+  // newer than what KV may still serve, so one writer can't revert another's
+  // change with a stale read.
+  updateListsConfig(change: ListsConfigChange): Promise<ListsConfig> {
+    const run = async () => {
+      const base = await this.#listsConfig();
+      const next = ListsConfigSchema.parse(applyListsConfigChange(base, change));
+      await storeListsConfig(this.#env, next);
+      await this.refreshListSync(next);
+      return next;
+    };
+    const p = this.#configChain.then(run, run);
+    this.#configChain = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    return p;
+  }
+
+  // config:lists as this index should act on it: KV, unless a config handed
+  // to refreshListSync is recent enough that KV may not show it yet.
+  async #listsConfig(): Promise<ListsConfig> {
+    const kv = await loadListsConfig(this.#env);
+    if (this.#pendingListsConfig === undefined) {
+      const stored = (await this.#state.get<{ cfg: ListsConfig; at: number }>(PENDING_LISTS_CONFIG_KEY)) ?? null;
+      // refreshListSync may have run during the read; its value is newer.
+      if (this.#pendingListsConfig === undefined) this.#pendingListsConfig = stored;
+    }
+    const p = this.#pendingListsConfig;
+    return p && Date.now() - p.at < LISTS_CONFIG_PENDING_MS ? ListsConfigSchema.parse(p.cfg) : kv;
+  }
+
+  // The list's stored setting is excluded. Read from the row each time, not
+  // from a config captured earlier, since refreshListSync can change it while
+  // a sync cycle is waiting on Graph.
+  #isExcluded(listId: string): boolean {
+    return this.#sql.exec("SELECT 1 FROM lists WHERE list_id = ? AND sync = 'excluded'", listId).toArray().length > 0;
   }
 
   // Excluded lists, which the feed never carries, so the app can offer to
@@ -1103,7 +1176,7 @@ export class IndexCore implements TokenProvider {
 
     // Which lists SHOULD have a subscription: todo lists. Reference lists sync
     // on the timer only, and excluded lists aren't mirrored (section 1.2).
-    const cfg = await loadListsConfig(this.#env);
+    const cfg = await this.#listsConfig();
     const rosterRows = this.listLists();
     const wanted = new Set(rosterRows.filter((l) => listSync(l, cfg) === "todo").map((l) => l.list_id));
 
@@ -1235,7 +1308,7 @@ export class IndexCore implements TokenProvider {
   async subscriptionStatus(opts: { includeRaw?: boolean } = {}): Promise<SubscriptionStatus> {
     const enabled = taskSubscriptionsEnabled(this.#env);
     const url = webhookUrl(this.#env);
-    const cfg = await loadListsConfig(this.#env);
+    const cfg = await this.#listsConfig();
     const wanted = new Set(this.listLists().filter((l) => listSync(l, cfg) === "todo").map((l) => l.list_id));
     const records = this.getSubscriptions();
     const recByList = new Set(records.map((r) => r.list_id));
@@ -2041,7 +2114,7 @@ export class IndexCore implements TokenProvider {
     totals: { tasks: number; lists: number; all_idle: boolean };
     notifications: WebhookHealth;
   }> {
-    const cfg = await loadListsConfig(this.#env);
+    const cfg = await this.#listsConfig();
 
     const stateRows = this.#sql
       .exec("SELECT * FROM sync_state")
@@ -2504,13 +2577,15 @@ export class IndexCore implements TokenProvider {
 
     // Load the per-list sync policy once per cycle (a cheap KV read alongside the
     // existing network I/O). Drives both the skip set and self-heal purge below.
-    const cfg = await loadListsConfig(this.#env);
+    const cfg = await this.#listsConfig();
     const rosterRows = this.listLists();
     const settingOf = (listId: string): ListSync =>
       listSync(rosterRows.find((l) => l.list_id === listId) ?? { list_id: listId, wellknown: null }, cfg);
-    const skip = (listId: string): boolean => settingOf(listId) === "excluded";
     // Record each list's setting on its row, where the change feed reads it.
     this.#storeListSync(rosterRows, cfg);
+    // From here on the row is the setting: refreshListSync can change it while
+    // this cycle waits on Graph, so every later check reads it again.
+    const skip = (listId: string): boolean => this.#isExcluded(listId);
 
     // 2. Self-heal: purge any indexed rows / sync_state left behind for a list
     //    that is now skipped (added to no_sync, or flaggedEmails before this
@@ -2617,8 +2692,13 @@ export class IndexCore implements TokenProvider {
     const isBaseline = !st?.next_link && !st?.delta_link;
     const graph = new GraphClient(this);
 
+    // A list excluded while its pages were in flight (refreshListSync purged
+    // it): drop what came back and leave no sync state, or the rows and a
+    // fresh cursor would bring the list back into the mirror.
+    const excludedNow = () => resource.startsWith("tasks:") && this.#isExcluded(resource.slice("tasks:".length));
     try {
       const res = await followToTerminal(graph, startUrl, Math.max(1, maxPages));
+      if (excludedNow()) return { pagesFetched: res.pagesFetched, midCycle: false };
       this.#applyRows(resource, res.rows);
       if (res.deltaLink) {
         this.#finishSweep(resource);
@@ -2644,6 +2724,7 @@ export class IndexCore implements TokenProvider {
       }
       return { pagesFetched: res.pagesFetched, midCycle: !!res.nextLink };
     } catch (e) {
+      if (excludedNow()) return { pagesFetched: 1, midCycle: false };
       if (e instanceof GraphError && e.status === 410) {
         // Delta token expired (~30d). Re-baseline with mark and sweep: rows
         // stay served, and those the new baseline doesn't return are removed
@@ -2925,7 +3006,7 @@ export class IndexCore implements TokenProvider {
 
     // Flagged email gets no sub-resource fetch at all; other archive lists get
     // it for open tasks only (sections 1.2, 18.7a).
-    const cfg = await loadListsConfig(this.#env);
+    const cfg = await this.#listsConfig();
     const lists = this.listLists();
     const skipIds = lists
       .filter((l) => skip(l.list_id) || l.wellknown === "flaggedEmails")
