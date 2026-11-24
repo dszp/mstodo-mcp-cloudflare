@@ -16,6 +16,13 @@ import { log } from "../log";
 //
 // The bytes never touch the model: they arrive at /upload from the browser and
 // are streamed on to Graph here within the same request.
+//
+// Graph can answer 500 generalException on a write that did or did not land.
+// Observed 2026-11-24 on a work account: every inline POST failed with nothing
+// stored, and every upload session's final PUT returned 500 although the
+// attachment was stored. So attachFile snapshots the task's attachment ids
+// first, and on a 5xx looks for a new attachment with the same name before it
+// reports failure (or, for inline, before it retries through a session).
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
@@ -213,9 +220,12 @@ async function sessionAttach(
       start = next !== null ? next : end + 1;
       continue;
     }
-    // Anything else: release the session and surface a typed error.
+    // Anything else: surface a typed error. A 5xx on the final range can come
+    // back after Graph stored the attachment (attachFile checks for that), so
+    // leave that session alone; it expires on its own. Otherwise release it.
     const detail = await res.text().catch(() => "");
-    await cancelSession(session.uploadUrl, accessToken);
+    const finalRange = end === total - 1;
+    if (!(finalRange && res.status >= 500)) await cancelSession(session.uploadUrl, accessToken);
     throw new GraphError(res.status, `graph_${res.status}`, detail.slice(0, 500));
   }
 
@@ -235,18 +245,76 @@ async function cancelSession(uploadUrl: string, accessToken: string): Promise<vo
   }
 }
 
+/** Ids of every attachment on the task, or null if the task can't be listed. */
+async function attachmentIds(graph: GraphClient, listId: string, taskId: string): Promise<Set<string> | null> {
+  try {
+    const result = await graph.getAllPages(attachmentsUrl(listId, taskId), AttachmentSchema);
+    return result.status === 200 ? new Set(result.items.map((a) => a.id)) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * After a Graph 5xx, find an attachment named `args.name` that was not on the
+ * task before the attempt. Returns its id, or null if none landed (or the task
+ * can't be listed).
+ */
+async function findLanded(
+  graph: GraphClient,
+  args: AttachArgs,
+  before: Set<string>,
+): Promise<string | null> {
+  try {
+    const result = await graph.getAllPages(attachmentsUrl(args.listId, args.taskId), AttachmentSchema);
+    if (result.status !== 200) return null;
+    const hit = result.items.find((a) => !before.has(a.id) && a.name === args.name);
+    return hit?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+const isServerError = (e: unknown): e is GraphError => e instanceof GraphError && e.status >= 500;
+
 /**
  * Attach a file to a To Do task, choosing the inline or upload-session path by
  * size. Throws GraphError on a Graph failure (mapped by the caller). The caller
  * must enforce PER_FILE_MAX_BYTES before calling.
+ *
+ * A Graph 5xx is not taken at its word (see the header comment): if the
+ * attachment landed anyway, the upload succeeds; if an inline POST failed and
+ * nothing landed, the file is sent again through an upload session. Without a
+ * readable "before" snapshot neither recovery runs, since a same-named older
+ * attachment could not be told apart from the new one.
  */
 export async function attachFile(
   graph: GraphClient,
   accessToken: string,
   args: AttachArgs,
 ): Promise<UploadResult> {
+  const before = await attachmentIds(graph, args.listId, args.taskId);
+  const landed = (via: UploadResult["via"], id: string, status: number): UploadResult => {
+    log.warn("upload_graph_5xx_but_stored", { task_id: args.taskId, via, status });
+    return { attachment_id: id, name: args.name, size: args.bytes.byteLength, content_type: args.contentType, via };
+  };
+
   if (args.bytes.byteLength <= args.maxInlineBytes) {
-    return inlineAttach(graph, args);
+    try {
+      return await inlineAttach(graph, args);
+    } catch (e) {
+      if (!isServerError(e) || !before) throw e;
+      const id = await findLanded(graph, args, before);
+      if (id) return landed("inline", id, e.status);
+      log.warn("upload_inline_5xx_retry_session", { task_id: args.taskId, status: e.status });
+    }
   }
-  return sessionAttach(graph, accessToken, args);
+  try {
+    return await sessionAttach(graph, accessToken, args);
+  } catch (e) {
+    if (!isServerError(e) || !before) throw e;
+    const id = await findLanded(graph, args, before);
+    if (id) return landed("session", id, e.status);
+    throw e;
+  }
 }
