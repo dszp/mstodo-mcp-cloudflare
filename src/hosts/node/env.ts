@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { AppEnv, IndexBackend } from "../../core/ports";
 import { IndexCore } from "../../core/index/index-core";
-import { sqlDb } from "./sqlite-db";
+import { sqlDb, transactor } from "./sqlite-db";
 import { sqliteKv, type OAuthKvStore } from "./sqlite-kv";
 import { stateStore } from "./state-store";
 
@@ -92,7 +92,7 @@ export function buildNodeEnv(db: DatabaseSync, vars: Record<string, string | und
     OAUTH_KV: sqliteKv(db, "OAUTH_KV"),
     ownerIndex: () => backend,
   };
-  const core = new IndexCore({ sql: sqlDb(db), state, alarms: state, env });
+  const core = new IndexCore({ sql: sqlDb(db), transact: transactor(db), state, alarms: state, env });
   backend = indexBackend(core);
   core.bootstrap();
   return { env, core, state };

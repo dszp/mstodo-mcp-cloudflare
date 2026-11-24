@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import type { SqlDb, SqlValue } from "../../core/ports";
+import type { SqlDb, SqlValue, Transact } from "../../core/ports";
 
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
@@ -16,6 +16,24 @@ export function openDatabase(path: string): DatabaseSync {
     "PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
   );
   return db;
+}
+
+// The Transact port (see core/ports.ts) over one connection. A savepoint
+// rather than BEGIN, so it composes with any transaction node:sqlite or a
+// caller already opened.
+export function transactor(db: DatabaseSync): Transact {
+  return <T>(fn: () => T): T => {
+    db.exec("SAVEPOINT tx");
+    try {
+      const out = fn();
+      db.exec("RELEASE tx");
+      return out;
+    } catch (e) {
+      db.exec("ROLLBACK TO tx");
+      db.exec("RELEASE tx");
+      throw e;
+    }
+  };
 }
 
 // node:sqlite binds Uint8Array, not ArrayBuffer.

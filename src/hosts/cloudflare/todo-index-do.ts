@@ -15,7 +15,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.#core = new IndexCore({ sql: ctx.storage.sql, state: ctx.storage, alarms: ctx.storage, env: appEnv(env) });
+    this.#core = new IndexCore({ sql: ctx.storage.sql, transact: (fn) => ctx.storage.transactionSync(fn), state: ctx.storage, alarms: ctx.storage, env: appEnv(env) });
     // Runs once per instance before any request is delivered.
     ctx.blockConcurrencyWhile(async () => this.#core.bootstrap());
   }
@@ -47,6 +47,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   markChecklistDirty(...a: Parameters<IndexCore["markChecklistDirty"]>) { return this.#core.markChecklistDirty(...a); }
   markMyDayUnavailable(...a: Parameters<IndexCore["markMyDayUnavailable"]>) { return this.#core.markMyDayUnavailable(...a); }
   markReauthRequired(...a: Parameters<IndexCore["markReauthRequired"]>) { return this.#core.markReauthRequired(...a); }
+  moveTask(...a: Parameters<IndexCore["moveTask"]>) { return this.#core.moveTask(...a); }
   onChangeNotification(...a: Parameters<IndexCore["onChangeNotification"]>) { return this.#core.onChangeNotification(...a); }
   onLifecycleEvent(...a: Parameters<IndexCore["onLifecycleEvent"]>) { return this.#core.onLifecycleEvent(...a); }
   putSubscription(...a: Parameters<IndexCore["putSubscription"]>) { return this.#core.putSubscription(...a); }
