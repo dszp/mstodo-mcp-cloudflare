@@ -312,6 +312,24 @@ const MIGRATIONS: Migration[] = [
         JOIN entity_map m ON m.kind = 'task' AND m.graph_id = t.task_id`);
     },
   },
+  {
+    version: 6,
+    apply: (sql) => {
+      // docs/SYNC-API.md section 3.3: a resync or an expired delta token
+      // re-baselines without emptying the list first. sync_state.sweep_gen marks
+      // a baseline in progress; every row the baseline (or a write-through during
+      // it) touches is stamped with that generation, and rows left unstamped are
+      // deleted when the baseline completes. baseline_gen isn't in v5's trigger
+      // column lists, so stamping it logs nothing.
+      const addColumn = (table: string, column: string) => {
+        const cols = sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray();
+        if (!cols.some((c) => c.name === column)) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} INTEGER`);
+      };
+      addColumn("tasks", "baseline_gen");
+      addColumn("lists", "baseline_gen");
+      addColumn("sync_state", "sweep_gen");
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

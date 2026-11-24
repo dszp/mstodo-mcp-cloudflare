@@ -482,6 +482,18 @@ export class IndexCore implements TokenProvider {
   upsertTask(task: TodoTask, listId: string): void {
     const row = taskToRow(task, listId);
     this.#sql.exec(UPSERT_TASK_SQL, ...TASK_COLUMNS.map((c) => row[c]));
+    this.#stampTask(task.id);
+  }
+
+  // While its list is re-baselining, mark a task as seen by this baseline so
+  // the sweep keeps it. Covers delta rows and write-throughs alike (section
+  // 3.3). A no-op when no baseline is in progress.
+  #stampTask(taskId: string): void {
+    this.#sql.exec(
+      `UPDATE tasks SET baseline_gen = s.sweep_gen FROM sync_state s
+        WHERE tasks.task_id = ? AND s.resource = 'tasks:' || tasks.list_id AND s.sweep_gen IS NOT NULL`,
+      taskId,
+    );
   }
 
   deleteTask(taskId: string): void {
@@ -528,6 +540,7 @@ export class IndexCore implements TokenProvider {
         }
         this.#sql.exec("UPDATE tasks SET task_id = ?, list_id = ? WHERE task_id = ?", to, toListId, taskId);
       }
+      this.#stampTask(to);
       this.#sql.exec(
         "UPDATE checklist_items SET task_id = ?, list_id = ? WHERE task_id = ?",
         to,
@@ -767,6 +780,10 @@ export class IndexCore implements TokenProvider {
       r.wellknown,
       r.is_owner,
       r.is_shared,
+    );    this.#sql.exec(
+      `UPDATE lists SET baseline_gen = s.sweep_gen FROM sync_state s
+        WHERE lists.list_id = ? AND s.resource = 'lists' AND s.sweep_gen IS NOT NULL`,
+      r.list_id,
     );
   }
 
@@ -1777,15 +1794,63 @@ export class IndexCore implements TokenProvider {
   // arm the alarm now. Manual twin of the 410 path. Note: if the target list is
   // skipped (no_sync / built-in flaggedEmails), the next cycle won't re-baseline
   // it, so resync on a skipped list is effectively just a purge.
+  // Re-baseline one list, or the roster and every list, without emptying
+  // anything first: rows stay served while the baseline runs, and rows it
+  // doesn't return are deleted when it completes (section 3.3).
   async resync(listId?: string): Promise<void> {
     if (listId) {
-      this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
-      this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
+      this.#beginSweep(`tasks:${listId}`);
     } else {
-      this.#sql.exec("DELETE FROM tasks");
-      this.#sql.exec("DELETE FROM sync_state"); // roster + every list re-baseline
+      this.#beginSweep("lists");
+      for (const l of this.listLists()) this.#beginSweep(`tasks:${l.list_id}`);
     }
     await this.#alarms.setAlarm(Date.now() + 1);
+  }
+
+  // Start a mark-and-sweep baseline for one resource: drop its delta cursor and
+  // record a new generation.
+  #beginSweep(resource: string, lastError: string | null = null): void {
+    this.#setSyncState(resource, {
+      delta_link: null,
+      next_link: null,
+      status: "baseline",
+      ...(lastError ? { last_error: lastError } : {}),
+    });
+    this.#sql.exec("UPDATE sync_state SET sweep_gen = ? WHERE resource = ?", Date.now(), resource);
+  }
+
+  // The baseline reached its deltaLink: delete what it didn't see, then clear
+  // the generation. One transaction, so a crash can't leave half a sweep.
+  #finishSweep(resource: string): void {
+    const gen = this.#sql
+      .exec<{ g: number | null }>("SELECT sweep_gen g FROM sync_state WHERE resource = ?", resource)
+      .toArray()[0]?.g;
+    if (gen == null) return;
+    this.#transact(() => {
+      if (resource === "lists") {
+        const stale = this.#sql
+          .exec<{ list_id: string }>(
+            "SELECT list_id FROM lists WHERE baseline_gen IS NULL OR baseline_gen <> ?",
+            gen,
+          )
+          .toArray();
+        for (const l of stale) this.deleteList(l.list_id);
+      } else {
+        const listId = resource.slice("tasks:".length);
+        this.#sql.exec(
+          `DELETE FROM checklist_items WHERE task_id IN (
+             SELECT task_id FROM tasks WHERE list_id = ? AND (baseline_gen IS NULL OR baseline_gen <> ?))`,
+          listId,
+          gen,
+        );
+        this.#sql.exec(
+          "DELETE FROM tasks WHERE list_id = ? AND (baseline_gen IS NULL OR baseline_gen <> ?)",
+          listId,
+          gen,
+        );
+      }
+      this.#sql.exec("UPDATE sync_state SET sweep_gen = NULL WHERE resource = ?", resource);
+    });
   }
 
   // Hard identity reset: wipe ALL indexed state because the owning Microsoft
@@ -1981,6 +2046,7 @@ export class IndexCore implements TokenProvider {
       const res = await followToTerminal(graph, startUrl, Math.max(1, maxPages));
       this.#applyRows(resource, res.rows);
       if (res.deltaLink) {
+        this.#finishSweep(resource);
         this.#setSyncState(resource, {
           delta_link: res.deltaLink,
           next_link: null,
@@ -2004,16 +2070,12 @@ export class IndexCore implements TokenProvider {
       return { pagesFetched: res.pagesFetched, midCycle: !!res.nextLink };
     } catch (e) {
       if (e instanceof GraphError && e.status === 410) {
-        // Delta token expired (~30d). Purge the resource's rows and reset to
-        // baseline; the next cycle repopulates from the full collection.
+        // Delta token expired (~30d). Re-baseline with mark and sweep: rows
+        // stay served, and those the new baseline doesn't return are removed
+        // when it completes. For the roster this sweeps lists only; each list's
+        // own task delta token is still valid.
         log.warn("sync_410_rebaseline", { resource });
-        this.#purgeResource(resource);
-        this.#setSyncState(resource, {
-          delta_link: null,
-          next_link: null,
-          status: "baseline",
-          last_error: "410_gone",
-        });
+        this.#beginSweep(resource, "410_gone");
         return { pagesFetched: 1, midCycle: true };
       }
       if (e instanceof GraphError && (e.status === 429 || e.status === 503)) {
@@ -2051,28 +2113,24 @@ export class IndexCore implements TokenProvider {
       if (row.kind === "removed") {
         this.deleteTask(row.id); // cascades checklist_items
       } else {
+        const modifiedAt = () =>
+          this.#sql.exec<{ m: number | null }>("SELECT modified_at m FROM tasks WHERE task_id = ?", row.task.id).toArray()[0];
+        const before = checklist ? modifiedAt() : undefined;
         this.upsertTask(row.task, listId);
+        if (!checklist) continue;
         // Incremental engine: a task that rode delta CHANGED (checklist edits bump
         // its lastModifiedDateTime), so its cached checklist may be stale — mark it
         // for re-fetch by the next budgeted scan. Delta carries no expansions, so
         // we can't diff the checklist here; the marker + scan does it cheaply.
-        if (checklist) this.markChecklistDirty(row.task.id);
+        // A row whose modified time didn't move is skipped: a re-baseline returns
+        // every task unchanged and must not re-queue the whole backfill (18.6).
+        const after = modifiedAt();
+        if (before && after && before.m === after.m) continue;
+        this.markChecklistDirty(row.task.id);
       }
     }
   }
 
-  #purgeResource(resource: string): void {
-    if (resource === "lists") {
-      this.#sql.exec("DELETE FROM tasks");
-      this.#sql.exec("DELETE FROM checklist_items");
-      this.#sql.exec("DELETE FROM lists");
-      this.#sql.exec("DELETE FROM sync_state WHERE resource LIKE 'tasks:%'");
-      return;
-    }
-    const listId = resource.slice("tasks:".length);
-    this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
-    this.#sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
-  }
 
   #getSyncState(resource: string): SyncStateRow | null {
     const rows = this.#sql
