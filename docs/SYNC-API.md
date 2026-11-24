@@ -345,11 +345,16 @@ Rules:
 - `data` is the entity's **current** state at read time, not the state at `seq`. The
   client replaces its row.
 - Every reference to another entity (`list_id`, `task_id`) is a `sid`.
-- Due and start dates go out as bare dates in the owner's `TIMEZONE`, which is how To
-  Do treats them. Instants (reminders, completion, created, modified) go out as UTC
-  ISO 8601.
-- `subresources_complete: false` means the per-task scan (section 1.1) hasn't reached
-  this task yet. The app shows what it has and gets the rest in a later pull.
+- Due, start and completion dates go out as bare dates (`YYYY-MM-DD`) in the owner's
+  `TIMEZONE`, which is how To Do treats them. `completed_at` is a date, not an instant:
+  To Do shows only the day, and a value Graph stores as exact UTC midnight is read as
+  that UTC date, anything else as the local date in `TIMEZONE`. The app sends
+  `completed_at` back as a bare date too. Instants (reminders, created, modified) go
+  out as UTC ISO 8601.
+- `subresources_complete: false` means the server hasn't fetched this task's steps,
+  links and attachments yet (the per-task scan, section 1.1). The app shows what it has
+  and gets the rest in a later pull. Once fetched, it stays `true`: a later change to
+  a step, link or attachment arrives as a new row for the task.
 - Attachment bytes aren't in the feed. The app fetches them with
   `GET /api/v1/attachments/{sid}`, which streams through the server the same way
   `/download` does today (section 10.2).
@@ -524,12 +529,19 @@ CREATE TABLE applied_mutations (
 3. Rows are kept for 30 days, longer than the app keeps an unsent edit.
 
 The hard case is a crash or timeout **after** Graph accepted a create and **before**
-step 2. A plain retry would create a second task. For a `pending` create, the server
-first looks for the task it may already have made: tasks in the target list created
-after the `pending` row's timestamp with the same title. If exactly one matches, it
-adopts that Graph ID. An update or delete is safe to repeat as-is. A stronger match is
-to write the `sid` into a Graph open extension on create; whether To Do tasks accept an
-`extensions` array in the create body is a thing to test before relying on it.
+step 2. A plain retry would create a second item. A create whose earlier attempt may
+have reached Graph first looks for what it made, and adopts it under the app's `sid`
+if exactly one item matches:
+
+| Create | Matched by |
+| --- | --- |
+| `task.create` | same title in the target list, created after the earlier attempt began |
+| `step.create` | same title on the task, created after the earlier attempt began |
+| `link.create` | `externalId` equal to the `sid` (the server sets it on every link the app creates) |
+| `list.create` | same name, and first seen by the server after the earlier attempt began or not seen yet (lists have no creation time) |
+
+More than one match is `rejected` with `ambiguous_create`; the app shows it to the
+owner. An update or delete is safe to repeat as-is.
 
 ### 5.5 Where the code lives
 
@@ -593,7 +605,10 @@ Server → client messages:
 
 - On connect: `{"type":"hello","cursor":"k3v9.18460"}`. The app pulls if its cursor is
   older.
-- After any change: `{"type":"changed","cursor":"k3v9.18461"}`.
+- After any change: `{"type":"changed","cursor":"k3v9.18461"}`. One edit can send more
+  than one: the write itself, then values the server learns a second or two later
+  (Substrate's manual order, the first fetch of a new task's steps and links). The app
+  pulls on the first and coalesces any that arrive while a pull is running.
 - Before closing for token expiry or revocation: `{"type":"reauth"}`.
 
 The app sends nothing except WebSocket pings. A `ping` text message gets `pong`
