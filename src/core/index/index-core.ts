@@ -48,7 +48,6 @@ import { loadListsConfig, storeListsConfig } from "../config/loader";
 import { ListsConfigSchema, type ListsConfig } from "../config/schemas";
 import {
   applyListsConfigChange,
-  isArchiveList,
   listSync,
   shouldSkipSync,
   type ListsConfigChange,
@@ -3046,12 +3045,13 @@ export class IndexCore implements TokenProvider {
 
     // Flagged email gets no sub-resource fetch at all; other archive lists get
     // it for open tasks only (sections 1.2, 18.7a).
-    const cfg = await this.#listsConfig();
+    // From the stored setting, which backfillRemaining (change-feed.ts) also
+    // reads, so the count it reports matches what this scan will drain.
     const lists = this.listLists();
     const skipIds = lists
       .filter((l) => skip(l.list_id) || l.wellknown === "flaggedEmails")
       .map((l) => l.list_id);
-    const openOnlyIds = lists.filter((l) => isArchiveList(l, cfg)).map((l) => l.list_id);
+    const openOnlyIds = lists.filter((l) => l.sync === "reference").map((l) => l.list_id);
     // Backfill mode: while more than one batch is waiting, take a bigger batch
     // and have alarm() come back soon instead of after the full interval.
     const normal = checklistScanMaxTasksPerCycle(this.#env);

@@ -12,15 +12,17 @@ const task = (id: string, title: string) =>
 
 function walk(c: IndexCore, cursor: string | null) {
   const all: FeedChange[] = [];
+  let remaining = 0;
   for (let i = 0; i < 50; i++) {
     const r = c.syncChanges({ cursor, scope: "all" });
     if (!r.ok) throw new Error(r.error);
     const p: FeedPage = r.page;
     all.push(...p.changes);
+    remaining = p.backfill.remaining;
     cursor = p.cursor;
     if (!p.has_more) break;
   }
-  return { all, cursor: cursor! };
+  return { all, cursor: cursor!, remaining };
 }
 
 export async function runListSyncChecks(c: IndexCore, env: AppEnv) {
@@ -36,6 +38,14 @@ export async function runListSyncChecks(c: IndexCore, env: AppEnv) {
     full.all.filter((x) => x.kind === "list" && !x.deleted).map((x) => [x.kind === "list" && !x.deleted ? x.data.name : "", x]),
   );
   const txSid = c.syncTaskSids(["TX"]).TX;
+  // A completed task in a reference list is never scanned for sub-resources,
+  // so it must not count as backfill still to do; an open one does.
+  const remaining = () => walk(c, null).remaining;
+  const before = remaining();
+  c.upsertTask({ ...(task("TRC", "done, in a reference list") as object), status: "completed" } as never, "LR");
+  const withCompleted = remaining();
+  c.upsertTask(task("TRO", "open, in a reference list"), "LR");
+  const withOpen = remaining();
   const lxSid = sidOf("Soon excluded");
 
   // Exclude LX: its list and task leave the feed as deletion records.
@@ -92,6 +102,7 @@ export async function runListSyncChecks(c: IndexCore, env: AppEnv) {
     "a full sync leaves an excluded list out": !fullAfter.all.some((x) => x.kind === "list" && x.id === lxSid),
     "the excluded list keeps its roster row": c.getList("LX") !== null,
     "the excluded route names it by sid": route.length === 1 && route[0].id === lxSid && route[0].name === "Soon excluded",
+    "backfill doesn't count a reference list's completed tasks": withCompleted === before && withOpen === before + 1,
     "an unchanged config writes nothing": again.changed === 0,
     "a write-through into an excluded list keeps no row": writes.rows === 0,
     "a task moved into an excluded list leaves the mirror": writes.moved,

@@ -316,13 +316,16 @@ function buildLists(sql: SqlDb, listIds: string[]): Map<string, FeedList> {
   return out;
 }
 
-// Tasks still waiting for the sub-resource scan. Flagged email is never
-// scanned (sync-policy), so it isn't counted as outstanding.
+// Tasks still waiting for the sub-resource scan, counted with the scan's own
+// filter (IndexCore #runChecklistScanBatch) so this can reach zero: flagged
+// email is never scanned, and a reference list's completed tasks aren't
+// either (section 1.2).
 export function backfillRemaining(sql: SqlDb): number {
   return sql
     .exec<{ n: number }>(
       `SELECT count(*) n FROM tasks t JOIN lists l ON l.list_id = t.list_id
-       WHERE t.checklist_synced_at IS NULL AND (l.wellknown IS NULL OR l.wellknown <> 'flaggedEmails')`,
+       WHERE t.checklist_synced_at IS NULL AND (l.wellknown IS NULL OR l.wellknown <> 'flaggedEmails')
+         AND NOT (l.sync IS 'reference' AND t.status = 'completed')`,
     )
     .one().n;
 }
