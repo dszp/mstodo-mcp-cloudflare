@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Uploads over the inline limit no longer report a failure for a file that attached.**
+  Graph can answer the last chunk of an upload session with a 500 after it has stored the
+  attachment (seen with a 6 MB PDF). The upload page then said the file failed, and a retry
+  said "duplicate". The server now looks for a new attachment of that name before reporting
+  an error.
+
 ### Changed
 - **A list's class is now its sync setting** (docs/SYNC-API.md section 1.2). `todo` and
   unclassified lists sync as before, with a Graph subscription. `reference` lists sync after

@@ -119,3 +119,64 @@ describe("attachFile — upload-session path", () => {
     expect(puts[1].headers["authorization"]).toBe("Bearer tok");
   });
 });
+
+describe("attachFile — Graph reports a failure after committing", () => {
+  const total = 3_932_160 + 100;
+  const SESSION = "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/attachmentSessions/S1";
+  const att = (id: string) => ({ "@odata.type": "#microsoft.graph.taskFileAttachment", id, name: "file.bin", size: total + 50 });
+
+  // `listings` is what each GET of the attachments collection returns, in order
+  // (the last one repeats); the final PUT answers 500 like Graph did live.
+  function graphCommitsThenErrors(listings: Array<Array<ReturnType<typeof att>>>): void {
+    let puts = 0;
+    let gets = 0;
+    install((c) => {
+      if (c.url.endsWith("/createUploadSession")) return Response.json({ uploadUrl: SESSION, nextExpectedRanges: ["0-"] });
+      if (c.url.endsWith("/content") && c.method === "PUT") {
+        puts += 1;
+        return puts === 1
+          ? Response.json({ nextExpectedRanges: ["3932160"] })
+          : Response.json({ error: { code: "generalException" } }, { status: 500 });
+      }
+      if (c.method === "DELETE") return new Response(null, { status: 204 });
+      if (c.url.includes("/attachments") && c.method === "GET") {
+        const value = listings[Math.min(gets++, listings.length - 1)];
+        return Response.json({ value });
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+  }
+
+  it("reports the attachment Graph made when the final chunk errors", async () => {
+    graphCommitsThenErrors([[], [att("NEW1")]]);
+    const r = await attachFile(graph, "tok", args(new Uint8Array(total), 3072 * 1024));
+    expect(r).toMatchObject({ attachment_id: "NEW1", via: "session", size: total });
+  });
+
+  it("doesn't take a same-name attachment that was already there for the new one", async () => {
+    vi.useFakeTimers();
+    try {
+      graphCommitsThenErrors([[att("OLD1")]]);
+      const p = attachFile(graph, "tok", args(new Uint8Array(total), 3072 * 1024));
+      const done = expect(p).rejects.toMatchObject({ status: 500 });
+      await vi.advanceTimersByTimeAsync(5000);
+      await done;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still fails when nothing was attached", async () => {
+    vi.useFakeTimers();
+    try {
+      graphCommitsThenErrors([[]]);
+      const p = attachFile(graph, "tok", args(new Uint8Array(total), 3072 * 1024));
+      const done = expect(p).rejects.toMatchObject({ status: 500 });
+      await vi.advanceTimersByTimeAsync(5000);
+      await done;
+      expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
