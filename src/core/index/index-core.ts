@@ -1113,6 +1113,13 @@ export class IndexCore implements TokenProvider {
     return p && Date.now() - p.at < LISTS_CONFIG_PENDING_MS ? ListsConfigSchema.parse(p.cfg) : kv;
   }
 
+  // The config the index acts on, for callers outside it (the MCP tools). A
+  // KV read alone can lag a change made through updateListsConfig by up to a
+  // minute (KV is eventually consistent), so a tool would show the old setting.
+  listsConfig(): Promise<ListsConfig> {
+    return this.#listsConfig();
+  }
+
   // The list's stored setting is excluded. Read from the row each time, not
   // from a config captured earlier, since refreshListSync can change it while
   // a sync cycle is waiting on Graph.

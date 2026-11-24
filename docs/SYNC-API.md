@@ -154,6 +154,10 @@ that change comes back with `sync` in `superseded_fields`.
 `step.*` and `link.*` mutations that touch an excluded list (the task's list, or
 `fields.list_id`) with `rejected` / `list_excluded`. List mutations on the excluded
 list itself still run, so the app can rename it, delete it or switch it back on.
+A `step.*` or `link.*` edit that names only the step or link, sent after the list
+was excluded, comes back `rejected` / `deleted` instead: the server no longer knows
+which task the step or link belonged to. Both errors mean the same to the app: drop
+the edit and pull.
 An MCP write tool can still create or move a task into an excluded list in Microsoft
 To Do; the server keeps no copy of it.
 

@@ -224,7 +224,36 @@ describe("list_lists auto-pin", () => {
     const r = await h.call("list_lists", {});
     expect(r).toMatchObject({ ok: true, lists: [{ id: "X", type: "todo" }] });
     expect(h.syncOf("X")).toBe("todo");
-    expect((await loadListsConfig(h.env)).overrides).toEqual({ X: "todo" });
+    expect((await h.core.listsConfig()).overrides).toEqual({ X: "todo" });
+  });
+
+  it("shows a setting KV doesn't have yet", async () => {
+    const h = await harness();
+    h.core.upsertList({ id: "X", displayName: "Junk drawer" } as never);
+    await storeListsConfig(h.env, ListsConfigSchema.parse({}));
+    await h.core.updateListsConfig({ overrides: { X: "excluded" } });
+    // KV lags the change (eventual consistency); the tools must not.
+    await storeListsConfig(h.env, ListsConfigSchema.parse({}));
+    expect(await h.call("get_list_config", {})).toMatchObject({ ok: true, override_count: 1 });
+    expect(await h.call("list_lists", {})).toMatchObject({ ok: true, lists: [{ id: "X", type: "excluded" }] });
+  });
+
+  it("goes back to KV once the pending config is 90 seconds old", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const h = await harness();
+      await h.core.updateListsConfig({ overrides: { X: "excluded" } });
+      // Something else wrote KV after the change; while the change is
+      // pending the index still prefers its own copy.
+      await storeListsConfig(h.env, ListsConfigSchema.parse({ overrides: { X: "reference" } }));
+      expect((await h.core.listsConfig()).overrides).toEqual({ X: "excluded" });
+      vi.setSystemTime(Date.now() + 89_000);
+      expect((await h.core.listsConfig()).overrides).toEqual({ X: "excluded" });
+      vi.setSystemTime(Date.now() + 2_000);
+      expect((await h.core.listsConfig()).overrides).toEqual({ X: "reference" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

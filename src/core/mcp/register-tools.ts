@@ -48,7 +48,7 @@ import {
 } from "../graph/types";
 import { loadAttachmentConfig, loadLinkRules, loadListsConfig, storeAttachmentConfig, storeLinkRules } from "../config/loader";
 import { runLinkRules, type LinkRuleMatch } from "../config/link-rules-engine";
-import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema } from "../config/schemas";
+import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema, ListsConfigSchema, type ListsConfig } from "../config/schemas";
 import { classifyList, pinClassifications, stripEmoji } from "../config/classifier";
 import { resolveListId } from "../config/aliases";
 import { patternProblem } from "../config/regex-safety";
@@ -697,7 +697,7 @@ class ToDoTools implements TokenProvider {
       async ({ type: typeFilter }): Promise<McpResponse> =>
         this.withGraph("list_lists", async (graph) => {
           const { lists, source } = await this.getRoster(graph);
-          let config = await loadListsConfig(this.ctx.env);
+          let config = await this.#listsConfig();
 
           // Pin current name-classifications to immutable list IDs so a later
           // rename can't change a list's class. One-time per list; once every
@@ -2159,7 +2159,7 @@ class ToDoTools implements TokenProvider {
       },
       async (): Promise<McpResponse> =>
         instrument("get_list_config", async () => {
-          const config = await loadListsConfig(this.ctx.env);
+          const config = await this.#listsConfig();
           let roster: ListRow[] = [];
           try {
             roster = await this.#index().listLists();
@@ -2479,7 +2479,7 @@ class ToDoTools implements TokenProvider {
               : undefined;
           let listIds = explicitIds;
           if ((types && types.length > 0) || (exclude_types && exclude_types.length > 0)) {
-            const cfg = await loadListsConfig(this.ctx.env);
+            const cfg = await this.#listsConfig();
             let roster: ListRow[] = [];
             try {
               roster = await this.#index().listLists();
@@ -2575,7 +2575,7 @@ class ToDoTools implements TokenProvider {
               : undefined;
           let listIds = explicitIds;
           if ((types && types.length > 0) || (exclude_types && exclude_types.length > 0)) {
-            const cfg = await loadListsConfig(this.ctx.env);
+            const cfg = await this.#listsConfig();
             let roster: ListRow[] = [];
             try {
               roster = await this.#index().listLists();
@@ -2777,7 +2777,7 @@ class ToDoTools implements TokenProvider {
       },
       async ({ type = "todo", limit, cursor }): Promise<McpResponse> =>
         instrument("get_pending_across_lists", async () => {
-          const config = await loadListsConfig(this.ctx.env);
+          const config = await this.#listsConfig();
           if (config.patterns.length === 0) {
             return errResponse("no_list_patterns_configured", {
               hint: "Configure list classification via set_list_config, then retry.",
@@ -2834,7 +2834,7 @@ class ToDoTools implements TokenProvider {
           if (list !== undefined) {
             listIds = [await this.resolveList(list)];
           } else if (type !== undefined) {
-            const config = await loadListsConfig(this.ctx.env);
+            const config = await this.#listsConfig();
             if (config.patterns.length === 0) {
               return errResponse("no_list_patterns_configured", {
                 hint: "Configure list classification via set_list_config, then retry.",
@@ -3424,7 +3424,7 @@ class ToDoTools implements TokenProvider {
   // from KV config with no roster; display-name resolution reads the DO roster
   // (best-effort — a cold/empty roster simply degrades to raw passthrough).
   private async resolveList(list: string): Promise<string> {
-    const config = await loadListsConfig(this.ctx.env);
+    const config = await this.#listsConfig();
     if (config.aliases[list] !== undefined) return config.aliases[list];
     let roster: ListRow[] = [];
     try {
@@ -3611,6 +3611,17 @@ class ToDoTools implements TokenProvider {
       substrate: sub ? async () => sub : () => this.#buildSubstrateClient(),
       accessToken: () => this.getAccessToken(),
     });
+  }
+
+  // config:lists as the index acts on it, which includes a change KV may not
+  // show yet. Falls back to KV if the index can't be reached.
+  async #listsConfig(): Promise<ListsConfig> {
+    try {
+      return ListsConfigSchema.parse(await this.#index().listsConfig());
+    } catch (e) {
+      log.warn("lists_config_index_read_failed", { error: String(e) });
+      return loadListsConfig(this.ctx.env);
+    }
   }
 
   // Singleton TodoIndex DO stub — the cross-list index + sole token refresher.
