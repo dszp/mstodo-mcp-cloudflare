@@ -44,7 +44,7 @@ import {
 } from "./sql";
 import { applyMigrations } from "./migrations";
 import { loadListsConfig } from "../config/loader";
-import { shouldSkipSync } from "../config/sync-policy";
+import { isArchiveList, shouldSkipSync } from "../config/sync-policy";
 import {
   taskSubscriptionsEnabled,
   webhookUrl,
@@ -124,6 +124,13 @@ const UPSERT_TASK_SQL = (() => {
   return `INSERT INTO tasks (${cols}) VALUES (${placeholders}) ON CONFLICT(task_id) DO UPDATE SET ${updates}
     WHERE excluded.modified_at IS NULL OR tasks.modified_at IS NULL OR excluded.modified_at >= tasks.modified_at`;
 })();
+
+// Sub-resource backfill (section 1.1): a bigger batch and a short re-arm while
+// a backlog remains, so a one-time fill of a few thousand tasks takes tens of
+// minutes rather than days. Each task is one or two Graph GETs (plus one
+// Substrate GET when it has steps), well inside the paid plan's subrequest cap.
+const BACKFILL_TASKS_PER_CYCLE = 40;
+const BACKFILL_REARM_MS = 20_000;
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -234,6 +241,8 @@ export class IndexCore implements TokenProvider {
   readonly #env: AppEnv;
 
   readonly #transact: Transact;
+  // Set by the sub-resource scan while more than one batch is waiting.
+  #scanBacklog = false;
 
   constructor(deps: { sql: SqlDb; transact: Transact; state: StateStore; alarms: AlarmScheduler; env: AppEnv }) {
     this.#sql = deps.sql;
@@ -747,23 +756,31 @@ export class IndexCore implements TokenProvider {
   // ("needs fetch"), excluding skipped lists, newest-changed first (recently
   // touched tasks are the likeliest to be queried), capped per cycle. Completed
   // tasks are deliberately left out — they lazy-fill only if a query touches them.
+  // Tasks whose steps, links and attachments still need fetching. Open tasks
+  // come first, then completed ones (the server becomes the only copy after
+  // Graph, so history is filled in too). Lists in openOnlyListIds (archive
+  // lists) contribute open tasks only; skipListIds contribute nothing.
   selectDueChecklistTasks(
     max: number,
     skipListIds: string[],
+    openOnlyListIds: string[] = [],
   ): Array<{ task_id: string; list_id: string }> {
-    const skipClause =
-      skipListIds.length > 0
-        ? `AND list_id NOT IN (${skipListIds.map(() => "?").join(", ")})`
+    const ph = (ids: string[]) => ids.map(() => "?").join(", ");
+    const skipClause = skipListIds.length > 0 ? `AND list_id NOT IN (${ph(skipListIds)})` : "";
+    const openOnlyClause =
+      openOnlyListIds.length > 0
+        ? `AND (status <> 'completed' OR list_id NOT IN (${ph(openOnlyListIds)}))`
         : "";
     return this.#sql
       .exec(
         `SELECT task_id, list_id FROM tasks
           WHERE checklist_synced_at IS NULL
-            AND status <> 'completed'
             ${skipClause}
-          ORDER BY modified_at DESC
+            ${openOnlyClause}
+          ORDER BY (status = 'completed'), modified_at DESC
           LIMIT ?`,
         ...skipListIds,
+        ...openOnlyListIds,
         max,
       )
       .toArray() as unknown as Array<{ task_id: string; list_id: string }>;
@@ -1848,9 +1865,12 @@ export class IndexCore implements TokenProvider {
     if (await this.#state.get(REAUTH_KEY)) return;
     const midCycle = await this.runSyncCycle();
     const intervalMs = this.#intervalMs();
-    await this.#alarms.setAlarm(
-      Date.now() + (midCycle ? MID_CYCLE_REARM_MS : intervalMs),
-    );
+    const next = midCycle
+      ? MID_CYCLE_REARM_MS
+      : this.#scanBacklog
+        ? Math.min(intervalMs, BACKFILL_REARM_MS)
+        : intervalMs;
+    await this.#alarms.setAlarm(Date.now() + next);
   }
 
   // Force a re-baseline: drop rows + delta tokens (one list or everything) and
@@ -2404,12 +2424,24 @@ export class IndexCore implements TokenProvider {
   async #runChecklistScanBatch(skip: (listId: string) => boolean = () => false): Promise<void> {
     if (!checklistCacheEnabled(this.#env)) return;
 
-    const max = checklistScanMaxTasksPerCycle(this.#env);
-    const skipIds = this.listLists()
-      .filter((l) => skip(l.list_id))
+    // Flagged email gets no sub-resource fetch at all; other archive lists get
+    // it for open tasks only (sections 1.2, 18.7a).
+    const cfg = await loadListsConfig(this.#env);
+    const lists = this.listLists();
+    const skipIds = lists
+      .filter((l) => skip(l.list_id) || l.wellknown === "flaggedEmails")
       .map((l) => l.list_id);
-    const due = this.selectDueChecklistTasks(max, skipIds);
+    const openOnlyIds = lists.filter((l) => isArchiveList(l, cfg)).map((l) => l.list_id);
+    // Backfill mode: while more than one batch is waiting, take a bigger batch
+    // and have alarm() come back soon instead of after the full interval.
+    const normal = checklistScanMaxTasksPerCycle(this.#env);
+    const probe = this.selectDueChecklistTasks(normal + 1, skipIds, openOnlyIds);
+    this.#scanBacklog = probe.length > normal;
+    const due = this.#scanBacklog
+      ? this.selectDueChecklistTasks(Math.max(normal, BACKFILL_TASKS_PER_CYCLE), skipIds, openOnlyIds)
+      : probe;
     if (due.length === 0) return;
+    const sub = myDayEnabled(this.#env) ? await this.#substrateForScan() : null;
 
     const graph = new GraphClient(this);
     let scanned = 0;
@@ -2420,11 +2452,30 @@ export class IndexCore implements TokenProvider {
         // their own call, made only when the task has any (section 1.1).
         const t = await getTaskWithSubresources(graph, list_id, task_id);
         const atts = t.hasAttachments ? await listAttachments(graph, list_id, task_id) : [];
+        // Step order lives only in Substrate. Best effort: a failure keeps the
+        // steps and leaves their order as it was.
+        let order: Map<string, string | null> | null = null;
+        if (sub && (t.checklistItems?.length ?? 0) > 0) {
+          try {
+            const subtasks = await sub.listSubtasks(list_id, task_id, { fast: true });
+            order = new Map(subtasks.filter((s) => s.Id).map((s) => [s.Id as string, s.OrderDateTime ?? null]));
+          } catch (e) {
+            log.warn("checklist_order_fetch_failed", { task_id, error: String(e) });
+          }
+        }
         this.#transact(() => {
           this.replaceLinkedResources(task_id, list_id, t.linkedResources ?? []);
           this.replaceAttachments(task_id, list_id, atts);
           // Last: it clears the "needs fetch" marker.
           this.replaceChecklistItems(task_id, list_id, t.checklistItems ?? []);
+          if (order) {
+            for (const [id, at] of order) {
+              this.#sql.exec(
+                "UPDATE checklist_items SET order_datetime = ? WHERE item_id = ? AND task_id = ? AND order_datetime IS NOT ?",
+                at, id, task_id, at,
+              );
+            }
+          }
         });
         scanned += 1;
       } catch (e) {
@@ -2435,6 +2486,17 @@ export class IndexCore implements TokenProvider {
       }
     }
     log.info("checklist_scan_batch", { scanned, errored, due: due.length });
+  }
+
+  async #substrateForScan(): Promise<SubstrateClient> {
+    const ident = await loadIdentity(this.#env);
+    return new SubstrateClient(
+      {
+        getSubstrateAccessToken: () => this.getSubstrateAccessToken(),
+        forceSubstrateRefresh: () => this.forceSubstrateRefresh(),
+      },
+      ident?.anchorMailbox ?? null,
+    );
   }
 
   #intervalMs(): number {

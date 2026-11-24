@@ -113,6 +113,12 @@ export const ListsConfigSchema = z.object({
     .describe(
       'Lists to exclude from delta sync, matched by wellknownListName (e.g. "flaggedEmails") or Graph list ID. Not indexed; still listed and readable on-demand. (Note: flaggedEmails is skipped by default regardless — see sync_flagged_emails.)',
     ),
+  archive: z
+    .array(z.string().min(1))
+    .default([])
+    .describe(
+      'Lists kept but shown only in the app\'s archive area, matched by wellknownListName or Graph list ID (docs/SYNC-API.md section 1.2). The server fetches steps, links and attachment details for their OPEN tasks only. flaggedEmails, when synced, is treated as archive and gets no such fetch at all.',
+    ),
   sync_flagged_emails: z
     .boolean()
     .default(false)
