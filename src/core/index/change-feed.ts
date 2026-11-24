@@ -99,15 +99,15 @@ export function currentCursor(sql: SqlDb): string {
   return `${readEpoch(sql)}.${maxSeq(sql)}`;
 }
 
-// Parses "<epoch>.<seq>", or "<epoch>.<seq>.f" while a full sync is still
-// paging; "", "0" and undefined start a full sync. Clients treat the cursor as
-// opaque.
+// Parses "<epoch>.<seq>", or "<epoch>.<seq>.f<start>" while a full sync is
+// still paging (<start>: the top of the log when the walk began); "", "0" and
+// undefined start a full sync. Clients treat the cursor as opaque.
 export function parseCursor(
   raw: string | null | undefined,
-): { epoch: string; seq: number; walk: boolean } | null | "bad" {
+): { epoch: string; seq: number; walkStart: number | null } | null | "bad" {
   if (raw == null || raw === "" || raw === "0") return null;
-  const m = /^([0-9a-f]{1,32})\.(\d{1,15})(\.f)?$/.exec(raw);
-  return m ? { epoch: m[1], seq: Number(m[2]), walk: !!m[3] } : "bad";
+  const m = /^([0-9a-f]{1,32})\.(\d{1,15})(?:\.f(\d{1,15}))?$/.exec(raw);
+  return m ? { epoch: m[1], seq: Number(m[2]), walkStart: m[3] === undefined ? null : Number(m[3]) } : "bad";
 }
 
 const iso = (ms: number | null): string | null => (ms == null ? null : new Date(ms).toISOString());
@@ -341,7 +341,11 @@ export function changesSince(
   }
   // A full sync (no cursor, then ".f" cursors until caught up) sends only what
   // the device keeps. An incremental pull also tells the device what to drop.
-  const walk = parsed === null || parsed.walk;
+  const walk = parsed === null || parsed.walkStart !== null;
+  // Rows logged after the walk began are changes made while it paged: they
+  // are served as on an incremental pull, deletions included, or a task sent
+  // on an early page and deleted mid-walk would stay on the device.
+  const walkStart = parsed === null ? top : (parsed.walkStart ?? 0);
   const rawLimit = Number(opts.limit ?? DEFAULT_PAGE_LIMIT);
   const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(MAX_PAGE_LIMIT, Math.floor(rawLimit))) : DEFAULT_PAGE_LIMIT;
   const cutoff = (opts.now ?? Date.now()) - ACTIVE_COMPLETED_WINDOW_MS;
@@ -359,10 +363,12 @@ export function changesSince(
   const where: string[] = ["l.seq > ?"];
   const params: SqlValue[] = scope === "active" ? [cutoff, from] : [from];
   if (walk) {
-    where.push("l.deleted = 0");
     if (scope === "active") {
-      where.push(`NOT ${outExpr}`);
-      params.push(cutoff);
+      where.push(`(l.seq > ? OR (l.deleted = 0 AND NOT ${outExpr}))`);
+      params.push(walkStart, cutoff);
+    } else {
+      where.push("(l.seq > ? OR l.deleted = 0)");
+      params.push(walkStart);
     }
   }
   const rows = sql
@@ -410,7 +416,7 @@ export function changesSince(
       c = { kind, id: r.sid, seq: r.seq, deleted: false, data: t.data, field_clock: t.field_clock };
     } else if (live(r) && kind === "list" && listData.has(r.graph_id!)) {
       c = { kind, id: r.sid, seq: r.seq, deleted: false, data: listData.get(r.graph_id!)! };
-    } else if (!walk) {
+    } else if (!walk || r.seq > walkStart) {
       // Deleted, out of this device's scope, or logged as live with its row
       // gone: the device drops it. A later change logs it again as live.
       c = { kind, id: r.sid, seq: r.seq, deleted: true };
@@ -433,7 +439,7 @@ export function changesSince(
   return {
     ok: true,
     page: {
-      cursor: `${epoch}.${cursorSeq}${walk && hasMore ? ".f" : ""}`,
+      cursor: `${epoch}.${cursorSeq}${walk && hasMore ? `.f${walkStart}` : ""}`,
       has_more: hasMore,
       changes,
       backfill: { remaining: backfillRemaining(sql) },
