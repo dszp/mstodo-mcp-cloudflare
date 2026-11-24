@@ -2520,7 +2520,48 @@ export class IndexCore implements TokenProvider {
     const n = Number(this.#env.MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE);
     return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 6;
   }
+
+  // -- Write lease (docs/SYNC-API.md section 18.4) ----------------------------
+  // One writer at a time across every surface that changes Microsoft data (MCP
+  // tools today, sync mutations and the n8n routes later). The writes run in
+  // the caller — the McpAgent Worker on Cloudflare, the request on Node — not
+  // in here, and a closure can't cross Durable Object RPC, so the queue can't
+  // be a promise chain like #refreshChain. It is a lease instead: the writer
+  // acquires it, makes its Graph/Substrate calls, and releases it. A writer
+  // that dies mid-write (isolate killed, client gone) stops renewing and the
+  // TTL frees the lease. Client side, waiting and renewal: src/core/ops/write-lease.ts.
+  //
+  // Held in memory, not storage, like #refreshChain: the object only restarts
+  // after it has gone idle (no RPC from a live holder, which renews every
+  // ttl/3) or on a deploy, which also drops the requests that held the lease.
+  #writeLease: { holder: string; expiresAt: number } | null = null;
+
+  // Grants the lease when it is free, expired, or already held by `holder`
+  // (which extends it — the renewal path). Otherwise says how long until the
+  // current lease would expire; the other holder's id is not disclosed.
+  acquireWriteLease(holder: string, ttlMs: number): { granted: true; expiresAt: number } | { granted: false; retryInMs: number } {
+    const now = Date.now();
+    const lease = this.#writeLease;
+    if (lease && lease.holder !== holder && lease.expiresAt > now) {
+      return { granted: false, retryInMs: lease.expiresAt - now };
+    }
+    // Bounded so a bad caller can't hold every write hostage for long.
+    const ttl = Math.min(Math.max(Number.isFinite(ttlMs) ? ttlMs : 0, WRITE_LEASE_MIN_TTL_MS), WRITE_LEASE_MAX_TTL_MS);
+    this.#writeLease = { holder, expiresAt: now + ttl };
+    return { granted: true, expiresAt: now + ttl };
+  }
+
+  // Releases the lease only if `holder` still holds it; a holder whose lease
+  // expired and was taken over can't release the new owner's. True if released.
+  releaseWriteLease(holder: string): boolean {
+    if (this.#writeLease?.holder !== holder) return false;
+    this.#writeLease = null;
+    return true;
+  }
 }
+
+const WRITE_LEASE_MIN_TTL_MS = 1_000;
+const WRITE_LEASE_MAX_TTL_MS = 120_000;
 
 // Every public method — the RPC surface the Cloudflare shell delegates and
 // core callers use via ownerIndex(). bootstrap() is host lifecycle, not surface.
