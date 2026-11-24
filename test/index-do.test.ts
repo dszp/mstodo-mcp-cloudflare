@@ -411,6 +411,26 @@ describe("TodoIndex delta sync", () => {
     expect(rows[0].title).toBe("A-updated");
   });
 
+  it("incremental: @removed for a task that moved to another list keeps it there", async () => {
+    await seedFreshTokens();
+    stubGraph({
+      [LISTS_DELTA]: { body: { value: [listA], "@odata.deltaLink": LISTS_DL } },
+      [TASKS_DELTA_A]: { body: { value: [syncTask("a"), syncTask("b")], "@odata.deltaLink": TASKS_DL_A } },
+    });
+    const stub = indexStub("sync-moved-removed");
+    await stub.runSyncCycle();
+    // "b" moves to list-B (a move_task write-through, or list-B's delta).
+    await stub.moveTask("b", "list-B");
+    // list-A's delta then reports "b" as removed from list-A.
+    stubGraph({
+      [LISTS_DL]: { body: { value: [], "@odata.deltaLink": LISTS_DL } },
+      [TASKS_DL_A]: { body: { value: [syncRemoved("b")], "@odata.deltaLink": TASKS_DL_A2 } },
+    });
+    await stub.runSyncCycle();
+    expect((await stub.query({ lists: ["list-A"] })).rows.map((r) => r.task_id)).toEqual(["a"]);
+    expect((await stub.query({ lists: ["list-B"] })).rows.map((r) => r.task_id)).toEqual(["b"]);
+  });
+
   it("resumable: a task budget of 1 stops mid-baseline, then completes", async () => {
     await seedFreshTokens();
     stubGraph({
