@@ -948,10 +948,16 @@ appearance stored too; the feed leaves them out as before (section 1.2).
 | list `sort_key`, group `sort_key` | `OrderDateTime` exactly as Substrate sends it. `null` for the default list. |
 | list `theme.color`, `theme.background` | `ThemeColor` and `ThemeBackground` exactly as Substrate sends them. A value that isn't a string is sent as its JSON. |
 
+Observed on a live account (2026-11-24): both theme values are preset names, for
+example `"color": "blue"` and `"background": "mountain"`. The app maps each name to its
+own color or image, and treats a name it doesn't know as "no theme". The order values
+are ISO 8601 instants but not all in one form: some carry milliseconds
+(`2026-11-23T23:45:45.623Z`) and some don't (`2026-11-23T23:45:47Z`). Parse them as
+instants before comparing; comparing the strings puts some in the wrong order.
+
 What isn't known yet:
 
-- The format of `ThemeColor` and `ThemeBackground`. The server passes them through
-  unchanged; the app should treat an unknown value as "no theme".
+- The full set of theme names.
 - Whether a higher or lower `sort_key` is nearer the top. For tasks, a later
   `OrderDateTime` is nearer the top. Groups and lists appear to share one ordering
   across the sidebar; a reorder test on a live account confirms both.
