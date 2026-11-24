@@ -7,6 +7,7 @@ import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
 import {
   runListAppearanceCycleChecks,
   runListAppearanceFeedChecks,
+  runListAppearanceIdentityChecks,
   runListAppearanceMigrationChecks,
   runListAppearanceRefusedChecks,
 } from "../test/_list-appearance-checks";
@@ -35,7 +36,7 @@ function core(extra: Record<string, string> = {}) {
   } as never;
   const c = new IndexCore({ sql: sqlDb(db), transact: transactor(db), state, alarms: state, env });
   c.bootstrap();
-  return { c, env, sql: sqlDb(db) };
+  return { c, env, sql: sqlDb(db), state };
 }
 
 describe("list appearance: migration v12 (node)", () => {
@@ -49,8 +50,14 @@ describe("list appearance: change feed (node)", async () => {
 });
 
 describe("list appearance: sync cycle (node)", async () => {
+  const { c, env, sql, state } = core();
+  const r = await runListAppearanceCycleChecks(c, env, sql, state);
+  for (const [name, ok] of Object.entries(r)) it(name, () => expect(ok).toBe(true));
+});
+
+describe("list appearance: owner change during the read (node)", async () => {
   const { c, env, sql } = core();
-  const r = await runListAppearanceCycleChecks(c, env, sql);
+  const r = await runListAppearanceIdentityChecks(c, env, sql);
   for (const [name, ok] of Object.entries(r)) it(name, () => expect(ok).toBe(true));
 });
 

@@ -929,8 +929,13 @@ group, an order or a theme back to Microsoft To Do.
 - `GET {substrate}/todob2/api/v1/foldergroups`. Each group has `Id`, `Name` and
   `OrderDateTime`.
 
-Both follow `@odata.nextLink` for up to 10 pages. A collection longer than that fails
-the read instead of returning part of the sidebar. The server matches each folder to
+Both follow `@odata.nextLink` for up to 10 pages. The server stores a read only when
+it is complete: a collection longer than 10 pages, a response without a `value`
+array, or one item that doesn't parse fails the whole read, so a malformed answer
+can't delete groups. An `OrderDateTime` sent as a `{ DateTime, TimeZone }` object is
+stored as one ISO string. If a folder names a group that the group read didn't
+return, the server keeps every stored group for that read rather than delete one
+still in use. The server matches each folder to
 a list by `Id`, which it expects to equal the Graph list ID.
 
 **What it stores** (migration v12): on each `lists` row, `group_id` (the group's
@@ -976,10 +981,13 @@ token mint when the cached Exchange Online token has expired.
 
 **Without Substrate.** When `ENABLE_MY_DAY` is off, or Microsoft refuses the Exchange
 Online scope, the server makes no read: the columns stay `null` and
-`capabilities.list_appearance` is `false`. A 403 from Substrate turns Substrate off for
-the identity the same way. Any other failure is logged and recorded in `sync_state`
-(`meta:appearance`), keeps the stored values, and is retried on the next calm cycle.
-A failed read never fails the sync cycle.
+`capabilities.list_appearance` is `false`. A 403 from Substrate on either read turns
+off only list appearance for that identity (until the object restarts), and
+`list_appearance` becomes `false`; My Day and step order keep working. Any other failure,
+including a 429, which the read doesn't retry, keeps the stored values, is recorded in
+`sync_state` (`meta:appearance`), and backs off: the next read waits one sync
+interval, then twice that after each further failure, up to 6 hours. A read that
+overlaps an owner change writes nothing. A failed read never fails the sync cycle.
 
 **After the switch** (`SYNC_SOURCE=local`), groups, order and theme become app-owned:
 the same columns and entities, written by the app's mutations.

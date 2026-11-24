@@ -5,6 +5,7 @@ import { IndexCore } from "../src/core/index/index-core";
 import {
   runListAppearanceCycleChecks,
   runListAppearanceFeedChecks,
+  runListAppearanceIdentityChecks,
   runListAppearanceMigrationChecks,
   runListAppearanceRefusedChecks,
 } from "./_list-appearance-checks";
@@ -37,7 +38,17 @@ describe("list appearance (Durable Object)", () => {
     await runInDurableObject(env.TODO_INDEX_DO.getByName("appearance-cycle"), async (_i, state) => {
       const c = core(state);
       c.bootstrap();
-      const r = await runListAppearanceCycleChecks(c, env as never, state.storage.sql);
+      const r = await runListAppearanceCycleChecks(c, env as never, state.storage.sql, state.storage);
+      await state.storage.deleteAlarm();
+      check(r);
+    });
+  });
+
+  it("writes nothing from a read that straddles an owner change", async () => {
+    await runInDurableObject(env.TODO_INDEX_DO.getByName("appearance-identity"), async (_i, state) => {
+      const c = core(state);
+      c.bootstrap();
+      const r = await runListAppearanceIdentityChecks(c, env as never, state.storage.sql);
       await state.storage.deleteAlarm();
       check(r);
     });

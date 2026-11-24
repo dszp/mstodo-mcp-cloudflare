@@ -183,6 +183,13 @@ const WEBHOOK_HEALTH_KEY = "meta:webhook";
 // last_synced_at = the last successful read. Like meta:webhook, syncStatus
 // doesn't report it.
 const APPEARANCE_STATE_KEY = "meta:appearance";
+// StateStore key for the read's backoff after failures, and its ceiling.
+const APPEARANCE_BACKOFF_KEY = "appearance:backoff";
+const APPEARANCE_BACKOFF_MAX_MS = 6 * 3_600_000;
+interface AppearanceBackoff {
+  failures: number;
+  next_at: number;
+}
 
 // Delivery-health view of the Graph change-notification (webhook) path. The
 // signal that distinguishes "subscriptions exist (coverage ok)" from
@@ -392,6 +399,10 @@ export class IndexCore implements TokenProvider {
   // mint or an identity switch.
   #substrateToken: { access_token: string; expires_at: number } | null = null;
   #substrateUnavailable = false;
+  // Set when Substrate answers the sidebar read with a 403 (#refreshListAppearance).
+  // Separate from #substrateUnavailable: it turns off only list appearance.
+  // Cleared by an identity switch or a restart of the object.
+  #appearanceUnavailable = false;
 
   // Bumped by resetIdentity() on an owner switch. Captured at the start of each
   // refresh so a refresh that resolves AFTER the switch can detect it and refuse
@@ -2170,7 +2181,7 @@ export class IndexCore implements TokenProvider {
         sub_resources: checklistCacheEnabled(this.#env),
         // Sidebar groups, order and theme are read from Substrate (section
         // 10.4). Off when the Exchange Online scope is missing or refused.
-        list_appearance: myDay && !this.#substrateUnavailable,
+        list_appearance: myDay && !this.#substrateUnavailable && !this.#appearanceUnavailable,
         push: "websocket",
         source: "graph",
       },
@@ -2580,6 +2591,8 @@ export class IndexCore implements TokenProvider {
     this.#notifier?.closeAll("reset");
     this.#substrateToken = null;
     this.#substrateUnavailable = false;
+    this.#appearanceUnavailable = false;
+    await this.#state.delete(APPEARANCE_BACKOFF_KEY);
     // Kill every MCP grant paired with the outgoing account; the new account's
     // grant is issued under the fresh epoch right after this wipe.
     await this.#newEpoch();
@@ -2981,33 +2994,50 @@ export class IndexCore implements TokenProvider {
   // migration v12), or when the last successful read is a sync interval old;
   // a sidebar reorder or theme change doesn't show in Graph's roster delta,
   // so the interval is what picks those up. Without the Exchange Online scope
-  // it does nothing and the columns stay NULL. A failure records the error
-  // and leaves the read due, so the next calm cycle tries again.
+  // it does nothing and the columns stay NULL.
+  //
+  // A 403 sets #appearanceUnavailable, never the My Day latch: a sidebar
+  // endpoint refusing the owner says nothing about My Day. Any other failure
+  // backs off: the next read waits DELTA_SYNC_INTERVAL_MIN × 2^(failures−1),
+  // at most APPEARANCE_BACKOFF_MAX_MS, persisted so it survives eviction.
   async #refreshListAppearance(now: number = Date.now()): Promise<void> {
-    if (!myDayEnabled(this.#env) || this.#substrateUnavailable) return;
+    if (!myDayEnabled(this.#env) || this.#substrateUnavailable || this.#appearanceUnavailable) return;
+    const backoff = (await this.#state.get<AppearanceBackoff>(APPEARANCE_BACKOFF_KEY)) ?? null;
+    if (backoff && now < backoff.next_at) return;
     const unread = this.#sql.exec("SELECT 1 FROM lists WHERE appearance_synced_at IS NULL LIMIT 1").toArray().length > 0;
     const last = this.#getSyncState(APPEARANCE_STATE_KEY)?.last_synced_at ?? null;
-    if (!unread && last !== null && now - last < this.#intervalMs()) return;
+    if (!backoff && !unread && last !== null && now - last < this.#intervalMs()) return;
     const listIds = this.listLists().map((l) => l.list_id);
     if (listIds.length === 0) return;
+    // An owner switch during the reads (resetIdentity) makes them the old
+    // account's sidebar: nothing from them is written.
+    const gen = this.#identityGeneration;
     try {
       const sub = await this.#substrateForScan();
       // Both reads before any write, so a failed second read changes nothing.
-      const folders = await sub.listFolders();
-      const groups = await sub.listFolderGroups();
+      // No 429 retries: a throttled mailbox fails the read, which backs off,
+      // rather than holding the alarm for up to 40 s.
+      const folders = await sub.listFolders({ fast: true });
+      const groups = await sub.listFolderGroups({ fast: true });
+      if (gen !== this.#identityGeneration) return;
       const r = this.applyListAppearance(folders, groups, listIds, now);
       this.#setSyncState(APPEARANCE_STATE_KEY, { last_synced_at: now, status: "idle", last_error: null });
+      if (backoff) await this.#state.delete(APPEARANCE_BACKOFF_KEY);
       log.info("list_appearance_synced", r);
     } catch (e) {
+      if (gen !== this.#identityGeneration) return;
       if (e instanceof Error && e.message.includes("my_day_unavailable")) return;
       if (e instanceof SubstrateError && e.status === 403) {
-        this.markMyDayUnavailable();
+        this.#appearanceUnavailable = true;
         log.warn("list_appearance_unavailable", { error: e.detail ?? "403" });
         return;
       }
       const msg = e instanceof Error ? e.message : String(e);
+      const failures = (backoff?.failures ?? 0) + 1;
+      const delay = Math.min(this.#intervalMs() * 2 ** (failures - 1), APPEARANCE_BACKOFF_MAX_MS);
+      await this.#state.put(APPEARANCE_BACKOFF_KEY, { failures, next_at: now + delay } satisfies AppearanceBackoff);
       this.#setSyncState(APPEARANCE_STATE_KEY, { status: "error", last_error: msg });
-      log.warn("list_appearance_read_failed", { error: msg });
+      log.warn("list_appearance_read_failed", { error: msg, failures, retry_in_min: Math.round(delay / 60_000) });
     }
   }
 
@@ -3023,9 +3053,20 @@ export class IndexCore implements TokenProvider {
     groups: SubstrateFolderGroup[],
     listIds: string[],
     now: number = Date.now(),
-  ): { lists: number; unmatched_folders: number; unread_lists: number; groups: number } {
+  ): {
+    lists: number;
+    unmatched_folders: number;
+    unread_lists: number;
+    groups: number;
+    groups_deleted: number;
+    groups_kept_unconfirmed: boolean;
+  } {
     return this.#transact(() => {
       const keep = new Set(groups.map((g) => g.Id));
+      // A folder naming a group the group read didn't return means the two
+      // reads disagree (a group made between them, or a short group read):
+      // keep every stored group this time rather than delete one in use.
+      const groupsComplete = folders.every((f) => !f.ParentFolderGroupId || keep.has(f.ParentFolderGroupId));
       for (const g of groups) {
         this.#sql.exec(
           `INSERT INTO list_groups (group_id, name, order_datetime) VALUES (?, ?, ?)
@@ -3034,8 +3075,14 @@ export class IndexCore implements TokenProvider {
         );
       }
       const stored = this.#sql.exec<{ group_id: string }>("SELECT group_id FROM list_groups").toArray();
-      for (const { group_id } of stored) {
-        if (!keep.has(group_id)) this.#sql.exec("DELETE FROM list_groups WHERE group_id = ?", group_id);
+      let deleted = 0;
+      for (const { group_id } of groupsComplete ? stored : []) {
+        if (keep.has(group_id)) continue;
+        // Ungroup its lists first, so each is logged again with group_id
+        // null even when this read doesn't return it (section 4.2).
+        this.#sql.exec("UPDATE lists SET group_id = NULL WHERE group_id = ?", group_id);
+        this.#sql.exec("DELETE FROM list_groups WHERE group_id = ?", group_id);
+        deleted += 1;
       }
       const known = new Set(listIds);
       const read = new Set<string>();
@@ -3056,7 +3103,14 @@ export class IndexCore implements TokenProvider {
       for (const id of listIds) {
         if (!read.has(id)) this.#sql.exec("UPDATE lists SET appearance_synced_at = ? WHERE list_id = ?", now, id);
       }
-      return { lists: read.size, unmatched_folders: unmatched, unread_lists: listIds.length - read.size, groups: groups.length };
+      return {
+        lists: read.size,
+        unmatched_folders: unmatched,
+        unread_lists: listIds.length - read.size,
+        groups: groups.length,
+        groups_deleted: deleted,
+        groups_kept_unconfirmed: !groupsComplete,
+      };
     });
   }
 

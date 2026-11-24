@@ -94,7 +94,24 @@ export async function runListAppearanceFeedChecks(c: IndexCore) {
 
   // A list naming a group the read didn't return goes out ungrouped.
   c.applyListAppearance([{ Id: "A2", ParentFolderGroupId: "GX" }], [], ids);
-  const orphan = listNamed(walk(c, inc5.cursor).all, "Work");
+  const inc6 = walk(c, inc5.cursor);
+  const orphan = listNamed(inc6.all, "Work");
+
+  // A group whose member list the read doesn't return: deleting the group
+  // still logs the list again, ungrouped.
+  const G2 = { Id: "G2", Name: "Two", OrderDateTime: null };
+  c.applyListAppearance([{ Id: "A2", ParentFolderGroupId: "G2" }], [G2], ids);
+  const inc7 = walk(c, inc6.cursor);
+  const g2 = groupIn(inc7.all);
+  c.applyListAppearance([{ Id: "A1" }], [], ids);
+  const inc8 = walk(c, inc7.cursor);
+
+  // The reads disagree (a folder names a group the group read lacks): no
+  // stored group is deleted.
+  c.applyListAppearance([{ Id: "A2", ParentFolderGroupId: "G3" }], [G2], ids);
+  const inc9 = walk(c, inc8.cursor);
+  const disagree = c.applyListAppearance([{ Id: "A2", ParentFolderGroupId: "G4" }], [], ids);
+  const inc10 = walk(c, inc9.cursor);
 
   return {
     "lists carry null appearance before the first read":
@@ -122,6 +139,12 @@ export async function runListAppearanceFeedChecks(c: IndexCore) {
       live(inc5.all, "list").length === 2 &&
       live(inc5.all, "list").every((x) => x.kind === "list" && !x.deleted && x.data.group_id === null),
     "a list naming an unknown group goes out ungrouped": orphan?.data.group_id === null,
+    "a deleted group's member is logged ungrouped even when the read omits it":
+      !!g2 && inc8.all.some((x) => x.kind === "list_group" && x.deleted && x.id === g2.id) &&
+      listNamed(inc8.all, "Work")?.data.group_id === null,
+    "when the reads disagree, no stored group is deleted":
+      disagree.groups_kept_unconfirmed && disagree.groups_deleted === 0 &&
+      !inc10.all.some((x) => x.kind === "list_group" && x.deleted),
   };
 }
 
@@ -138,6 +161,8 @@ interface FakeMicrosoft {
   folderStatus?: number;
   // Set to refuse the Exchange Online token (AADSTS65001).
   refuseExo?: boolean;
+  // Runs when the folders are requested, before the answer.
+  onFolders?: () => Promise<void>;
   // Every Substrate request as "METHOD /path", without the query.
   substrate: string[];
   // The query of each folder read.
@@ -166,7 +191,11 @@ function stubMicrosoft(m: FakeMicrosoft) {
         const path = url.slice(SUB.length);
         m.substrate.push(`${init?.method ?? "GET"} ${path}`);
         if (path === "/taskfolders") (m.folderQueries ??= []).push(decodeURIComponent(full.split("?")[1] ?? ""));
-        if (path === "/taskfolders") return m.folderStatus ? json({ error: "x" }, m.folderStatus) : json({ value: m.folders });
+        if (path === "/taskfolders") {
+          await m.onFolders?.();
+          if (m.folderStatus === 429) return new Response("{}", { status: 429, headers: { "retry-after": "1" } });
+          return m.folderStatus ? json({ error: "x" }, m.folderStatus) : json({ value: m.folders });
+        }
         if (path === "/foldergroups") return json({ value: m.groups, "@odata.deltaLink": `${SUB}/foldergroups?delta=1` });
         if (/^\/taskfolders\/[^/]+\/tasks$/.test(path)) return json({ value: [] });
       }
@@ -184,7 +213,13 @@ const reads = (m: FakeMicrosoft) => m.substrate.filter((p) => p === "GET /taskfo
 // The sync cycle side: when the read runs, and that a failing or refused
 // Substrate never fails the cycle. Needs ENABLE_MY_DAY=true and the MS_*
 // values for a token refresh. `sql` is the same database, to age the last read.
-export async function runListAppearanceCycleChecks(c: IndexCore, env: AppEnv, sql: SqlDb) {
+// `state` is the index's StateStore, to end a backoff early.
+export async function runListAppearanceCycleChecks(
+  c: IndexCore,
+  env: AppEnv,
+  sql: SqlDb,
+  state: { put(key: string, value: unknown): Promise<void>; get<T>(key: string): Promise<T | undefined> },
+) {
   await signIn(env);
   const m: FakeMicrosoft = {
     roster: ["C1", "C2"],
@@ -216,7 +251,7 @@ export async function runListAppearanceCycleChecks(c: IndexCore, env: AppEnv, sq
     await c.runSyncCycle();
     const afterInterval = reads(m);
 
-    // A failed read leaves the stored appearance and is retried next cycle.
+    // A failed read keeps the stored appearance and backs off.
     age();
     m.folderStatus = 500;
     let failedCycleThrew = false;
@@ -224,19 +259,47 @@ export async function runListAppearanceCycleChecks(c: IndexCore, env: AppEnv, sq
     const afterFailure = reads(m);
     const keptRow = c.getList("C1");
     const errState = sql.exec<{ status: string | null }>("SELECT status FROM sync_state WHERE resource = 'meta:appearance'").toArray()[0];
+    const backoff1 = await state.get<{ failures: number; next_at: number }>("appearance:backoff");
+    age();
+    await c.runSyncCycle();
+    const duringBackoff = reads(m);
+    // A second failure doubles the wait.
+    const endBackoff = async () => {
+      const b = await state.get<{ failures: number; next_at: number }>("appearance:backoff");
+      if (b) await state.put("appearance:backoff", { ...b, next_at: 0 });
+    };
+    await endBackoff();
+    await c.runSyncCycle();
+    const backoff2 = await state.get<{ failures: number; next_at: number }>("appearance:backoff");
+    // A 429 is not retried in the cycle: one request, then back off.
+    await endBackoff();
+    m.folderStatus = 429;
+    const before429 = reads(m);
+    const t429 = Date.now();
+    await c.runSyncCycle();
+    const ms429 = Date.now() - t429;
+    const after429 = reads(m);
+    // Success clears the backoff.
+    await endBackoff();
     m.folderStatus = undefined;
     await c.runSyncCycle();
     const afterRetry = reads(m);
+    const backoffCleared = (await state.get("appearance:backoff")) == null;
 
-    // A 403 turns Substrate off for this identity: no more reads, capability off.
+    // A 403 turns off list appearance only: My Day keeps working.
     age();
     m.folderStatus = 403;
     let deniedCycleThrew = false;
     await c.runSyncCycle().catch(() => (deniedCycleThrew = true));
     age();
-    const beforeDenied = m.substrate.length;
+    const beforeDenied = reads(m);
+    // Make every list's My Day scan due, to see the scan still runs.
+    sql.exec("UPDATE sync_state SET last_synced_at = 0 WHERE resource LIKE 'myday:%'");
+    const myDayCallsBefore = m.substrate.filter((p) => /^GET \/taskfolders\/.+\/tasks$/.test(p)).length;
     await c.runSyncCycle();
+    const myDayCallsAfter = m.substrate.filter((p) => /^GET \/taskfolders\/.+\/tasks$/.test(p)).length;
     const infoDenied = await c.syncInfo();
+    const exoToken = await c.getSubstrateAccessToken().catch((e) => String(e));
 
     return {
       "the first calm cycle reads folders and groups once": afterFirst === 2,
@@ -253,10 +316,17 @@ export async function runListAppearanceCycleChecks(c: IndexCore, env: AppEnv, sq
       "a failed read doesn't fail the cycle": !failedCycleThrew && afterFailure === afterInterval + 1,
       "a failed read keeps the stored appearance": keptRow?.theme_color === "green",
       "a failed read is recorded": errState?.status === "error",
-      "a failed read is retried on the next cycle": afterRetry === afterFailure + 2,
+      "a failed read backs off one sync interval":
+        backoff1?.failures === 1 && Math.abs(backoff1.next_at - Date.now() - 15 * 60_000) < 60_000,
+      "no read is made during the backoff, even when the interval has passed": duringBackoff === afterFailure,
+      "a second failure doubles the backoff":
+        backoff2?.failures === 2 && backoff2.next_at - Date.now() > 29 * 60_000 && backoff2.next_at - Date.now() <= 30 * 60_000,
+      "a 429 is not retried within the cycle": after429 === before429 + 1 && ms429 < 900,
+      "a successful read clears the backoff": afterRetry === after429 + 2 && backoffCleared,
       "a 403 doesn't fail the cycle": !deniedCycleThrew,
-      "after a 403 no Substrate call is made": m.substrate.length === beforeDenied,
+      "after a 403 the sidebar isn't read again": reads(m) === beforeDenied,
       "after a 403 list_appearance is off": infoDenied.capabilities.list_appearance === false,
+      "a 403 on the sidebar leaves My Day on": exoToken === "EXO" && myDayCallsAfter > myDayCallsBefore,
     };
   } finally {
     vi.unstubAllGlobals();
@@ -333,4 +403,36 @@ export function runListAppearanceMigrationChecks(sql: SqlDb) {
     "a new group gets a sid and a change": groupLog.length === 1 && groupLog[0].deleted === 0,
     "a deleted group leaves a deletion record": groupGone.length === 1 && groupGone[0].deleted === 1,
   };
+}
+
+// The owner changes (resetIdentity) while the sidebar read is in flight:
+// nothing from the read is written.
+export async function runListAppearanceIdentityChecks(c: IndexCore, env: AppEnv, sql: SqlDb) {
+  await signIn(env);
+  const m: FakeMicrosoft = {
+    roster: ["I1"],
+    folders: [{ Id: "I1", ThemeColor: "x", ParentFolderGroupId: "IG" }],
+    groups: [{ Id: "IG", Name: "g" }],
+    substrate: [],
+  };
+  try {
+    stubMicrosoft(m);
+    m.onFolders = async () => {
+      m.onFolders = undefined;
+      await c.resetIdentity();
+      // The new owner's roster arrives before the old read finishes.
+      sql.exec("INSERT INTO lists (list_id, display_name) VALUES ('I1', 'new owner')");
+    };
+    let threw = false;
+    await c.runSyncCycle().catch(() => (threw = true));
+    const groups = sql.exec<{ n: number }>("SELECT count(*) n FROM list_groups").one().n;
+    const row = c.getList("I1");
+    return {
+      "the cycle succeeds": !threw,
+      "no group from the old owner's read is stored": groups === 0,
+      "no list gets the old owner's appearance": row?.theme_color == null && row?.appearance_synced_at == null,
+    };
+  } finally {
+    vi.unstubAllGlobals();
+  }
 }
