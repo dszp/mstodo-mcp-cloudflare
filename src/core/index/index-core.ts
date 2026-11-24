@@ -1624,6 +1624,144 @@ export class IndexCore implements TokenProvider {
     return taskSids(this.#sql, taskIds);
   }
 
+  // ---- Client sync API, write side (docs/SYNC-API.md sections 5 and 6) ----
+  // The idempotency record and field clocks; src/core/sync/mutations.ts runs
+  // the batch and calls these. Each is one synchronous SQLite step.
+
+  // Claims a mutation id. `done` returns the stored result (a retry); a live
+  // `pending` row means another request is running it now; an expired one is
+  // taken over.
+  mutationBegin(
+    id: string,
+    principal: string,
+    nowMs: number,
+    leaseMs: number,
+  ): { state: "new" } | { state: "done"; result: unknown } | { state: "leased" } {
+    return this.#transact(() => {
+      const row = this.#sql
+        .exec<{ state: string; result_json: string | null; lease_until: number | null }>(
+          "SELECT state, result_json, lease_until FROM applied_mutations WHERE mutation_id = ?",
+          id,
+        )
+        .toArray()[0];
+      if (row?.state === "done") return { state: "done" as const, result: JSON.parse(row.result_json ?? "null") };
+      if (row && (row.lease_until ?? 0) > nowMs) return { state: "leased" as const };
+      this.#sql.exec(
+        `INSERT INTO applied_mutations (mutation_id, state, principal, lease_until, at_ms) VALUES (?, 'pending', ?, ?, ?)
+         ON CONFLICT(mutation_id) DO UPDATE SET state = 'pending', principal = excluded.principal,
+           lease_until = excluded.lease_until, at_ms = excluded.at_ms`,
+        id,
+        principal,
+        nowMs + leaseMs,
+        nowMs,
+      );
+      return { state: "new" as const };
+    });
+  }
+
+  // Records the outcome and the clocks of the fields it set, together.
+  mutationFinish(
+    id: string,
+    result: unknown,
+    clocks: Array<{ kind: string; sid: string; field: string; at_ms: number }>,
+  ): void {
+    this.#transact(() => {
+      this.#sql.exec(
+        "UPDATE applied_mutations SET state = 'done', result_json = ?, lease_until = NULL WHERE mutation_id = ?",
+        JSON.stringify(result),
+        id,
+      );
+      for (const c of clocks) {
+        this.#sql.exec(
+          `INSERT INTO field_clock (kind, sid, field, at_ms) VALUES (?, ?, ?, ?)
+           ON CONFLICT(kind, sid, field) DO UPDATE SET at_ms = max(at_ms, excluded.at_ms)`,
+          c.kind,
+          c.sid,
+          c.field,
+          c.at_ms,
+        );
+      }
+    });
+  }
+
+  // A mutation that failed and may be retried: forget it.
+  mutationAbandon(id: string): void {
+    this.#sql.exec("DELETE FROM applied_mutations WHERE mutation_id = ? AND state = 'pending'", id);
+  }
+
+  fieldClocks(kind: string, sid: string): Record<string, number> {
+    const rows = this.#sql
+      .exec<{ field: string; at_ms: number }>("SELECT field, at_ms FROM field_clock WHERE kind = ? AND sid = ?", kind, sid)
+      .toArray();
+    return Object.fromEntries(rows.map((r) => [r.field, r.at_ms]));
+  }
+
+  // sid → Graph ID, and whether that entity exists in the mirror now.
+  resolveSids(refs: Array<{ kind: string; sid: string }>): Record<string, { graph_id: string | null; live: boolean }> {
+    const table: Record<string, [string, string]> = {
+      list: ["lists", "list_id"],
+      task: ["tasks", "task_id"],
+      step: ["checklist_items", "item_id"],
+      link: ["linked_resources", "link_id"],
+      attachment: ["attachments", "attachment_id"],
+    };
+    const out: Record<string, { graph_id: string | null; live: boolean }> = {};
+    for (const r of refs) {
+      const t = table[r.kind];
+      if (!t) continue;
+      const m = this.#sql
+        .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = ? AND sid = ?", r.kind, r.sid)
+        .toArray()[0];
+      const graphId = m?.graph_id ?? null;
+      const live =
+        !!graphId && this.#sql.exec(`SELECT 1 FROM ${t[0]} WHERE ${t[1]} = ? LIMIT 1`, graphId).toArray().length > 0;
+      out[`${r.kind}:${r.sid}`] = { graph_id: graphId, live };
+    }
+    return out;
+  }
+
+  // Gives a newly created entity the sid the app chose. The mirror write that
+  // follows a Graph create mints a random sid first (the insert trigger), so
+  // this renames it, in the map and in the log, while no client can have seen
+  // it yet except through a pull racing this call. False when the app's sid
+  // already names another entity.
+  adoptSid(kind: string, sid: string, graphId: string): boolean {
+    return this.#transact(() => {
+      const taken = this.#sql
+        .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = ? AND sid = ?", kind, sid)
+        .toArray()[0];
+      if (taken) return taken.graph_id === graphId;
+      const minted = this.#sql
+        .exec<{ sid: string }>("SELECT sid FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
+        .toArray()[0];
+      if (!minted) {
+        this.#sql.exec(
+          "INSERT INTO entity_map (kind, sid, graph_id, created_ms) VALUES (?, ?, ?, ?)",
+          kind,
+          sid,
+          graphId,
+          Date.now(),
+        );
+        return true;
+      }
+      this.#sql.exec("UPDATE entity_map SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
+      this.#sql.exec("UPDATE sync_log SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
+      if (kind === "list") this.#sql.exec("UPDATE sync_log SET list_sid = ? WHERE list_sid = ?", sid, minted.sid);
+      this.#sql.exec("UPDATE field_clock SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
+      return true;
+    });
+  }
+
+  // Idempotency rows are kept 30 days, longer than the app keeps an unsent
+  // edit (section 5.4).
+  pruneMutations(olderThanMs: number): number {
+    const n = this.#sql
+      .exec<{ n: number }>("SELECT count(*) n FROM applied_mutations WHERE at_ms < ?", olderThanMs)
+      .one().n;
+    this.#sql.exec("DELETE FROM applied_mutations WHERE at_ms < ?", olderThanMs);
+    return n;
+  }
+
   // What the app needs to set up and label an account (section 14.1).
   // server_id is created once and never changes, unlike the cursor epoch, so
   // the app recognizes a server it already has. The route decides how much of
