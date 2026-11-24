@@ -249,11 +249,11 @@ export class IndexCore implements TokenProvider {
     // Versioned migrations: ALTER existing/new DBs up to the latest schema.
     // Idempotent across boots (gated by the stored schema_meta version).
     const { from, applied } = applyMigrations(this.#sql);
-    // A migration that cleared sync state (v4) must start the next cycle
+    // A migration that cleared or reset sync state (v4, v7) must start the next cycle
     // itself; otherwise the re-baseline waits for whatever alarm was set before
     // the deploy (up to DELTA_SYNC_INTERVAL_MIN). Seen in production 2026-11-24.
     // A fresh database (from 0) has nothing to rebuild; ensureSyncing starts it.
-    if (from > 0 && applied.includes(4)) {
+    if (from > 0 && (applied.includes(4) || applied.includes(7))) {
       void this.#alarms.setAlarm(Date.now() + 1000).catch((e) =>
         log.warn("migration_alarm_failed", { error: String(e) }),
       );
