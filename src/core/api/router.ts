@@ -29,11 +29,15 @@ const error = (code: string, status: number) => json({ error: code }, status);
 // disclosed before sign-in (section 18.7). A request that sends a bearer goes
 // through the resource server instead, so a bad token gets the 401 challenge.
 // Returns null for every other request.
+// server_id never changes, so an isolate asks the index once; anonymous
+// probes don't each queue a request on the index object.
+let cachedServerId: string | null = null;
+
 export async function handlePublicApiRequest(req: Request, env: AppEnv): Promise<Response | null> {
   if (req.method !== "GET" || req.headers.has("authorization")) return null;
   if (new URL(req.url).pathname !== `${API_PATH}/sync/info`) return null;
-  const { server_id } = await ownerIndex(env).syncInfo();
-  return json({ server_id });
+  cachedServerId ??= (await ownerIndex(env).syncInfo()).server_id;
+  return json({ server_id: cachedServerId });
 }
 
 // An authenticated /api/v1 request. The grant gate (epoch, age, pending
@@ -97,12 +101,8 @@ async function search(url: URL, env: AppEnv): Promise<Response> {
   const raw = url.searchParams.get("q") ?? "";
   const query = raw.length <= MAX_QUERY_CHARS ? ftsTerms(raw) : "";
   if (!query) return error("bad_query", 400);
-  const index = ownerIndex(env);
-  const { rows } = await index.search({ query, limit: SEARCH_LIMIT, include_checklist: true });
-  const ids = rows.slice(0, SEARCH_LIMIT).map((r) => r.task_id);
-  const sids = await index.syncTaskSids(ids);
-  const tasks = await Promise.all(ids.filter((id) => sids[id]).map((id) => index.syncTask(sids[id])));
-  return json({ results: tasks.filter((t) => t !== null).map((t) => ({ kind: "task", ...t })) });
+  const tasks = await ownerIndex(env).syncSearch(query, SEARCH_LIMIT);
+  return json({ results: tasks.map((t) => ({ kind: "task", ...t })) });
 }
 
 // Plain text → an FTS5 query: every word must appear, each as a prefix (so
@@ -111,6 +111,8 @@ async function search(url: URL, env: AppEnv): Promise<Response> {
 // person types can be FTS syntax or a syntax error. "" when there are no words.
 export function ftsTerms(text: string): string {
   return text
+    // FTS5 ends a query string at NUL, so control characters become spaces.
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, MAX_QUERY_TERMS)
