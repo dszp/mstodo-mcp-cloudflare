@@ -283,7 +283,13 @@ async function handleCallback(req: Request, env: HandlerEnv, url: URL): Promise<
     userId: "owner",
     metadata: { label: "owner" },
     scope: authRequest.scope,
-    props: { user: "owner", epoch, authorized_at: now },
+    props: {
+      user: "owner",
+      epoch,
+      authorized_at: now,
+      // Issuer + subject (section 15.2): the subject is the Graph object ID.
+      principal: { iss: `https://login.microsoftonline.com/${tid ?? "unknown"}/v2.0`, sub: me.id },
+    },
   });
   headers.set("location", redirectTo);
   return new Response(null, { status: 302, headers });

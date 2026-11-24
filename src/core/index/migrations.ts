@@ -138,6 +138,180 @@ const MIGRATIONS: Migration[] = [
       sql.exec("DELETE FROM sync_state WHERE resource LIKE 'tasks:%' OR resource LIKE 'myday:%'");
     },
   },
+  {
+    version: 5,
+    apply: (sql) => {
+      // docs/SYNC-API.md sections 2, 3 and 18: the change log the sync API
+      // serves. Written by triggers, so every writer is covered (delta, webhook
+      // refreshes, scans, MCP write-throughs, and future app mutations).
+      //
+      // entity_map: a server-side stable ID (sid) per list, task and step.
+      // Rows outlive their entity, so a re-inserted Graph ID keeps its sid.
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS entity_map (
+          kind       TEXT NOT NULL,
+          sid        TEXT NOT NULL,
+          graph_id   TEXT,
+          created_ms INTEGER NOT NULL,
+          PRIMARY KEY (kind, sid)
+        )
+      `);
+      sql.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS entity_map_graph ON entity_map(kind, graph_id) WHERE graph_id IS NOT NULL",
+      );
+      // sync_log: one row per list or task; a change replaces the row, moving it
+      // to a new, higher seq. Steps (and later links and attachments) don't get
+      // rows of their own: a change to one bumps its task (section 18.3).
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS sync_log (
+          seq      INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind     TEXT NOT NULL,
+          sid      TEXT NOT NULL,
+          deleted  INTEGER NOT NULL DEFAULT 0,
+          list_sid TEXT,
+          at_ms    INTEGER NOT NULL,
+          UNIQUE (kind, sid)
+        )
+      `);
+      // The cursor's epoch: replaced when every client must start over.
+      sql.exec(
+        "CREATE TABLE IF NOT EXISTS sync_meta (id INTEGER PRIMARY KEY CHECK (id = 1), epoch TEXT NOT NULL)",
+      );
+      sql.exec("INSERT OR IGNORE INTO sync_meta (id, epoch) VALUES (1, lower(hex(randomblob(8))))");
+      // Filled by the mutation endpoint (build step 7); created now so the
+      // schema lands in one migration.
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS field_clock (
+          kind TEXT NOT NULL, sid TEXT NOT NULL, field TEXT NOT NULL, at_ms INTEGER NOT NULL,
+          PRIMARY KEY (kind, sid, field)
+        )
+      `);
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS applied_mutations (
+          mutation_id TEXT PRIMARY KEY,
+          state       TEXT NOT NULL,
+          result_json TEXT,
+          principal   TEXT,
+          lease_until INTEGER,
+          at_ms       INTEGER NOT NULL
+        )
+      `);
+
+      // Epoch ms inside SQL, without unixepoch() (SQLite 3.38+).
+      const NOW = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+      const SID = "lower(hex(randomblob(16)))";
+      const listSid = (col: string) =>
+        `(SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id = ${col})`;
+      // Inside a trigger, a statement's own OR REPLACE / OR IGNORE is overridden
+      // by the outer statement's conflict policy (the task UPSERT aborts on
+      // conflict), so these never rely on one: a log write deletes the entity's
+      // row and inserts a new one (which takes the next seq), and a sid is
+      // minted only where none exists.
+      const sidOf = (kind: string, col: string) =>
+        `(SELECT sid FROM entity_map WHERE kind = '${kind}' AND graph_id = ${col})`;
+      const writeLog = (kind: string, sidExpr: string, deleted: 0 | 1, listSidExpr: string) => `
+          DELETE FROM sync_log WHERE kind = '${kind}' AND sid = ${sidExpr};
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            SELECT '${kind}', ${sidExpr}, ${deleted}, ${listSidExpr}, ${NOW}
+            WHERE ${sidExpr} IS NOT NULL;`;
+      const logTask = (taskCol: string, listCol: string, deleted: 0 | 1) =>
+        writeLog("task", sidOf("task", taskCol), deleted, listSid(listCol));
+      const logList = (col: string, deleted: 0 | 1) =>
+        writeLog("list", sidOf("list", col), deleted, sidOf("list", col));
+      const mint = (kind: string, col: string) => `
+          INSERT INTO entity_map (kind, sid, graph_id, created_ms)
+            SELECT '${kind}', ${SID}, ${col}, ${NOW}
+            WHERE NOT EXISTS (SELECT 1 FROM entity_map WHERE kind = '${kind}' AND graph_id = ${col});`;
+      // The synced columns of each table, frozen as of this migration. A marker
+      // column (checklist_synced_at) is deliberately absent, so writing it logs
+      // nothing.
+      const changed = (cols: string[]) => cols.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ");
+      const TASK_SYNCED = [
+        "task_id", "list_id", "status", "title", "body_plain", "created_at", "due_at",
+        "completed_at", "modified_at", "start_at", "reminder_at", "is_reminder_on",
+        "importance", "has_checklist", "has_attachments", "categories_json",
+        "recurrence_json", "committed_day", "committed_order", "order_datetime", "postponed_day",
+      ];
+      const LIST_SYNCED = ["display_name", "wellknown", "is_owner", "is_shared"];
+      const STEP_SYNCED = ["task_id", "display_name", "is_checked", "created_at", "checked_at"];
+
+      // One trigger per event, minting the sid and logging in order (SQLite
+      // doesn't order separate triggers on the same event).
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS lists_sync_ai AFTER INSERT ON lists BEGIN
+          ${mint("list", "new.list_id")}
+          ${logList("new.list_id", 0)}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS lists_sync_au AFTER UPDATE ON lists
+          WHEN ${changed(LIST_SYNCED)} BEGIN
+          ${logList("new.list_id", 0)}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS lists_sync_ad AFTER DELETE ON lists BEGIN
+          ${logList("old.list_id", 1)}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS tasks_sync_ai AFTER INSERT ON tasks BEGIN
+          ${mint("task", "new.task_id")}
+          ${logTask("new.task_id", "new.list_id", 0)}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS tasks_sync_au AFTER UPDATE ON tasks
+          WHEN ${changed(TASK_SYNCED)} BEGIN
+          ${logTask("new.task_id", "new.list_id", 0)}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS tasks_sync_ad AFTER DELETE ON tasks BEGIN
+          ${logTask("old.task_id", "old.list_id", 1)}
+        END
+      `);
+      // A step change bumps its task's row, but only while the task exists: a
+      // task delete cascades to its steps, and that must not revive the task.
+      const bumpTask = (ref: "new" | "old") => {
+        const live = `(SELECT m.sid FROM entity_map m JOIN tasks t ON t.task_id = m.graph_id
+            WHERE m.kind = 'task' AND m.graph_id = ${ref}.task_id)`;
+        return writeLog("task", live, 0, listSid(`(SELECT list_id FROM tasks WHERE task_id = ${ref}.task_id)`));
+      };
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS steps_sync_ai AFTER INSERT ON checklist_items BEGIN
+          ${mint("step", "new.item_id")}
+          ${bumpTask("new")}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS steps_sync_au AFTER UPDATE ON checklist_items
+          WHEN ${changed(STEP_SYNCED)} BEGIN
+          ${bumpTask("new")}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS steps_sync_ad AFTER DELETE ON checklist_items BEGIN
+          ${bumpTask("old")}
+        END
+      `);
+
+      // Existing rows (a deployment upgrading in place): give every list, task
+      // and step a sid and log every list and task once, lists first.
+      sql.exec(`INSERT OR IGNORE INTO entity_map (kind, sid, graph_id, created_ms)
+        SELECT 'list', ${SID}, list_id, ${NOW} FROM lists`);
+      sql.exec(`INSERT OR IGNORE INTO entity_map (kind, sid, graph_id, created_ms)
+        SELECT 'task', ${SID}, task_id, ${NOW} FROM tasks`);
+      sql.exec(`INSERT OR IGNORE INTO entity_map (kind, sid, graph_id, created_ms)
+        SELECT 'step', ${SID}, item_id, ${NOW} FROM checklist_items`);
+      sql.exec(`INSERT OR IGNORE INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+        SELECT 'list', m.sid, 0, m.sid, ${NOW} FROM lists l
+        JOIN entity_map m ON m.kind = 'list' AND m.graph_id = l.list_id`);
+      sql.exec(`INSERT OR IGNORE INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+        SELECT 'task', m.sid, 0, ${listSid("t.list_id")}, ${NOW} FROM tasks t
+        JOIN entity_map m ON m.kind = 'task' AND m.graph_id = t.task_id`);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -154,11 +328,17 @@ function currentVersion(sql: SqlDb): number {
     .one().version;
 }
 
-export function applyMigrations(sql: SqlDb): void {
+// Returns the stored version before this call and the versions applied, so
+// the caller can react (v4 on an existing database cleared sync state and
+// needs the next sync cycle started).
+export function applyMigrations(sql: SqlDb): { from: number; applied: number[] } {
   const cur = currentVersion(sql);
+  const applied: number[] = [];
   for (const m of MIGRATIONS) {
     if (cur >= m.version) continue;
     m.apply(sql);
     sql.exec("UPDATE schema_meta SET version = ? WHERE id = 1", m.version);
+    applied.push(m.version);
   }
+  return { from: cur, applied };
 }
