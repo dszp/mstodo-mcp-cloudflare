@@ -1,6 +1,5 @@
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { MSToDoMCP } from "./mcp-agent";
-import { MCP_PATH, oauthProviderOptions } from "../shared/oauth";
+import { MCP_PATH, oauthFront } from "../shared/oauth";
 import { appEnv } from "./env";
 
 // serve(path, { binding }) — agents/mcp defaults binding to "MCP_OBJECT", but
@@ -8,9 +7,10 @@ import { appEnv } from "./env";
 // throws on first /mcp request: env.MCP_OBJECT is undefined.
 const mcpHandler = MSToDoMCP.serve(MCP_PATH, { binding: "TODO_INDEX" });
 
-// Built per request: the canonical resource is this Worker's own URL (see
-// oauthProviderOptions). The options — TTLs, endpoints, the per-request grant
-// gate in front of /mcp — are shared with the Node host.
-export function buildOAuthProvider(origin: string): OAuthProvider<Env> {
-  return new OAuthProvider<Env>(oauthProviderOptions<Env>({ origin, mcpHandler, toAppEnv: appEnv }));
+// Built per request: the resources are this Worker's own URL (see
+// authorizationServerOptions). Everything else — endpoints, TTLs, the grant
+// gate in front of /mcp and /api/v1, the API routes — is shared with the Node
+// host.
+export function buildOAuthFront(origin: string) {
+  return oauthFront<Env>({ origin, mcpHandler, toAppEnv: appEnv });
 }

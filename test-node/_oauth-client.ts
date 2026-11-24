@@ -55,7 +55,8 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
   });
 
   // DCR → GET /authorize (consent) → POST approve → Microsoft callback.
-  async function authorizeThroughCallback() {
+  // `resource` is the RFC 8707 resource the client asks for; null omits it.
+  async function authorizeThroughCallback(resource: string | null = `${origin}/mcp`) {
     const reg = await send("/register", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -73,7 +74,7 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
       state: "client-state",
       code_challenge: challenge,
       code_challenge_method: "S256",
-      resource: `${origin}/mcp`,
+      ...(resource === null ? {} : { resource }),
     });
     const consent = await send(`/authorize?${q}`);
     expect(consent.status).toBe(200);
@@ -94,8 +95,8 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
   }
 
   // The whole flow, ending with the MCP client's tokens.
-  async function connect() {
-    const { callback, clientId, verifier } = await authorizeThroughCallback();
+  async function connect(resource?: string | null) {
+    const { callback, clientId, verifier } = await authorizeThroughCallback(resource);
     expect(callback.status).toBe(302);
     const code = new URL(callback.headers.get("location")!).searchParams.get("code")!;
     const tok = await send(
@@ -103,7 +104,7 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
       form({ grant_type: "authorization_code", code, redirect_uri: REDIRECT_URI, client_id: clientId, code_verifier: verifier }),
     );
     expect(tok.status).toBe(200);
-    const t = (await tok.json()) as { access_token: string; refresh_token: string };
+    const t = (await tok.json()) as { access_token: string; refresh_token: string; resource?: string };
     return { ...t, clientId };
   }
 
