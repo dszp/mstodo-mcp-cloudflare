@@ -1886,8 +1886,11 @@ export class IndexCore implements TokenProvider {
   } | null {
     const row = this.#sql
       .exec<{ list_id: string; task_id: string; attachment_id: string; name: string | null; content_type: string | null; kind: string | null }>(
-        `SELECT a.list_id, a.task_id, a.attachment_id, a.name, a.content_type, a.kind
+        // The task's list, not attachments.list_id: that one is stale after a
+        // move until the sub-resource scan reaches the task again.
+        `SELECT COALESCE(t.list_id, a.list_id) AS list_id, a.task_id, a.attachment_id, a.name, a.content_type, a.kind
            FROM entity_map m JOIN attachments a ON a.attachment_id = m.graph_id
+           LEFT JOIN tasks t ON t.task_id = a.task_id
           WHERE m.kind = 'attachment' AND m.sid = ?`,
         sid,
       )

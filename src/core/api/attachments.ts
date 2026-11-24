@@ -34,6 +34,15 @@ export async function attachmentBySid(rawSid: string, env: AppEnv): Promise<Resp
   // A reference attachment is a link, not a file: Graph has no bytes for it.
   if (att.kind === "reference") return json({ error: "not_a_file" }, 409);
 
+  // Every header is built before Graph is asked, so nothing that can throw
+  // runs while an upstream body is open.
+  const headers: Record<string, string> = {
+    "content-type": safeContentType(att.content_type),
+    "content-disposition": contentDisposition(att.name || "attachment"),
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+  };
+
   const graph = new GraphClient({
     getAccessToken: () => index.getAccessToken(),
     forceRefresh: () => index.refreshToken(),
@@ -47,17 +56,27 @@ export async function attachmentBySid(rawSid: string, env: AppEnv): Promise<Resp
     return graphFailure(e, att.attachment_id);
   }
 
-  const headers: Record<string, string> = {
-    "content-type": att.content_type || "application/octet-stream",
-    "content-disposition": contentDisposition(att.name || "attachment"),
-    "cache-control": "private, no-store",
-    "x-content-type-options": "nosniff",
-  };
   // Graph's length, not the mirror's size: the mirror can lag an edit, and a
-  // wrong Content-Length breaks the response.
+  // wrong Content-Length breaks the response. Not when the body was encoded:
+  // fetch() hands over decoded bytes, so the length would be the compressed one.
   const length = upstream.headers.get("content-length");
-  if (length && /^\d+$/.test(length)) headers["content-length"] = length;
-  return new Response(upstream.body, { status: 200, headers });
+  if (length && /^\d+$/.test(length) && !upstream.headers.has("content-encoding")) headers["content-length"] = length;
+  try {
+    return new Response(upstream.body, { status: 200, headers });
+  } catch (e) {
+    await upstream.body?.cancel().catch(() => {});
+    log.error("attachment_download_failed", { attachment_id: att.attachment_id, error: String(e) });
+    return json({ error: "internal_error", retry: true }, 500);
+  }
+}
+
+// type/subtype with optional parameters, printable ASCII only. Anything else
+// stored in the mirror (control or non-Latin-1 characters) would make the
+// Response constructor throw, so it falls back to a generic type.
+const MIME_RE = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+(\s*;[\x20-\x7e]*)?$/;
+
+export function safeContentType(stored: string | null): string {
+  return stored && MIME_RE.test(stored) ? stored : "application/octet-stream";
 }
 
 // Graph refused or failed. `retry` tells the app whether trying again later

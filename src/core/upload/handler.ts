@@ -73,8 +73,11 @@ export function sanitizeName(name: string): string {
   for (const ch of base) {
     if (ch.charCodeAt(0) >= 0x20) clean += ch;
   }
-  clean = clean.trim();
-  return clean.slice(0, 255) || "upload";
+  // Lone surrogates become U+FFFD and the cut is by code point, so the result
+  // is always well-formed UTF-16: encodeURIComponent throws on a lone
+  // surrogate, and a slice by UTF-16 unit can split an emoji's pair.
+  clean = clean.trim().replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD");
+  return Array.from(clean).slice(0, 255).join("") || "upload";
 }
 
 // A Content-Disposition that survives any filename: a sanitized printable-ASCII
@@ -86,7 +89,7 @@ export function sanitizeName(name: string): string {
 // and GET /api/v1/attachments/{sid}.
 export function contentDisposition(name: string): string {
   const safe = sanitizeName(name);
-  const ascii = safe.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  const ascii = safe.replace(/[^\x20-\x7e]/gu, "_").replace(/["\\]/g, "_");
   const encoded = encodeURIComponent(safe).replace(
     /['()*!]/g,
     (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
