@@ -2,7 +2,7 @@ import { log } from "../log";
 import { loadTokens } from "../auth/microsoft";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import { getAttachmentBytes } from "./graph-upload";
-import { json, reasonForGraphError, sanitizeName, statusForReason } from "./handler";
+import { contentDisposition, json, reasonForGraphError, statusForReason } from "./handler";
 import { ownerIndex } from "../owner-index";
 import {
   consumeDownloadCapability,
@@ -20,15 +20,6 @@ import type { AppEnv } from "../ports";
 // was baked into the capability at mint time, so /download makes a single Graph
 // call (the bytes) and trusts no request headers. There is no bearer mode: a link
 // is always scoped to one attachment on one task.
-
-// Build a Content-Disposition that survives non-ASCII filenames: a sanitized
-// ASCII fallback in `filename=` plus an RFC 5987 `filename*` with the real name.
-function contentDisposition(name: string): string {
-  const safe = sanitizeName(name);
-  const ascii = safe.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  const encoded = encodeURIComponent(safe);
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
-}
 
 export async function handleDownload(req: Request, env: AppEnv): Promise<Response | null> {
   const url = new URL(req.url);

@@ -77,6 +77,23 @@ export function sanitizeName(name: string): string {
   return clean.slice(0, 255) || "upload";
 }
 
+// A Content-Disposition that survives any filename: a sanitized printable-ASCII
+// fallback in `filename=` plus an RFC 5987 `filename*` with the real name.
+// sanitizeName drops control characters (so no CR/LF reaches the header), the
+// fallback replaces quotes and backslashes, and the encoded form also escapes
+// the characters encodeURIComponent leaves alone that RFC 5987 doesn't allow
+// (' ( ) * !), so a `'` can't end the charset prefix early. Shared by /download
+// and GET /api/v1/attachments/{sid}.
+export function contentDisposition(name: string): string {
+  const safe = sanitizeName(name);
+  const ascii = safe.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  const encoded = encodeURIComponent(safe).replace(
+    /['()*!]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
 export function statusForReason(reason: string): number {
   switch (reason) {
     case "too_large":

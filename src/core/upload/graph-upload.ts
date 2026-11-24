@@ -116,6 +116,19 @@ export async function getAttachmentBytes(
   return att.contentBytes ? bytesFromBase64(att.contentBytes) : null;
 }
 
+// The raw bytes of a file attachment as Graph's unread response, for a caller
+// that streams them on (GET /api/v1/attachments/{sid}). `$value` returns the
+// file itself rather than base64 inside JSON, so nothing is buffered here.
+export async function openAttachmentStream(
+  graph: GraphClient,
+  listId: string,
+  taskId: string,
+  attachmentId: string,
+): Promise<Response> {
+  const url = `${attachmentsUrl(listId, taskId)}/${encodeURIComponent(attachmentId)}/$value`;
+  return graph.getStream(url);
+}
+
 async function inlineAttach(
   graph: GraphClient,
   args: AttachArgs,

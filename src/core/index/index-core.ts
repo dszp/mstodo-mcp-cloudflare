@@ -1871,6 +1871,31 @@ export class IndexCore implements TokenProvider {
     return taskBySid(this.#sql, sid, this.#env.TIMEZONE);
   }
 
+  // One attachment by sid: the Graph IDs needed to fetch its bytes, plus the
+  // metadata the download's headers come from. Null when the sid is unknown,
+  // the attachment is no longer in the mirror, or its list is excluded (an
+  // excluded list isn't mirrored, so its attachments are not served, the same
+  // as GET /tasks/{sid}).
+  syncAttachment(sid: string): {
+    list_id: string;
+    task_id: string;
+    attachment_id: string;
+    name: string | null;
+    content_type: string | null;
+    kind: string | null;
+  } | null {
+    const row = this.#sql
+      .exec<{ list_id: string; task_id: string; attachment_id: string; name: string | null; content_type: string | null; kind: string | null }>(
+        `SELECT a.list_id, a.task_id, a.attachment_id, a.name, a.content_type, a.kind
+           FROM entity_map m JOIN attachments a ON a.attachment_id = m.graph_id
+          WHERE m.kind = 'attachment' AND m.sid = ?`,
+        sid,
+      )
+      .toArray()[0];
+    if (!row || this.#isExcluded(row.list_id)) return null;
+    return row;
+  }
+
   // FTS search answered with feed-shaped tasks, in one call (one RPC on
   // Cloudflare instead of one per hit).
   syncSearch(query: string, limit: number): NonNullable<ReturnType<typeof taskBySid>>[] {
@@ -2133,7 +2158,14 @@ export class IndexCore implements TokenProvider {
     server_id: string;
     cursor: string;
     account: { email: string };
-    capabilities: { my_day: boolean; step_order: boolean; sub_resources: boolean; push: "none" | "websocket"; source: "graph" };
+    capabilities: {
+      my_day: boolean;
+      step_order: boolean;
+      sub_resources: boolean;
+      attachment_download: boolean;
+      push: "none" | "websocket";
+      source: "graph";
+    };
   }> {
     let serverId = await this.#state.get<string>("sync:server_id");
     if (!serverId) {
@@ -2154,6 +2186,8 @@ export class IndexCore implements TokenProvider {
         // carries just the ones written through this server, and those can go
         // stale when edited in another app.
         sub_resources: checklistCacheEnabled(this.#env),
+        // GET /api/v1/attachments/{sid} streams an attachment's bytes.
+        attachment_download: true,
         push: "websocket",
         source: "graph",
       },
