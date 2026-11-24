@@ -330,6 +330,48 @@ const MIGRATIONS: Migration[] = [
       addColumn("sync_state", "sweep_gen");
     },
   },
+  {
+    version: 7,
+    apply: (sql) => {
+      // docs/SYNC-API.md section 1: keep the task body as Graph stores it
+      // (body_plain is stripped of HTML for search). Both columns join
+      // TASK_COLUMNS, so the delta UPSERT fills them.
+      const cols = sql.exec<{ name: string }>("PRAGMA table_info(tasks)").toArray().map((c) => c.name);
+      if (!cols.includes("body_content")) sql.exec("ALTER TABLE tasks ADD COLUMN body_content TEXT");
+      if (!cols.includes("body_type")) sql.exec("ALTER TABLE tasks ADD COLUMN body_type TEXT");
+
+      // v5's update trigger lists its columns; add the body so a body edit is
+      // logged. Same statement shape as v5 (delete the entity's log row, insert
+      // a new one); see the note there on why no OR REPLACE.
+      const NOW = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+      const sid = "(SELECT sid FROM entity_map WHERE kind = 'task' AND graph_id = new.task_id)";
+      const listSid = "(SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id = new.list_id)";
+      const SYNCED = [
+        "task_id", "list_id", "status", "title", "body_plain", "body_content", "body_type",
+        "created_at", "due_at", "completed_at", "modified_at", "start_at", "reminder_at",
+        "is_reminder_on", "importance", "has_checklist", "has_attachments", "categories_json",
+        "recurrence_json", "committed_day", "committed_order", "order_datetime", "postponed_day",
+      ];
+      sql.exec("DROP TRIGGER IF EXISTS tasks_sync_au");
+      sql.exec(`
+        CREATE TRIGGER tasks_sync_au AFTER UPDATE ON tasks
+          WHEN ${SYNCED.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ")} BEGIN
+          DELETE FROM sync_log WHERE kind = 'task' AND sid = ${sid};
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            SELECT 'task', ${sid}, 0, ${listSid}, ${NOW} WHERE ${sid} IS NOT NULL;
+        END
+      `);
+
+      // Existing rows have no body yet: re-baseline every synced list with mark
+      // and sweep (migration v6) so delta re-delivers each task with its body.
+      // Rows stay served throughout; bootstrap starts the cycle.
+      sql.exec(
+        `UPDATE sync_state SET delta_link = NULL, next_link = NULL, status = 'baseline',
+           sweep_gen = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+         WHERE resource LIKE 'tasks:%' AND delta_link IS NOT NULL`,
+      );
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

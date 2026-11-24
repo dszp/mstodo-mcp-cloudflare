@@ -93,6 +93,9 @@ export const TASK_COLUMNS = [
   "status",
   "title",
   "body_plain",
+  // The body as Graph stores it, for clients that render it (migration v7).
+  "body_content",
+  "body_type",
   "created_at",
   "due_at",
   "completed_at",
@@ -116,6 +119,8 @@ export interface TaskRow {
   status: string;
   title: string;
   body_plain: string | null;
+  body_content: string | null;
+  body_type: string | null;
   created_at: number | null;
   due_at: number | null;
   completed_at: number | null;
@@ -252,6 +257,8 @@ export function taskToRow(t: TodoTask, listId: string): TaskRow {
     list_id: listId,
     status: t.status ?? "notStarted",
     title: t.title ?? "",
+    body_content: t.body?.content ?? null,
+    body_type: t.body?.contentType ?? null,
     body_plain:
       t.body?.content == null ? null : stripHtml(t.body.content, t.body.contentType),
     created_at: isoToEpoch(t.createdDateTime),
