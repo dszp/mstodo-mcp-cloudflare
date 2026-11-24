@@ -525,7 +525,15 @@ export class IndexCore implements TokenProvider {
   }
 
   // -- Task CRUD ------------------------------------------------------------
+  // A task in an excluded list is never mirrored (section 1.2), even when a
+  // write tool just created or changed it in Graph: its row (if any) goes,
+  // and the feed sends a deletion. The same guard is on every write-through
+  // below that names a list.
   upsertTask(task: TodoTask, listId: string): void {
+    if (this.#isExcluded(listId)) {
+      this.deleteTask(task.id);
+      return;
+    }
     const row = taskToRow(task, listId);
     const modified = task.lastModifiedDateTime ? Date.parse(task.lastModifiedDateTime) : NaN;
     this.#clocked("task", task.id, Number.isNaN(modified) ? Date.now() : modified, () =>
@@ -603,6 +611,12 @@ export class IndexCore implements TokenProvider {
   // mirrored, the source's row (and sid) replaces it; see below.
   moveTask(taskId: string, toListId: string, newTaskId?: string): void {
     this.#transact(() => {
+      if (this.#isExcluded(toListId)) {
+        // Moved out of the mirror: a deletion, like any task of that list.
+        this.deleteTask(taskId);
+        if (newTaskId && newTaskId !== taskId) this.deleteTask(newTaskId);
+        return;
+      }
       const to = newTaskId ?? taskId;
       const dest =
         to === taskId
@@ -710,6 +724,7 @@ export class IndexCore implements TokenProvider {
   // row isn't indexed yet — the items still land and the next delta creates the
   // task row. Synchronous (atomic) like the other write-throughs.
   replaceChecklistItems(taskId: string, listId: string, items: ChecklistItem[]): void {
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
     // Diff, not delete-and-reinsert: an unchanged step writes nothing, so the
     // change log isn't bumped on every scan (section 18.6).
     this.#deleteMissing("checklist_items", "item_id", taskId, items.map((i) => i.id));
@@ -745,6 +760,7 @@ export class IndexCore implements TokenProvider {
   // Authoritative replace of a task's linked resources from a fresh Graph
   // fetch (the sub-resource scan), as a diff.
   replaceLinkedResources(taskId: string, listId: string, links: LinkedResource[]): void {
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
     this.#deleteMissing("linked_resources", "link_id", taskId, links.map((l) => l.id));
     for (const l of links) {
       this.#clocked("link", l.id, Date.now(), () => this.#sql.exec(
@@ -760,6 +776,7 @@ export class IndexCore implements TokenProvider {
 
   // Authoritative replace of a task's attachment metadata (no bytes), as a diff.
   replaceAttachments(taskId: string, listId: string, atts: Attachment[]): void {
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
     this.#deleteMissing("attachments", "attachment_id", taskId, atts.map((a) => a.id));
     for (const a of atts) {
       const modified = a.lastModifiedDateTime ? Date.parse(a.lastModifiedDateTime) : NaN;
@@ -814,6 +831,7 @@ export class IndexCore implements TokenProvider {
   // the self-induced edit also rides delta → markChecklistDirty → authoritative
   // re-fetch next scan.
   upsertChecklistItem(taskId: string, listId: string, item: ChecklistItem): void {
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
     const row = checklistItemToRow(item, taskId, listId);
     this.#clocked("step", item.id, stepClock(item), () => this.#sql.exec(
       `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
@@ -843,6 +861,7 @@ export class IndexCore implements TokenProvider {
   // so resolveSids reports it not live until the next sub-resource scan, and an
   // edit sent right after the create is refused as deleted.
   upsertLinkedResource(taskId: string, listId: string, link: LinkedResource): void {
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
     this.#clocked("link", link.id, Date.now(), () => this.#sql.exec(
       `INSERT INTO linked_resources (link_id, task_id, list_id, web_url, display_name, application_name, external_id)
          VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1932,7 +1951,13 @@ export class IndexCore implements TokenProvider {
   }
 
   // sid → Graph ID, and whether that entity exists in the mirror now.
-  resolveSids(refs: Array<{ kind: string; sid: string }>): Record<string, { graph_id: string | null; live: boolean }> {
+  // `excluded`: the entity is an excluded list, or belongs to one (section
+  // 1.2), so the sync API refuses to write to it. A task whose row is gone is
+  // placed by the list its last change-log row names, since an excluded
+  // list's tasks are deleted from the mirror.
+  resolveSids(
+    refs: Array<{ kind: string; sid: string }>,
+  ): Record<string, { graph_id: string | null; live: boolean; excluded?: true }> {
     const table: Record<string, [string, string]> = {
       list: ["lists", "list_id"],
       task: ["tasks", "task_id"],
@@ -1940,7 +1965,7 @@ export class IndexCore implements TokenProvider {
       link: ["linked_resources", "link_id"],
       attachment: ["attachments", "attachment_id"],
     };
-    const out: Record<string, { graph_id: string | null; live: boolean }> = {};
+    const out: Record<string, { graph_id: string | null; live: boolean; excluded?: true }> = {};
     for (const r of refs) {
       const t = table[r.kind];
       if (!t) continue;
@@ -1950,7 +1975,22 @@ export class IndexCore implements TokenProvider {
       const graphId = m?.graph_id ?? null;
       const live =
         !!graphId && this.#sql.exec(`SELECT 1 FROM ${t[0]} WHERE ${t[1]} = ? LIMIT 1`, graphId).toArray().length > 0;
-      out[`${r.kind}:${r.sid}`] = { graph_id: graphId, live };
+      let listId: string | null = null;
+      if (graphId && r.kind === "list") listId = graphId;
+      else if (graphId && live) {
+        listId = this.#sql.exec<{ l: string }>(`SELECT list_id l FROM ${t[0]} WHERE ${t[1]} = ?`, graphId).toArray()[0]?.l ?? null;
+      } else if (r.kind === "task") {
+        listId =
+          this.#sql
+            .exec<{ l: string | null }>(
+              `SELECT m.graph_id l FROM sync_log s JOIN entity_map m ON m.kind = 'list' AND m.sid = s.list_sid
+                WHERE s.kind = 'task' AND s.sid = ?`,
+              r.sid,
+            )
+            .toArray()[0]?.l ?? null;
+      }
+      const excluded = listId !== null && this.#isExcluded(listId);
+      out[`${r.kind}:${r.sid}`] = excluded ? { graph_id: graphId, live, excluded } : { graph_id: graphId, live };
     }
     return out;
   }

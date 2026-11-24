@@ -118,3 +118,16 @@ describe("set_list_alias", () => {
     expect(await loadListsConfig(h.env)).toMatchObject({ aliases: { one: "L1" }, overrides: { L1: "excluded" }, archive: ["L9"] });
   });
 });
+
+describe("write tools into an excluded list", () => {
+  it("create_task succeeds in Graph and leaves no row in the mirror", async () => {
+    const h = await harness([on("POST", `${G}/LX/tasks`, (b) => json(task("T1", b as Record<string, unknown>), 201))]);
+    h.core.upsertList({ id: "LT", displayName: "Todo" } as never);
+    h.core.upsertList({ id: "LX", displayName: "Excluded" } as never);
+    await h.core.updateListsConfig({ overrides: { LX: "excluded" } });
+    h.core.upsertTask(task("T2") as never, "LT");
+    expect(await h.call("create_task", { list: "LX", title: "x" })).toMatchObject({ ok: true });
+    expect(h.tasks()).toEqual([{ id: "T2", list_id: "LT" }]);
+    expect(h.calls.some((c) => c.method === "POST" && c.url === `${G}/LX/tasks`)).toBe(true);
+  });
+});

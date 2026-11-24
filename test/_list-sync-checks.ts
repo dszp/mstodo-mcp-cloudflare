@@ -4,6 +4,8 @@
 import type { IndexCore } from "../src/core/index/index-core";
 import type { FeedChange, FeedPage } from "../src/core/index/change-feed";
 import type { AppEnv } from "../src/core/ports";
+import { applyBatch, type ExecInput } from "../src/core/sync/mutations";
+import { storeOf } from "./_mutation-checks";
 
 const task = (id: string, title: string) =>
   ({ id, title, status: "notStarted", lastModifiedDateTime: "2026-11-24T10:00:00Z" }) as never;
@@ -43,6 +45,34 @@ export async function runListSyncChecks(c: IndexCore, env: AppEnv) {
   const route = c.excludedLists();
   const again = await c.refreshListSync(exclCfg);
 
+  // Writes into the excluded list. The index keeps none of them (the Graph
+  // write a tool made still stands), and the sync API refuses them.
+  c.upsertTask(task("TNEW", "created by a tool"), "LX");
+  c.upsertChecklistItem("TNEW", "LX", { id: "S1", displayName: "step" } as never);
+  c.upsertTask(task("TM", "moved by a tool"), "LT");
+  const tmSid = c.syncTaskSids(["TM"]).TM;
+  c.moveTask("TM", "LX");
+  const writes = {
+    rows: c.query({ lists: ["LX"] }).rows.length + c.getChecklistItems("TNEW").length,
+    moved: c.query({ lists: ["LT", "LX"] }).rows.every((r) => r.task_id !== "TM"),
+  };
+  const execCalls: ExecInput[] = [];
+  const at = new Date().toISOString();
+  const batch = await applyBatch(
+    storeOf(c),
+    async (input) => (execCalls.push(input), { ok: true, graphId: input.graphId ?? "new" }),
+    {
+      mutations: [
+        { id: "m1", at, op: "task.update", sid: txSid, fields: { title: "x" } },
+        { id: "m2", at, op: "task.create", sid: "0123456789abcdef0123456789abcdef", fields: { list_id: lxSid, title: "x" } },
+        { id: "m3", at, op: "task.move", sid: tmSid, fields: { list_id: lxSid } },
+        { id: "m4", at, op: "list.update", sid: lxSid, fields: { name: "Renamed" } },
+      ],
+    },
+    "p",
+  );
+  const errors = batch.results.map((r) => (r.status === "rejected" ? r.error : r.status));
+
   // Switch it back on: the list returns under its old sid.
   const backCfg = await c.updateListsConfig({ overrides: { LX: "todo" } });
   const back = walk(c, inc.cursor);
@@ -63,6 +93,11 @@ export async function runListSyncChecks(c: IndexCore, env: AppEnv) {
     "the excluded list keeps its roster row": c.getList("LX") !== null,
     "the excluded route names it by sid": route.length === 1 && route[0].id === lxSid && route[0].name === "Soon excluded",
     "an unchanged config writes nothing": again.changed === 0,
+    "a write-through into an excluded list keeps no row": writes.rows === 0,
+    "a task moved into an excluded list leaves the mirror": writes.moved,
+    "the sync API refuses task writes that touch an excluded list":
+      errors.slice(0, 3).every((e) => e === "list_excluded"),
+    "an excluded list itself can still be updated": errors[3] === "applied" && execCalls.map((x) => x.op).join() === "list.update",
     "a re-included list comes back under its old sid":
       back.all.some((x) => x.kind === "list" && !x.deleted && x.id === lxSid && x.data.sync === "todo"),
     "its tasks keep their sids": !!txSid && sidAfter === txSid,
