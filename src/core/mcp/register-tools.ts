@@ -167,9 +167,14 @@ type NotMirrored = Array<{ list_id: string; display_name: string | null }>;
 const NOT_MIRRORED_NOTE =
   "These lists are excluded from the mirror, so their tasks are not in these results. " +
   "Read one live with list_tasks, or switch it back on with set_list_config overrides.";
-function notMirroredFields(lists: NotMirrored): Record<string, unknown> {
-  return lists.length > 0 ? { not_mirrored: lists, not_mirrored_note: NOT_MIRRORED_NOTE } : {};
+function notMirroredFields(lists: NotMirrored, note = NOT_MIRRORED_NOTE): Record<string, unknown> {
+  return lists.length > 0 ? { not_mirrored: lists, not_mirrored_note: note } : {};
 }
+// list_my_day_tasks reads the index, so My Day tasks in an excluded list are
+// missing from it. Which excluded lists hold any is only known live, a
+// Substrate call per list, so every excluded list is named.
+const MY_DAY_NOT_MIRRORED_NOTE =
+  "Tasks in these lists aren't mirrored, so any of them on My Day are missing here.";
 
 // list_tasks pages an excluded list live from Graph. Its cursor carries
 // Graph's @odata.nextLink, prefixed so it can't be taken for an index keyset
@@ -3128,6 +3133,12 @@ class ToDoTools implements TokenProvider {
                   cache_as_of: scan.last_scan_at_ms,
                   cache_status: scan.status,
                   stale,
+                  ...notMirroredFields(
+                    lists
+                      .filter((l) => l.sync === "excluded")
+                      .map((l) => ({ list_id: l.list_id, display_name: l.display_name })),
+                    MY_DAY_NOT_MIRRORED_NOTE,
+                  ),
                   tasks,
                 }),
               },

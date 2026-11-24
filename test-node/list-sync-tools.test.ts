@@ -32,7 +32,7 @@ function task(id: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-async function harness(routes: Route[] = []) {
+async function harness(routes: Route[] = [], extraEnv: Record<string, string> = {}) {
   const db: DatabaseSync = openDatabase(":memory:");
   const { env, core } = buildNodeEnv(db, {
     TIMEZONE: "UTC",
@@ -42,6 +42,7 @@ async function harness(routes: Route[] = []) {
     OWNER_EMAIL: "test-owner@example.com",
     ENABLE_MY_DAY: "false",
     ENABLE_CHECKLIST_CACHE: "true",
+    ...extraEnv,
   });
   await storeTokens(env, { access_token: "a", refresh_token: "r", expires_at: Date.now() + 3_600_000, scope: SCOPES, obtained_at: Date.now() });
   const calls: Array<{ method: string; url: string }> = [];
@@ -224,5 +225,33 @@ describe("list_lists auto-pin", () => {
     expect(r).toMatchObject({ ok: true, lists: [{ id: "X", type: "todo" }] });
     expect(h.syncOf("X")).toBe("todo");
     expect((await loadListsConfig(h.env)).overrides).toEqual({ X: "todo" });
+  });
+});
+
+describe("list_my_day_tasks", () => {
+  const tokenRoute: Route = (_m, u) =>
+    u.endsWith("/oauth2/v2.0/token")
+      ? json({ token_type: "Bearer", scope: SCOPES, expires_in: 3600, access_token: "sub", refresh_token: "r" })
+      : undefined;
+
+  it("names the excluded lists, whose My Day tasks it can't show", async () => {
+    const h = await harness([tokenRoute], { ENABLE_MY_DAY: "true" });
+    h.core.upsertList({ id: "LT", displayName: "Todo" } as never);
+    h.core.upsertList({ id: "LF", displayName: "Flagged Emails", wellknownListName: "flaggedEmails" } as never);
+    await h.core.updateListsConfig({ overrides: { LF: "excluded" } });
+    expect(await h.call("list_my_day_tasks", {})).toMatchObject({
+      ok: true,
+      not_mirrored: [{ list_id: "LF", display_name: "Flagged Emails" }],
+      not_mirrored_note: expect.any(String),
+    });
+  });
+
+  it("adds nothing when no list is excluded", async () => {
+    const h = await harness([tokenRoute], { ENABLE_MY_DAY: "true" });
+    h.core.upsertList({ id: "LT", displayName: "Todo" } as never);
+    await h.core.updateListsConfig({ overrides: { LT: "todo" } });
+    const r = await h.call("list_my_day_tasks", {});
+    expect(r).toMatchObject({ ok: true });
+    expect(r).not.toHaveProperty("not_mirrored");
   });
 });
