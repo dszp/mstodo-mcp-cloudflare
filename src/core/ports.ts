@@ -37,6 +37,8 @@ export type Transact = <T>(fn: () => T) => T;
 export interface ChangeNotifier {
   announce(cursor: string): void;
   closeAll(reason: "revoked" | "reset"): void;
+  // Ends sockets whose token has expired. Run on each sync cycle.
+  sweep(): void;
 }
 
 export interface StateStore {

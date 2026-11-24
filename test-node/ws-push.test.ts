@@ -4,6 +4,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket from "ws";
+import { connect as tcpConnect } from "node:net";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
 import { IndexCore, announcing } from "../src/core/index/index-core";
@@ -23,7 +24,7 @@ const task = (id: string, title: string, at = "2026-11-24T10:00:00Z") =>
 describe("announce", () => {
   it("announces once per write that moved the log, with the new cursor", async () => {
     const sent: string[] = [];
-    const c = core({ announce: (x) => sent.push(x), closeAll: () => {} });
+    const c = core({ announce: (x) => sent.push(x), closeAll: () => {}, sweep: () => {} });
     c.upsertList({ id: "L1", displayName: "One" } as never);
     c.upsertTask(task("T1", "a"), "L1");
     c.upsertTask(task("T1", "a"), "L1"); // identical: nothing logged
@@ -34,7 +35,7 @@ describe("announce", () => {
 
   it("closes every socket on revoke", async () => {
     const closed: string[] = [];
-    const c = core({ announce: () => {}, closeAll: (r) => closed.push(r) });
+    const c = core({ announce: () => {}, closeAll: (r) => closed.push(r), sweep: () => {} });
     await c.revokeAllGrants();
     expect(closed).toEqual(["revoked"]);
   });
@@ -95,5 +96,31 @@ describe("SocketHub", () => {
     const c = connect(base + SOCKET_PATH);
     await c.next(1);
     expect(JSON.parse((await c.next(2))!)).toEqual({ type: "reauth" });
+  });
+
+  it("survives a client that resets while the token is being checked", async () => {
+    const hub = new SocketHub();
+    const base = await start(hub, () => new Promise((r) => setTimeout(() => r({ exp: Date.now() + 60_000 }), 50)));
+    const { port } = new URL(base);
+    const sock = tcpConnect(Number(port), "127.0.0.1", () => {
+      sock.write(
+        `GET ${SOCKET_PATH} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+      );
+      sock.resetAndDestroy();
+    });
+    sock.on("error", () => {});
+    await new Promise((r) => setTimeout(r, 120));
+    expect(hub.size).toBe(0);
+  });
+
+  it("closes a socket that sends anything but ping", async () => {
+    const hub = new SocketHub();
+    const base = await start(hub, async () => ({ exp: Date.now() + 60_000 }));
+    const c = connect(base + SOCKET_PATH);
+    await c.next(1);
+    const code = new Promise<number>((r) => c.ws.on("close", (k) => r(k)));
+    c.ws.send("hello?");
+    expect(await code).toBe(1008);
   });
 });
