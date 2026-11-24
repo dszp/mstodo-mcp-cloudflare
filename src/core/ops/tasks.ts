@@ -175,6 +175,12 @@ export function createTask(
     // Committed: nothing below may fail the op.
     await reserveSid(ctx, "task", input.sid, task.id);
     await upsertTask(ctx, task, list_id);
+    // A task this create just made has no steps, links or attachments, so its
+    // sub-resources are known now: the scan has nothing to add, and a client
+    // isn't sent the task a second time when it would have finished.
+    await bestEffort("index_mark_subresources_failed", { task_id: task.id }, () =>
+      ctx.index.replaceChecklistItems(task.id, list_id, []),
+    );
     const link_rules = await linkRulesAfterWrite(ctx, list_id, async () => task);
     return ok({ list_id, task, link_rules });
   });

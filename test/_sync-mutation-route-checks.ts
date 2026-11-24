@@ -171,7 +171,12 @@ export async function runSyncMutationRouteChecks(
     "create body",
     { title: "Call Acme", dueDateTime: { dateTime: "2026-11-25T00:00:00", timeZone: "UTC" }, importance: "high" },
   ]);
-  const fetched = (await (await taskById(TASK)).json()) as { id: string; data: { title: string; list_id: string } };
+  const fetched = (await (await taskById(TASK)).json()) as {
+    id: string;
+    data: { title: string; list_id: string; subresources_complete: boolean };
+  };
+  // A task the create just made has no sub-resources to wait for.
+  expect(["new task's sub-resources known", fetched.data.subresources_complete]).toEqual(["new task's sub-resources known", true]);
   expect(["created task under the app's sid", fetched.id, fetched.data.title, fetched.data.list_id]).toEqual([
     "created task under the app's sid",
     TASK,
@@ -253,7 +258,7 @@ export async function runSyncMutationRouteChecks(
   expect(["step update body", stepPatch?.body]).toEqual(["step update body", { isChecked: true }]);
   expect(["link create body", linkPost?.body]).toEqual([
     "link create body",
-    { applicationName: "Microsoft To Do sync", displayName: "Ticket", webUrl: "https://acme.example/1" },
+    { applicationName: "Microsoft To Do sync", displayName: "Ticket", externalId: LINK, webUrl: "https://acme.example/1" },
   ]);
 
   // My Day is off on this server.

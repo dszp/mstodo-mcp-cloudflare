@@ -757,10 +757,20 @@ export class IndexCore implements TokenProvider {
   }
 
   // Mark a task's checklist stale so the next budgeted scan re-fetches it. The
-  // incremental engine: the delta-apply path nulls this whenever a task changes
+  // incremental engine: the delta-apply path calls this whenever a task changes
   // (checklist edits bump the task's lastModifiedDateTime → ride $delta).
+  //
+  // checklist_synced_at: NULL = never fetched; > 0 = fetched then; < 0 = was
+  // fetched at -value and is due again. A task fetched before keeps counting
+  // as complete in the change feed while it waits: what changes on the re-fetch
+  // logs the task itself (the step/link/attachment triggers), and the marker is
+  // not a logged column, so a NULL here would leave clients holding
+  // subresources_complete: false with no later row to correct it.
   markChecklistDirty(taskId: string): void {
-    this.#sql.exec("UPDATE tasks SET checklist_synced_at = NULL WHERE task_id = ?", taskId);
+    this.#sql.exec(
+      "UPDATE tasks SET checklist_synced_at = -abs(checklist_synced_at) WHERE task_id = ? AND checklist_synced_at IS NOT NULL",
+      taskId,
+    );
   }
 
   // Drop a task's cached checklist rows (task deletion already cascades via
@@ -873,7 +883,7 @@ export class IndexCore implements TokenProvider {
     return this.#sql
       .exec(
         `SELECT task_id, list_id FROM tasks
-          WHERE checklist_synced_at IS NULL
+          WHERE (checklist_synced_at IS NULL OR checklist_synced_at < 0)
             ${skipClause}
             ${openOnlyClause}
           ORDER BY (status = 'completed'), modified_at DESC
@@ -1844,6 +1854,21 @@ export class IndexCore implements TokenProvider {
       this.#sql.exec("INSERT INTO entity_map (kind, sid, graph_id, created_ms) VALUES (?, ?, ?, ?)", kind, sid, graphId, Date.now());
       return true;
     });
+  }
+
+  // When the mirror first saw each Graph ID (its entity_map row). The
+  // ambiguous-create recovery for lists uses it: a list first seen after the
+  // earlier attempt began, or not seen at all yet, may be what that attempt
+  // made. IDs the mirror has never seen are absent from the result.
+  firstSeenMs(kind: string, graphIds: string[]): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const id of graphIds) {
+      const row = this.#sql
+        .exec<{ created_ms: number }>("SELECT created_ms FROM entity_map WHERE kind = ? AND graph_id = ?", kind, id)
+        .toArray()[0];
+      if (row) out[id] = row.created_ms;
+    }
+    return out;
   }
 
   // Gives a newly created entity the sid the app chose, after the fact: when

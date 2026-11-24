@@ -173,13 +173,21 @@ describe("checklist store methods", () => {
     expect(meta.checklist_synced_at).not.toBeNull();
   });
 
-  it("markChecklistDirty nulls checklist_synced_at", async () => {
+  it("markChecklistDirty marks a fetched task due again, and leaves a never-fetched one alone", async () => {
     await seedTask("t4");
+    await seedTask("t4n");
+    let due: string[] = [];
     await runInDurableObject(stub(), async (instance: TodoIndex) => {
       await instance.replaceChecklistItems("t4", "L", [{ id: "x", displayName: "x", isChecked: false }]);
       await instance.markChecklistDirty("t4");
+      await instance.markChecklistDirty("t4n");
+      due = (await instance.selectDueChecklistTasks(10, [], [])).map((t: { task_id: string }) => t.task_id);
     });
-    expect((await taskMeta("t4")).checklist_synced_at).toBeNull();
+    const marker = (await taskMeta("t4")).checklist_synced_at as number;
+    // Negative: fetched before (so still complete in the feed), and due again.
+    expect(["fetched task's marker", marker < 0]).toEqual(["fetched task's marker", true]);
+    expect(["never-fetched task's marker", (await taskMeta("t4n")).checklist_synced_at]).toEqual(["never-fetched task's marker", null]);
+    expect(["both due for the scan", due.sort()]).toEqual(["both due for the scan", ["t4", "t4n"]]);
   });
 
   it("clearChecklistItems removes a task's items", async () => {

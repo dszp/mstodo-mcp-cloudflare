@@ -14,8 +14,8 @@ import { isReauthRequired } from "../auth/reauth";
 import { GraphError } from "../graph/client";
 import { SubstrateError } from "../graph/substrate-client";
 import { bestEffort, type OpsContext } from "../ops/context";
-import { createLink, deleteLink, updateLink } from "../ops/links";
-import { createList, deleteList, updateList } from "../ops/lists";
+import { createLink, deleteLink, findCreatedLinks, updateLink } from "../ops/links";
+import { createList, deleteList, findCreatedLists, updateList } from "../ops/lists";
 import { addToMyDay, removeFromMyDay, reorderMyDayTask, todayInTimeZone } from "../ops/my-day";
 import type { ReorderPosition } from "../ops/position";
 import type { ToolResult } from "../ops/result";
@@ -137,7 +137,14 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
 
   switch (op) {
     case "list.create": {
-      const r = await createList(ctx, { display_name: requiredText(fields, "name"), sid: input.sid });
+      const display_name = requiredText(fields, "name");
+      if (input.priorAttemptMs !== undefined) {
+        // An earlier attempt may have made it (section 5.4).
+        const found = await findCreatedLists(ctx, { display_name, since_ms: input.priorAttemptMs, sid: input.sid });
+        if (found.length === 1) return applied(found[0].id);
+        if (found.length > 1) return rejected("ambiguous_create");
+      }
+      const r = await createList(ctx, { display_name, sid: input.sid });
       return r.ok ? applied(r.value.list.id) : rejected(r.reason);
     }
     case "list.update": {
@@ -310,10 +317,17 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       const task_id = ref("task_id");
       const list_id = await listOfTask(ctx, task_id);
       if (!list_id) return rejected("unknown_task");
+      if (input.priorAttemptMs !== undefined) {
+        // An earlier attempt may have made it: it carries the sid as its
+        // externalId, so the match is exact (section 5.4).
+        const found = await findCreatedLinks(ctx, { list_id, task_id, sid: input.sid });
+        if (found.length >= 1) return applied(found[0].id);
+      }
       const r = await createLink(ctx, {
         list_id,
         task_id,
         application_name: SYNC_LINK_APPLICATION,
+        external_id: input.sid,
         sid: input.sid,
         web_url: requiredText(fields, "url"),
         display_name: optionalText(fields, "title"),

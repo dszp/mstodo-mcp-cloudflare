@@ -21,6 +21,29 @@ export function createList(ctx: OpsContext, input: { display_name: string; sid?:
   });
 }
 
+// Ambiguous-create recovery (docs/SYNC-API.md section 5.4): a list.create
+// whose earlier attempt may have reached Graph looks for what it made before
+// creating again. Lists carry no creation time or free field, so a candidate
+// is a list with the same name that the mirror first saw after the attempt
+// began (minus skew), or hasn't seen yet. One candidate is adopted under the
+// app's sid; more than one is for the caller to refuse.
+const CREATE_SKEW_MS = 5_000;
+export async function findCreatedLists(
+  ctx: OpsContext,
+  input: { display_name: string; since_ms: number; sid?: string },
+): Promise<TodoTaskList[]> {
+  const res = await ctx.graph.getAllPages(LISTS_URL, TodoTaskListSchema);
+  const named = res.status === 200 ? (res.items as TodoTaskList[]).filter((l) => l.displayName === input.display_name) : [];
+  if (named.length === 0) return [];
+  const seen = await ctx.index.firstSeenMs("list", named.map((l) => l.id));
+  const found = named.filter((l) => seen[l.id] === undefined || seen[l.id] >= input.since_ms - CREATE_SKEW_MS);
+  if (found.length === 1) {
+    await reserveSid(ctx, "list", input.sid, found[0].id);
+    await upsertList(ctx, found[0]);
+  }
+  return found;
+}
+
 export function updateList(
   ctx: OpsContext,
   input: { list_id: string; display_name: string },

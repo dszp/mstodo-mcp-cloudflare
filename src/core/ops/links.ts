@@ -1,5 +1,5 @@
 import { LinkedResourceSchema, type LinkedResource } from "../graph/types";
-import { createLinkedResource } from "../graph/todo-resources";
+import { createLinkedResource, getTaskWithSubresources } from "../graph/todo-resources";
 import { bestEffort, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { err, ok, type ToolResult } from "./result";
 
@@ -49,6 +49,22 @@ export function createLink(
       throw e;
     }
   });
+}
+
+// Ambiguous-create recovery (docs/SYNC-API.md section 5.4): the sync API
+// creates a link with its sid as the externalId, so a retry finds what an
+// earlier attempt made by that exact value.
+export async function findCreatedLinks(
+  ctx: OpsContext,
+  input: { list_id: string; task_id: string; sid: string },
+): Promise<LinkedResource[]> {
+  const task = await getTaskWithSubresources(ctx.graph, input.list_id, input.task_id);
+  const found = (task.linkedResources ?? []).filter((l) => l.externalId === input.sid);
+  if (found.length === 1) {
+    await reserveSid(ctx, "link", input.sid, found[0].id);
+    await cacheUpsert(ctx, input.task_id, input.list_id, found[0]);
+  }
+  return found;
 }
 
 // Only supplied fields change; null clears external_id / web_url.
