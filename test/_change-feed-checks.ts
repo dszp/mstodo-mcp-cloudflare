@@ -80,6 +80,16 @@ export async function runChangeFeedChecks(c: IndexCore) {
   const garbage = c.syncChanges({ cursor: "not-a-cursor" });
   const badScope = c.syncChanges({ scope: "everything" });
 
+  // A task sent on the first page of a full sync and deleted while the walk
+  // is still paging must reach the device as a deletion.
+  c.upsertTask(task("T5", "doomed"), "L1");
+  const first = page(c, { cursor: null, scope: "all", limit: 1 });
+  let midCursor = first.cursor;
+  const doomedSid = c.syncTaskSids(["T5"]).T5;
+  c.deleteTask("T5");
+  const rest = walk(c, midCursor, "all", 1);
+  midCursor = rest.cursor;
+
   // A phone holds T4 open, goes offline, and T4 is completed long ago (a
   // backdated completion, or the phone was away more than 30 days). The
   // incremental pull must tell it to drop T4, not skip it.
@@ -100,7 +110,7 @@ export async function runChangeFeedChecks(c: IndexCore) {
     "full sync ends caught up with an epoch.seq cursor": /^[0-9a-f]+\.\d+$/.test(full.cursor),
     "paging one at a time returns the same entities, no deletion records":
       JSON.stringify(ids(paged.all)) === JSON.stringify(ids(full.all)) && paged.pages === 5,
-    "a full sync's intermediate cursors are marked as a walk": pagedCursors.slice(0, -1).every((x) => x.endsWith(".f")) && !pagedCursors[pagedCursors.length - 1].endsWith(".f"),
+    "a full sync's intermediate cursors are marked as a walk": pagedCursors.slice(0, -1).every((x) => /\.f\d+$/.test(x)) && !/\.f/.test(pagedCursors[pagedCursors.length - 1]),
     "task references its list by sid": !!t1d && !!l1 && t1d.list_id === l1.id,
     "due goes out as a bare date": t1d?.due === "2026-11-25",
     "reminder is an instant": t1d?.reminder.on === true && t1d.reminder.at === "2026-11-25T14:00:00.000Z",
@@ -121,6 +131,8 @@ export async function runChangeFeedChecks(c: IndexCore) {
     "a cursor ahead of the log is a cursor reset": !ahead.ok && ahead.error === "cursor_reset",
     "a malformed cursor is refused": !garbage.ok && garbage.error === "bad_cursor",
     "an unknown scope is refused": !badScope.ok && badScope.error === "bad_scope",
+    "a deletion during a full sync reaches the device":
+      first.has_more && rest.all.some((x) => x.deleted && x.id === doomedSid),
     "an incremental pull drops a task that left the device's scope":
       back.all.length === 1 && back.all[0].deleted === true && back.all[0].id === t4sid,
     "a task is readable by sid": one?.data.title === "done recently, renamed" && one.id === t2sid,
