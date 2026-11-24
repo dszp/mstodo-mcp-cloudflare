@@ -1324,6 +1324,10 @@ current. Two options, undecided:
    Graph has no flag-only permission. It would also give the MCP tools email-flag
    abilities none of the current connectors have.
 
+If built, it may live in a **separate Worker** with its own Entra app registration
+(David, 2026-11-24). That keeps the mailbox-wide token out of the task server and out of
+its MCP connectors; the task server would consume it as one more source.
+
 Until decided: keep mirroring through To Do, treat the list as `archive`, and don't
 backfill its sub-resources. Design the app's flagged-email area as one more source
 behind the same feed, so either option fits without app changes.
