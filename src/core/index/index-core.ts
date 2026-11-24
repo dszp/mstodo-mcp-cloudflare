@@ -2526,42 +2526,139 @@ export class IndexCore implements TokenProvider {
   // tools today, sync mutations and the n8n routes later). The writes run in
   // the caller — the McpAgent Worker on Cloudflare, the request on Node — not
   // in here, and a closure can't cross Durable Object RPC, so the queue can't
-  // be a promise chain like #refreshChain. It is a lease instead: the writer
-  // acquires it, makes its Graph/Substrate calls, and releases it. A writer
-  // that dies mid-write (isolate killed, client gone) stops renewing and the
-  // TTL frees the lease. Client side, waiting and renewal: src/core/ops/write-lease.ts.
+  // be a promise chain like #refreshChain. It is a lease: the writer acquires
+  // it, makes its Graph/Substrate calls, renews it while they run, and
+  // releases it. Waiting happens HERE, in a FIFO of pending acquires, so a
+  // burst of writes queues in arrival order instead of polling; only the
+  // wait crosses RPC. A writer that dies stops renewing and the TTL hands the
+  // lease to the next waiter. Client side: src/core/ops/write-lease.ts.
   //
-  // Held in memory, not storage, like #refreshChain: the object only restarts
-  // after it has gone idle (no RPC from a live holder, which renews every
-  // ttl/3) or on a deploy, which also drops the requests that held the lease.
+  // {holder, expiresAt} is persisted in the StateStore so a restart of the
+  // object (it can be evicted between a holder's renewals) doesn't drop a live
+  // lease; the waiters are in memory because their RPCs die with the object.
   #writeLease: { holder: string; expiresAt: number } | null = null;
+  #writeLeaseLoaded: Promise<void> | null = null;
+  #writeLeaseWaiters: Array<{
+    holder: string;
+    ttl: number;
+    resolve: (r: { granted: true; expiresAt: number } | { granted: false }) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
+  #writeLeaseExpiryTimer: ReturnType<typeof setTimeout> | undefined;
 
-  // Grants the lease when it is free, expired, or already held by `holder`
-  // (which extends it — the renewal path). Otherwise says how long until the
-  // current lease would expire; the other holder's id is not disclosed.
-  acquireWriteLease(holder: string, ttlMs: number): { granted: true; expiresAt: number } | { granted: false; retryInMs: number } {
-    const now = Date.now();
+  // Grants the lease to `holder` when it already holds it (renewal: extends
+  // it), or when it is free and nobody is queued ahead. Otherwise waits up to
+  // waitMs in FIFO order; { granted: false } when the wait runs out. TTL and
+  // wait are clamped so a bad caller can't hold or block writes for long.
+  async acquireWriteLease(
+    holder: string,
+    ttlMs: number,
+    waitMs = 0,
+  ): Promise<{ granted: true; expiresAt: number } | { granted: false }> {
+    await this.#loadWriteLease();
+    const ttl = clampMs(ttlMs, WRITE_LEASE_MIN_TTL_MS, WRITE_LEASE_MAX_TTL_MS);
     const lease = this.#writeLease;
-    if (lease && lease.holder !== holder && lease.expiresAt > now) {
-      return { granted: false, retryInMs: lease.expiresAt - now };
-    }
-    // Bounded so a bad caller can't hold every write hostage for long.
-    const ttl = Math.min(Math.max(Number.isFinite(ttlMs) ? ttlMs : 0, WRITE_LEASE_MIN_TTL_MS), WRITE_LEASE_MAX_TTL_MS);
-    this.#writeLease = { holder, expiresAt: now + ttl };
-    return { granted: true, expiresAt: now + ttl };
+    const now = Date.now();
+    const free = !lease || lease.expiresAt <= now;
+    if (lease?.holder === holder && lease.expiresAt > now) return this.#grantWriteLease(holder, ttl);
+    if (free && this.#writeLeaseWaiters.length === 0) return this.#grantWriteLease(holder, ttl);
+    const wait = clampMs(waitMs, 0, WRITE_LEASE_MAX_WAIT_MS);
+    if (wait === 0) return { granted: false };
+    const granted = new Promise<{ granted: true; expiresAt: number } | { granted: false }>((resolve) => {
+      const w = {
+        holder,
+        ttl,
+        resolve,
+        timer: setTimeout(() => {
+          this.#writeLeaseWaiters = this.#writeLeaseWaiters.filter((x) => x !== w);
+          resolve({ granted: false });
+        }, wait),
+      };
+      this.#writeLeaseWaiters.push(w);
+    });
+    this.#handOffWriteLease();
+    return granted;
   }
 
-  // Releases the lease only if `holder` still holds it; a holder whose lease
-  // expired and was taken over can't release the new owner's. True if released.
-  releaseWriteLease(holder: string): boolean {
+  // Releases the lease only if `holder` still holds it (a holder whose lease
+  // expired and passed on can't release the new owner's), then hands it to
+  // the next waiter. True if released.
+  async releaseWriteLease(holder: string): Promise<boolean> {
+    await this.#loadWriteLease();
     if (this.#writeLease?.holder !== holder) return false;
     this.#writeLease = null;
+    if (!this.#handOffWriteLease()) await this.#persistWriteLease();
     return true;
+  }
+
+  async #grantWriteLease(holder: string, ttl: number): Promise<{ granted: true; expiresAt: number }> {
+    const expiresAt = Date.now() + ttl;
+    this.#writeLease = { holder, expiresAt };
+    this.#armWriteLeaseExpiry();
+    await this.#persistWriteLease();
+    return { granted: true, expiresAt };
+  }
+
+  // Gives a free or expired lease to the head of the queue. True if it did.
+  #handOffWriteLease(): boolean {
+    const lease = this.#writeLease;
+    if (lease && lease.expiresAt > Date.now()) {
+      this.#armWriteLeaseExpiry();
+      return false;
+    }
+    const next = this.#writeLeaseWaiters.shift();
+    if (!next) {
+      this.#writeLease = null;
+      return false;
+    }
+    clearTimeout(next.timer);
+    void this.#grantWriteLease(next.holder, next.ttl).then(next.resolve);
+    return true;
+  }
+
+  // While someone waits, wake at the holder's expiry so a dead holder's lease
+  // passes on without anyone polling. Renewals push expiresAt out; the timer
+  // re-checks and re-arms.
+  #armWriteLeaseExpiry(): void {
+    if (this.#writeLeaseExpiryTimer !== undefined) clearTimeout(this.#writeLeaseExpiryTimer);
+    this.#writeLeaseExpiryTimer = undefined;
+    const lease = this.#writeLease;
+    if (!lease || this.#writeLeaseWaiters.length === 0) return;
+    this.#writeLeaseExpiryTimer = setTimeout(
+      () => {
+        this.#writeLeaseExpiryTimer = undefined;
+        this.#handOffWriteLease();
+      },
+      Math.max(lease.expiresAt - Date.now(), 0) + 5,
+    );
+  }
+
+  #loadWriteLease(): Promise<void> {
+    this.#writeLeaseLoaded ??= this.#state
+      .get<{ holder: string; expiresAt: number }>(WRITE_LEASE_KEY)
+      .then((stored) => {
+        if (stored && !this.#writeLease && stored.expiresAt > Date.now()) this.#writeLease = stored;
+      })
+      .catch((e) => log.warn("write_lease_load_failed", { error: String(e) }));
+    return this.#writeLeaseLoaded;
+  }
+
+  // Memory is authoritative; a failed persist only loses restart survival.
+  async #persistWriteLease(): Promise<void> {
+    try {
+      if (this.#writeLease) await this.#state.put(WRITE_LEASE_KEY, this.#writeLease);
+      else await this.#state.delete(WRITE_LEASE_KEY);
+    } catch (e) {
+      log.warn("write_lease_persist_failed", { error: String(e) });
+    }
   }
 }
 
+const WRITE_LEASE_KEY = "write_lease";
 const WRITE_LEASE_MIN_TTL_MS = 1_000;
 const WRITE_LEASE_MAX_TTL_MS = 120_000;
+const WRITE_LEASE_MAX_WAIT_MS = 120_000;
+const clampMs = (v: number, min: number, max: number) => Math.min(Math.max(Number.isFinite(v) ? v : 0, min), max);
 
 // Every public method — the RPC surface the Cloudflare shell delegates and
 // core callers use via ownerIndex(). bootstrap() is host lifecycle, not surface.

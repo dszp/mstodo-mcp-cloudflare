@@ -2,7 +2,7 @@ import { log } from "../log";
 import type { AppEnv, IndexBackend } from "../ports";
 import { GraphError, type GraphClient } from "../graph/client";
 import type { SubstrateClient } from "../graph/substrate-client";
-import { WriteLease } from "./write-lease";
+import { WriteLease, type WriteQueue } from "./write-lease";
 
 // What every write op needs, built once per caller (one MCP tool call, one sync
 // mutations request). Ops take Graph IDs: resolving aliases and display names
@@ -23,11 +23,12 @@ export interface OpsContext {
   // The Graph access token, for the attachment byte upload in move_task's
   // copy fallback (attachFile talks to the upload session URL directly).
   accessToken: () => Promise<string>;
-  // The single write queue; every op runs inside writes.run().
-  writes: WriteLease;
+  // The single write queue; every op runs inside writes.run(). A caller
+  // holding the lease across several ops passes WriteLease.hold()'s queue.
+  writes: WriteQueue;
 }
 
-export function opsContext(deps: Omit<OpsContext, "writes"> & { writes?: WriteLease }): OpsContext {
+export function opsContext(deps: Omit<OpsContext, "writes"> & { writes?: WriteQueue }): OpsContext {
   return { ...deps, writes: deps.writes ?? new WriteLease(deps.index) };
 }
 

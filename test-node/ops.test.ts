@@ -97,10 +97,9 @@ describe("ops share one write queue", () => {
 
   it("an op inside a caller-held lease runs without waiting on itself", async () => {
     const h = setup({ routes: [on("POST", G, () => json({ id: "L2", displayName: "New" }, 201))] });
-    const writes = new WriteLease(h.env.ownerIndex(), { waitMs: 200 });
-    const ctx = { ...h.ctx(), writes };
+    const lease = new WriteLease(h.env.ownerIndex(), { waitMs: 200 });
     // A sync batch holds the lease around its mutations.
-    const r = await writes.run(() => createList(ctx, { display_name: "New" }));
+    const r = await lease.hold((writes) => createList({ ...h.ctx(), writes }, { display_name: "New" }));
     expect(r.ok).toBe(true);
   });
 });

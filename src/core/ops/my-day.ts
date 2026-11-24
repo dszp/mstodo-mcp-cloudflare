@@ -1,5 +1,5 @@
 import type { SubstrateTask } from "../graph/substrate-client";
-import type { OpsContext } from "./context";
+import { bestEffort, type OpsContext } from "./context";
 import { collectMyDayNeighborOrders, findMyDayRowById } from "./my-day-order";
 import { computeOrder, type ReorderPosition } from "./position";
 import { orderToMs } from "./reorder";
@@ -9,8 +9,9 @@ import { err, ok, type ToolResult } from "./result";
 // Day is invisible to Graph: membership is the Substrate task's CommittedDay
 // and its order is CommittedOrder. Callers gate on ENABLE_MY_DAY.
 //
-// The cache write-throughs here are NOT best-effort, unlike the Graph ops':
-// a failure propagates, as it always has for these tools.
+// The cache write-throughs are best-effort, as for the Graph ops: once
+// Substrate accepted the write, an index failure must not report the op as
+// failed (a retry would re-apply it); the My Day scan reconciles.
 
 const MY_DAY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -55,12 +56,14 @@ export function addToMyDay(
     });
     // Mirror what Substrate echoed, falling back to what was sent (it
     // occasionally omits an echoed field).
-    await ctx.index.updateMyDayFields(task_id, {
-      committed_day: task.CommittedDay ? task.CommittedDay.slice(0, 10) : day.value,
-      postponed_day: task.PostponedDay ? task.PostponedDay.slice(0, 10) : null,
-      order_datetime: task.OrderDateTime ?? null,
-      committed_order: task.CommittedOrder ?? committedOrder,
-    });
+    await bestEffort("index_update_my_day_failed", { task_id }, () =>
+      ctx.index.updateMyDayFields(task_id, {
+        committed_day: task.CommittedDay ? task.CommittedDay.slice(0, 10) : day.value,
+        postponed_day: task.PostponedDay ? task.PostponedDay.slice(0, 10) : null,
+        order_datetime: task.OrderDateTime ?? null,
+        committed_order: task.CommittedOrder ?? committedOrder,
+      }),
+    );
     return ok({ list_id, task_id, day: day.value, task });
   });
 }
@@ -76,11 +79,13 @@ export function removeFromMyDay(
   return ctx.writes.run(async () => {
     const sub = await ctx.substrate();
     const task = await sub.patchTask(list_id, task_id, { CommittedDay: null });
-    await ctx.index.updateMyDayFields(task_id, {
-      committed_day: null,
-      committed_order: null,
-      postponed_day: task.PostponedDay ? task.PostponedDay.slice(0, 10) : null,
-    });
+    await bestEffort("index_update_my_day_failed", { task_id }, () =>
+      ctx.index.updateMyDayFields(task_id, {
+        committed_day: null,
+        committed_order: null,
+        postponed_day: task.PostponedDay ? task.PostponedDay.slice(0, 10) : null,
+      }),
+    );
     return ok({ list_id, task_id, task });
   });
 }
@@ -128,7 +133,7 @@ export function reorderMyDayTask(
     }
     const sub = await ctx.substrate();
     const task = await sub.patchTask(list_id, task_id, { CommittedOrder: newOrder });
-    await ctx.index.updateMyDayFields(task_id, { committed_order: newOrder });
+    await bestEffort("index_update_my_day_failed", { task_id }, () => ctx.index.updateMyDayFields(task_id, { committed_order: newOrder }));
     return ok({ list_id, task_id, day: day.value, task, committed_order: newOrder });
   });
 }
