@@ -7,7 +7,7 @@ import { log } from "../log";
 import { fetchMe, loadIdentity, loadTokens, myDayEnabled, REFRESH_SKEW_MS } from "../auth/microsoft";
 import { reauthPending, refusalDescription } from "../auth/grant";
 import { isReauthRequired } from "../auth/reauth";
-import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
+import { GraphClient, GraphError, looksImmutable, type TokenProvider } from "../graph/client";
 import {
   SubstrateClient,
   SubstrateError,
@@ -1268,7 +1268,7 @@ class ToDoTools implements TokenProvider {
       "move_task",
       {
         description:
-          "Move a task between lists. Prefers a LOSSLESS in-place Substrate re-parent when ENABLE_MY_DAY/EXO is enabled: one PATCH moves the same underlying item, so checklist items, the linked resource, attachments, and My Day all ride along. The task id CHANGES on a re-parent (the new id encodes the destination), so the result returns `task_id` (current) plus `previous_task_id`. When Substrate is unavailable it FALLS BACK to a non-atomic create-then-delete full copy: sub-resources are copied individually (checklist in order, the single linked resource, and attachments by round-tripping bytes through the Worker). A required-copy failure aborts with the SOURCE LEFT INTACT — an attachment >25 MiB, a reference-type attachment (no bytes to copy), or attachments that can't be enumerated aborts the move. A retried failed copy can create a second destination task (no idempotency key — documented footgun). `method` ('substrate_reparent' | 'copy_delete') tells you which path ran and whether sub-resources rode along or were copied individually; the id always changes, so read `task_id` and `previous_task_id`. Invalidates both lists' caches. NOTE: disabling ENABLE_MY_DAY silently downgrades moves to the lossy fallback.",
+          "Move a task between lists. Prefers a LOSSLESS in-place Substrate re-parent when ENABLE_MY_DAY/EXO is enabled: one PATCH moves the same underlying item, so checklist items, the linked resource, attachments, and My Day all ride along. Task ids are Graph's immutable form, so a re-parent keeps the same `task_id`; the result still returns `previous_task_id` (equal to `task_id` after a re-parent). When Substrate is unavailable it FALLS BACK to a non-atomic create-then-delete full copy: sub-resources are copied individually (checklist in order, the single linked resource, and attachments by round-tripping bytes through the Worker). A required-copy failure aborts with the SOURCE LEFT INTACT — an attachment >25 MiB, a reference-type attachment (no bytes to copy), or attachments that can't be enumerated aborts the move. A retried failed copy can create a second destination task (no idempotency key — documented footgun). `method` ('substrate_reparent' | 'copy_delete') tells you which path ran and whether sub-resources rode along or were copied individually; the copy/delete fallback creates a new task, so read `task_id` and `previous_task_id`. Invalidates both lists' caches. NOTE: disabling ENABLE_MY_DAY silently downgrades moves to the lossy fallback.",
         inputSchema: {
           task_id: z.string().min(1).describe("Microsoft Graph task id to move."),
           from_list: z.string().min(1).describe("Source list — alias, display name, or Graph list ID."),
@@ -1316,13 +1316,15 @@ class ToDoTools implements TokenProvider {
           if (myDayEnabled(this.ctx.env)) {
             const r = await this.#reparentViaSubstrate(to_list_id, task_id);
             if (r.ok) {
-              const newId = r.task.Id ?? task_id;
+              // Immutable IDs survive a re-parent. Substrate's response carries
+              // the new default REST ID, which must not become the key.
+              const newId = task_id;
               // Best-effort cache re-key. Reuse srcTask's expansions so the
               // has_checklist/has_attachments flags carry to the new id; delta
               // sync (source removal + dest add) self-heals any gap next cycle.
               // One transaction keeps the task's steps and My Day fields; the
               // upsert then refreshes its Graph columns from srcTask.
-              await this.#indexMoveTask(task_id, to_list_id, newId);
+              await this.#indexMoveTask(task_id, to_list_id);
               await this.#indexUpsertTask({ ...srcTask, id: newId }, to_list_id);
               return jsonResult({
                 ok: true,
@@ -1341,7 +1343,7 @@ class ToDoTools implements TokenProvider {
               const recheck = await this.#recheckSource(graph, from_list_id, task_id);
               if (decideAfterReparentFailure(recheck) === "treat_as_moved") {
                 await this.#indexDeleteTask(task_id);
-                const newId = r.task?.Id;
+                const newId = r.task ? task_id : undefined;
                 return jsonResult({
                   ok: true,
                   method: "substrate_reparent",
@@ -3944,9 +3946,13 @@ class ToDoTools implements TokenProvider {
           // identical to the My Day aggregation).
           filtered.sort((a, b) => compareOrderDateTimeDesc(a.OrderDateTime ?? null, b.OrderDateTime ?? null));
           const truncated = filtered.length > limit;
-          const tasks = filtered.slice(0, limit).map((t) => ({
+          const page = filtered.slice(0, limit);
+          // Substrate returns default REST IDs; report the immutable IDs every
+          // other tool uses.
+          const ids = await new GraphClient(this).translateToImmutable(page.map((t) => t.Id ?? "").filter(Boolean));
+          const tasks = page.map((t) => ({
             list_id,
-            task_id: t.Id ?? null,
+            task_id: t.Id ? (ids.get(t.Id) ?? t.Id) : null,
             title: t.Subject ?? null,
             ...projectSubstrateTaskDetails(t),
           }));
@@ -4032,8 +4038,9 @@ class ToDoTools implements TokenProvider {
             // moving task isn't excluded and 'index' math can be off by one. The
             // edge ops (top/bottom) and value-based before/after are unaffected.
             const folderTasks = await sub.listFolderTasks(list_id);
+            const ids = await new GraphClient(this).translateToImmutable(folderTasks.map((t) => t.Id ?? "").filter(Boolean));
             const orders = folderTasks
-              .filter((t) => t.Id !== task_id)
+              .filter((t) => t.Id !== task_id && ids.get(t.Id ?? "") !== task_id)
               .map((t) => orderToMs(t.OrderDateTime ?? null))
               .filter((ms): ms is number => ms !== null);
 
@@ -4398,13 +4405,20 @@ class ToDoTools implements TokenProvider {
     taskId: string,
   ): Promise<string | null> {
     if (list !== undefined) return this.resolveList(list);
-    const found = await this.#index()
-      .findListForTask(taskId)
-      .catch((e) => {
-        log.warn("index_find_list_failed", { task_id: taskId, error: String(e) });
-        return null;
-      });
-    return found?.list_id ?? null;
+    const lookup = (id: string) =>
+      this.#index()
+        .findListForTask(id)
+        .catch((e) => {
+          log.warn("index_find_list_failed", { task_id: id, error: String(e) });
+          return null;
+        });
+    const found = await lookup(taskId);
+    if (found?.list_id || looksImmutable(taskId)) return found?.list_id ?? null;
+    // A default REST ID from an older conversation: the mirror is keyed on
+    // immutable IDs, so translate once and retry.
+    const map = await new GraphClient(this).translateToImmutable([taskId]).catch(() => new Map<string, string>());
+    const translated = map.get(taskId);
+    return translated ? ((await lookup(translated))?.list_id ?? null) : null;
   }
 
   // Roster source for list_lists/get_list. Reads the DO `lists` table (the

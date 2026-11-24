@@ -20,7 +20,7 @@ import {
 } from "../auth/microsoft";
 import { ReauthRequiredError, type ReauthState } from "../auth/reauth";
 import { SubstrateClient, SubstrateError } from "../graph/substrate-client";
-import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
+import { GraphClient, looksImmutable, GraphError, type TokenProvider } from "../graph/client";
 import { followToTerminal, type DeltaRow } from "../graph/delta";
 import { encodeCursor, decodeCursor } from "../util/cursor";
 import { log } from "../log";
@@ -1607,6 +1607,12 @@ export class IndexCore implements TokenProvider {
           // Row must exist for updateMyDayFields to land (it no-ops otherwise).
           // A brand-new task's notification can beat the delta that creates the
           // row → fall back to mark-scan-due so the periodic scan fills it.
+          // A notification's resourceId may be a default REST ID; translate it
+          // when it doesn't match the immutable-keyed mirror.
+          if (this.getMyDayFields(w.taskId) === null && !looksImmutable(w.taskId)) {
+            const t = await new GraphClient(this).translateToImmutable([w.taskId]);
+            w.taskId = t.get(w.taskId) ?? w.taskId;
+          }
           if (this.getMyDayFields(w.taskId) === null) {
             this.#setSyncState(`myday:${w.listId}`, { last_synced_at: null });
             continue;
@@ -2178,9 +2184,15 @@ export class IndexCore implements TokenProvider {
     for (const listId of due) {
       try {
         const folderTasks = await sub.listFolderTasks(listId);
+        // Substrate returns default REST IDs; the mirror is keyed on immutable
+        // IDs (section 18.2), so translate the folder's IDs in one call.
+        const ids = await new GraphClient(this).translateToImmutable(
+          folderTasks.map((t) => t.Id ?? "").filter(Boolean),
+        );
         for (const t of folderTasks) {
-          if (!t.Id) continue;
-          this.updateMyDayFields(t.Id, {
+          const id = t.Id ? ids.get(t.Id) : undefined;
+          if (!id) continue;
+          this.updateMyDayFields(id, {
             committed_day: t.CommittedDay ? t.CommittedDay.slice(0, 10) : null,
             committed_order: t.CommittedOrder ?? null,
             order_datetime: t.OrderDateTime ?? null,

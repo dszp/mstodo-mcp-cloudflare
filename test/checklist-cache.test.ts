@@ -12,8 +12,8 @@ const stub = () => env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName("owner"));
 const named = (name: string) => env.TODO_INDEX_DO.getByName(name);
 
 describe("schema migration v3 — checklist-item cache", () => {
-  it("bumps LATEST_SCHEMA_VERSION to 3", () => {
-    expect(LATEST_SCHEMA_VERSION).toBe(3);
+  it("bumps LATEST_SCHEMA_VERSION to at least 3", () => {
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(3);
   });
 
   it("creates the checklist_items table with the expected columns", async () => {
