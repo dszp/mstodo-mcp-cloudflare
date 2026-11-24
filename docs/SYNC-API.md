@@ -504,9 +504,9 @@ A successful response carries these headers:
 
 | Header | Value |
 | --- | --- |
-| `Content-Type` | The attachment's `content_type` from the mirror, or `application/octet-stream` when it has none. |
-| `Content-Length` | Graph's length, when Graph sends one. |
-| `Content-Disposition` | `attachment`, with an ASCII `filename` and the real name in `filename*=UTF-8''…`. Control characters are removed from the name. |
+| `Content-Type` | The attachment's `content_type` from the mirror, or `application/octet-stream` when it has none or it isn't a valid media type. |
+| `Content-Length` | Graph's length, when Graph sends one for an uncompressed body. Graph doesn't send one for `$value` today, so the app must not rely on it. |
+| `Content-Disposition` | `attachment`, with an ASCII `filename` and the real name in `filename*=UTF-8''…`. Control characters are removed and the name is cut to 255 characters. |
 | `Cache-Control` | `private, no-store` |
 | `X-Content-Type-Options` | `nosniff` |
 

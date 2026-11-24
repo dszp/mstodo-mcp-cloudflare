@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - The `/download` link's `Content-Disposition` now percent-encodes `'`, `(`, `)`, `*` and `!`
   in `filename*`, as RFC 5987 requires; a `'` in a filename could end the charset prefix early.
+- A `/download` filename longer than 255 characters that ended in an emoji, or that held a lone
+  surrogate, made the response fail; the name is now cut by character and made well-formed.
 - `set_list_config` no longer clears the `archive` list, and `set_list_alias` no longer clears
   every pin and the `archive` list.
 - A list excluded while the sync cycle was fetching it is no longer filled back in and
