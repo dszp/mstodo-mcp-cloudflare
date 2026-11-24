@@ -1504,7 +1504,7 @@ export class IndexCore implements TokenProvider {
     const order = hasQuery ? "rank" : "ci.created_at ASC NULLS LAST, ci.item_id ASC";
     const sql = `SELECT ci.*, t.title AS task_title, t.status AS task_status
                    FROM ${from}
-                  WHERE ${where.join(" AND ")}
+                  ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
                   ORDER BY ${order} LIMIT ?`;
     const rows = this.#sql.exec(sql, ...params, limit).toArray() as unknown as ChecklistSearchRow[];
     return { rows };

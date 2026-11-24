@@ -32,3 +32,16 @@ describe("step order", () => {
     expect(seq()).toBeGreaterThan(before);
   });
 });
+
+describe("searchChecklistItems", () => {
+  it("lists every step when there is no query, no list filter and pending_only is false", () => {
+    const db = openDatabase(":memory:");
+    const sql = sqlDb(db);
+    const state = stateStore(db);
+    const c = new IndexCore({ sql, transact: transactor(db), state, alarms: state, env: { TIMEZONE: "UTC" } as never });
+    c.bootstrap();
+    c.upsertTask({ id: "T1", title: "t", status: "notStarted", lastModifiedDateTime: "2026-11-24T10:00:00Z" } as never, "L1");
+    c.replaceChecklistItems("T1", "L1", [{ id: "S1", displayName: "x", isChecked: true } as never]);
+    expect(c.searchChecklistItems({ pending_only: false }).rows.map((r) => r.item_id)).toEqual(["S1"]);
+  });
+});
