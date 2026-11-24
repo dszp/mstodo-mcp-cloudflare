@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **List groups, sidebar order and theme in the sync feed** (docs/SYNC-API.md section 10.4),
+  read-only from Substrate. Feed lists carry `group_id`, `sort_key` and `theme`; groups
+  arrive as a new `list_group` kind; `/sync/info` reports `capabilities.list_appearance`.
+  The server reads the sidebar (two Substrate GETs) on a calm cycle once per
+  `DELTA_SYNC_INTERVAL_MIN`, and when a new list appears. Needs `ENABLE_MY_DAY`; without
+  it the fields stay `null`. Migration v12 adds the columns and the `list_groups` table.
+
 ### Changed
 - **A list's class is now its sync setting** (docs/SYNC-API.md section 1.2). `todo` and
   unclassified lists sync as before, with a Graph subscription. `reference` lists sync after

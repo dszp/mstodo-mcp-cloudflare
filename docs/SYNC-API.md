@@ -378,9 +378,13 @@ Authorization: Bearer <access token>
   "cursor": "k3v9.18452",
   "has_more": true,
   "changes": [
+    { "kind": "list_group", "id": "0190…", "seq": 18000, "deleted": false,
+      "data": { "name": "Clients", "sort_key": "2026-11-21T10:00:00.0000000Z" } },
     { "kind": "list", "id": "0190…", "seq": 18001, "deleted": false,
       "data": { "name": "🧾INVOICING", "sync": "todo", "wellknown": null, "is_owner": true,
-                "is_shared": false, "group_id": null, "sort_key": null } },
+                "is_shared": false, "group_id": "0190…",
+                "sort_key": "2026-11-20T10:00:00.0000000Z",
+                "theme": { "color": "…", "background": "…" } } },
     { "kind": "task", "id": "0190…", "seq": 18002, "deleted": false,
       "data": {
         "list_id": "0190…", "title": "…", "status": "notStarted",
@@ -423,6 +427,14 @@ Rules:
   links and attachments yet (the per-task scan, section 1.1). The app shows what it has
   and gets the rest in a later pull. Once fetched, it stays `true`: a later change to
   a step, link or attachment arrives as a new row for the task.
+- A list's `group_id`, `sort_key` and `theme` describe the Microsoft To Do sidebar
+  (section 10.4). They are `null` until the server first reads the sidebar, and always
+  `null` on a server whose `capabilities.list_appearance` is `false`. `group_id` is
+  the `id` of a `list_group` entity, or `null` for a list outside any group.
+- A `list_group` is a sidebar group: `{ name, sort_key }`. A deleted group arrives as
+  a deletion record, and its lists arrive with `group_id: null`. The server logs a
+  group before the lists a read moves into it, but a later rename moves the group
+  after them, so the app must not depend on the order (section 4.3).
 - Attachment bytes aren't in the feed. The app fetches them with
   `GET /api/v1/attachments/{sid}`, which streams through the server the same way
   `/download` does today (section 10.2).
@@ -866,7 +878,9 @@ Building the §1 routes isn't part of this work. Only the shared router, auth la
 
 ## 10. After Graph: the gap list
 
-This section is design only. Nothing here is built until the switch is near.
+This section is design only, except section 10.4, whose Graph-mode half (a read-only
+mirror of list groups and sidebar order) is built. Nothing else here is built until
+the switch is near.
 
 **Precondition for the switch:** the sub-resource backfill (section 1.1) reports
 `remaining: 0` and every attachment's bytes are in the blob store (section 10.2).
@@ -903,21 +917,66 @@ Already solved by section 2: the `sid` is the primary key in both modes.
 
 ### 10.4 List groups and sidebar order
 
-Graph exposes neither. **I couldn't check Substrate from this session**: the server's
-Substrate token never leaves the server, and the To Do web app's network traffic needs
-a signed-in browser. The check belongs in the first build PR, as a temporary
-owner-only probe that logs the response shapes of:
+**Built, read-only, in Graph mode.** Graph exposes neither groups nor sidebar order.
+Substrate does (see the spike results), so the server mirrors them from Substrate and
+serves them in the change feed. The app can't change them yet: no mutation writes a
+group, an order or a theme back to Microsoft To Do.
 
-- `GET {substrate}/todob2/api/v1/taskfolders?$select=*` — look for a group or parent
-  field and an order field on each folder;
-- `GET {substrate}/todob2/api/v1/taskgroups` — the old Outlook REST tasks API had a
-  task-groups collection, and the To Do back end may still serve it.
+**What the server reads.** One read is two Substrate GETs:
 
-Whatever the answer, the schema gets `list_groups(sid, name, sort_key, collapsed)` and
-`lists.group_sid` and `lists.sort_key`. If Substrate exposes them, they're mirrored
-read-only in Graph mode. If not, they're app-owned from the start: the app's edits to
-groups and sidebar order apply to the mirror only, with no write-through, and
-Microsoft To Do keeps its own separate grouping until the switch.
+- `GET {substrate}/todob2/api/v1/taskfolders?$select=Id,OrderDateTime,ParentFolderGroupId,ThemeColor,ThemeBackground`.
+  If Substrate refuses the `$select` with a 400, the server asks again without it.
+- `GET {substrate}/todob2/api/v1/foldergroups`. Each group has `Id`, `Name` and
+  `OrderDateTime`.
+
+Both follow `@odata.nextLink` for up to 10 pages. A collection longer than that fails
+the read instead of returning part of the sidebar. The server matches each folder to
+a list by `Id`, which it expects to equal the Graph list ID.
+
+**What it stores** (migration v12): on each `lists` row, `group_id` (the group's
+Substrate `Id`), `order_datetime`, `theme_color` and `theme_background`; and a
+`list_groups` table (`group_id`, `name`, `order_datetime`). Triggers log a changed
+list, and log each group as a `list_group` entity with its own `sid` and deletion
+record, the same way lists are logged (section 3.2). Excluded lists get their
+appearance stored too; the feed leaves them out as before (section 1.2).
+
+**What the feed sends** (section 4.2):
+
+| Field | Meaning |
+|---|---|
+| list `group_id` | The group's `sid`, or `null`. |
+| list `sort_key`, group `sort_key` | `OrderDateTime` exactly as Substrate sends it. `null` for the default list. |
+| list `theme.color`, `theme.background` | `ThemeColor` and `ThemeBackground` exactly as Substrate sends them. A value that isn't a string is sent as its JSON. |
+
+What isn't known yet:
+
+- The format of `ThemeColor` and `ThemeBackground`. The server passes them through
+  unchanged; the app should treat an unknown value as "no theme".
+- Whether a higher or lower `sort_key` is nearer the top. For tasks, a later
+  `OrderDateTime` is nearer the top. Groups and lists appear to share one ordering
+  across the sidebar; a reorder test on a live account confirms both.
+
+Collapsed or expanded state isn't stored by Microsoft. The app keeps it locally.
+
+**When the server reads.** On a calm sync cycle (no baseline still paging), when
+either is true:
+
+- a list has never been read: a new list, or every list after migration v12;
+- the last successful read is at least `DELTA_SYNC_INTERVAL_MIN` old.
+
+Moving a list or changing its theme doesn't change the list in Graph's roster delta,
+so the interval is what picks those changes up. A read costs two subrequests, plus a
+token mint when the cached Exchange Online token has expired.
+
+**Without Substrate.** When `ENABLE_MY_DAY` is off, or Microsoft refuses the Exchange
+Online scope, the server makes no read: the columns stay `null` and
+`capabilities.list_appearance` is `false`. A 403 from Substrate turns Substrate off for
+the identity the same way. Any other failure is logged and recorded in `sync_state`
+(`meta:appearance`), keeps the stored values, and is retried on the next calm cycle.
+A failed read never fails the sync cycle.
+
+**After the switch** (`SYNC_SOURCE=local`), groups, order and theme become app-owned:
+the same columns and entities, written by the app's mutations.
 
 ---
 
@@ -1009,7 +1068,8 @@ to build now:
     "server_id": "c1b0…",
     "account": { "name": "David (work)", "email_hint": "d…@…" },
     "version": "0.18.0",
-    "capabilities": { "my_day": true, "step_order": true, "push": "websocket",
+    "capabilities": { "my_day": true, "step_order": true, "sub_resources": true,
+                      "list_appearance": true, "push": "websocket",
                       "source": "graph" }
   }
   ```
@@ -1018,7 +1078,8 @@ to build now:
   unlike the cursor epoch, which changes on an identity reset. The app keys the
   account's local data by it, so re-adding the same server is recognized.
   `capabilities` tells the app what this server supports: a deployment without the
-  Exchange Online scope has no My Day and no step order, and a deployment whose
+  Exchange Online scope has no My Day, no step order and no list appearance
+  (`list_appearance`: sidebar groups, order and theme, section 10.4), and a deployment whose
   Microsoft account can't receive Graph change notifications has slower push. The
   app hides or degrades features per account instead of assuming every server is the
   same.
@@ -1236,6 +1297,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-24: section 10.4 built read-only. Lists in the feed carry `group_id`,
+  `sort_key` and `theme`; a new `list_group` kind; `capabilities.list_appearance`.
 - 2026-11-24: section 1.2 replaced. The `archive` sync policy and the separate list
   classification became one per-list setting (`todo` / `reference` / `excluded`), with
   `sync` on feed lists, `list.update { sync }` and `GET /api/v1/lists/excluded`.
