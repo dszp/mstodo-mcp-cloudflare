@@ -249,6 +249,57 @@ export function extractSubtasks(json: unknown): SubstrateSubtask[] {
   return out;
 }
 
+// Sidebar appearance of a list ("task folder"), read-only (docs/SYNC-API.md
+// section 10.4). Id is the same ID Graph uses for the list. OrderDateTime is
+// the sidebar position (null for the default list), ParentFolderGroupId the
+// Id of the list group holding it. ThemeColor and ThemeBackground have no
+// documented format, so they are kept as whatever Substrate sends.
+export const SubstrateFolderSchema = z
+  .object({
+    Id: z.string(),
+    OrderDateTime: z.string().nullable().optional(),
+    ParentFolderGroupId: z.string().nullable().optional(),
+    ThemeColor: z.unknown().optional(),
+    ThemeBackground: z.unknown().optional(),
+  })
+  .passthrough();
+export type SubstrateFolder = z.infer<typeof SubstrateFolderSchema>;
+
+// A sidebar list group. Observed live with exactly these three fields.
+export const SubstrateFolderGroupSchema = z
+  .object({
+    Id: z.string(),
+    Name: z.string().nullable().optional(),
+    OrderDateTime: z.string().nullable().optional(),
+  })
+  .passthrough();
+export type SubstrateFolderGroup = z.infer<typeof SubstrateFolderGroupSchema>;
+
+// The fields the appearance mirror reads from each folder.
+const FOLDER_SELECT = "Id,OrderDateTime,ParentFolderGroupId,ThemeColor,ThemeBackground";
+// A roster or group list longer than this many pages is cut off rather than
+// spending the sync cycle's subrequests on it.
+const MAX_COLLECTION_PAGES = 10;
+
+// Items of one collection page (value / Value / bare array), each parsed
+// leniently: a malformed item is skipped.
+function extractItems<T>(json: unknown, schema: z.ZodType<T>): T[] {
+  const raw: unknown = Array.isArray(json) ? json : isRecord(json) ? (json.value ?? json.Value ?? []) : [];
+  if (!Array.isArray(raw)) return [];
+  const out: T[] = [];
+  for (const item of raw) {
+    const parsed = schema.safeParse(item);
+    if (parsed.success) out.push(parsed.data);
+  }
+  return out;
+}
+
+function nextLinkOf(json: unknown): string | null {
+  if (!isRecord(json)) return null;
+  const link = json["@odata.nextLink"] ?? json["odata.nextLink"];
+  return typeof link === "string" && link ? link : null;
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
@@ -347,6 +398,40 @@ export class SubstrateClient {
     });
     const json = (await res.json()) as unknown;
     return extractSubtasks(isRecord(json) ? json.Subtasks : undefined);
+  }
+
+  // Every task folder (list) with its sidebar appearance. Asks for only the
+  // fields the mirror needs; if Substrate refuses the $select (a 400, as Graph
+  // does for lists), asks again without it.
+  async listFolders(): Promise<SubstrateFolder[]> {
+    try {
+      return await this.#collect(`${SUBSTRATE_BASE}/taskfolders?$select=${FOLDER_SELECT}`, SubstrateFolderSchema);
+    } catch (e) {
+      if (!(e instanceof SubstrateError) || e.status !== 400) throw e;
+      log.warn("substrate_select_refused", { resource: "taskfolders" });
+      return this.#collect(`${SUBSTRATE_BASE}/taskfolders`, SubstrateFolderSchema);
+    }
+  }
+
+  // Every sidebar list group.
+  async listFolderGroups(): Promise<SubstrateFolderGroup[]> {
+    return this.#collect(`${SUBSTRATE_BASE}/foldergroups`, SubstrateFolderGroupSchema);
+  }
+
+  // GETs a collection and follows @odata.nextLink (host-pinned by
+  // #fetchWithRetry) up to MAX_COLLECTION_PAGES. A delta link at the end is
+  // ignored: the mirror re-reads the whole collection each time.
+  async #collect<T>(url: string, schema: z.ZodType<T>): Promise<T[]> {
+    const out: T[] = [];
+    let next: string | null = url;
+    for (let page = 0; next && page < MAX_COLLECTION_PAGES; page++) {
+      const res = await this.#fetchWithRetry(next, "GET");
+      const json = (await res.json()) as unknown;
+      out.push(...extractItems(json, schema));
+      next = nextLinkOf(json);
+    }
+    if (next) throw new SubstrateError(0, "substrate_too_many_pages", redactSubstrateUrl(url));
+    return out;
   }
 
   // PATCH a subtask. Used by reorder_checklist_item to set OrderDateTime

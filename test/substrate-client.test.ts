@@ -206,3 +206,59 @@ describe("SubstrateClient.getTask (fallback My-Day read)", () => {
     expect(task.CommittedDay).toBe("2026-05-26T00:00:00Z");
   });
 });
+
+describe("SubstrateClient.listFolders / listFolderGroups (sidebar appearance)", () => {
+  // Answers each call from `pages` in order, recording the URLs.
+  function stubPages(pages: Array<{ status?: number; body: unknown }>) {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input));
+        const p = pages.shift() ?? { status: 404, body: {} };
+        return new Response(JSON.stringify(p.body), { status: p.status ?? 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    return urls;
+  }
+  const BASE = "https://substrate.office.com/todob2/api/v1";
+
+  it("asks for only the appearance fields and parses them, keeping theme values as sent", async () => {
+    const urls = stubPages([
+      { body: { value: [{ Id: DEST, OrderDateTime: "2026-11-20T10:00:00Z", ParentFolderGroupId: "G1", ThemeColor: "blue", ThemeBackground: { Image: "x" } }, { Name: "no Id" }] } },
+    ]);
+    const folders = await new SubstrateClient(tokens, null).listFolders();
+    expect(urls).toEqual([`${BASE}/taskfolders?$select=Id,OrderDateTime,ParentFolderGroupId,ThemeColor,ThemeBackground`]);
+    expect(folders).toHaveLength(1);
+    expect(folders[0]).toMatchObject({ Id: DEST, ParentFolderGroupId: "G1", ThemeColor: "blue", ThemeBackground: { Image: "x" } });
+  });
+
+  it("asks again without $select when Substrate refuses it with a 400", async () => {
+    const urls = stubPages([{ status: 400, body: { error: { code: "ParseUri" } } }, { body: { value: [{ Id: DEST }] } }]);
+    const folders = await new SubstrateClient(tokens, null).listFolders();
+    expect(urls).toEqual([expect.stringContaining("$select="), `${BASE}/taskfolders`]);
+    expect(folders.map((f) => f.Id)).toEqual([DEST]);
+  });
+
+  it("follows @odata.nextLink and ignores the trailing delta link", async () => {
+    const urls = stubPages([
+      { body: { value: [{ Id: "G1", Name: "One", OrderDateTime: null }], "@odata.nextLink": `${BASE}/foldergroups?$skiptoken=2` } },
+      { body: { value: [{ Id: "G2", Name: "Two" }], "@odata.deltaLink": `${BASE}/foldergroups?$deltatoken=3` } },
+    ]);
+    const groups = await new SubstrateClient(tokens, null).listFolderGroups();
+    expect(urls).toEqual([`${BASE}/foldergroups`, `${BASE}/foldergroups?$skiptoken=2`]);
+    expect(groups.map((g) => g.Name)).toEqual(["One", "Two"]);
+  });
+
+  it("refuses a next link on another host before sending the token", async () => {
+    const urls = stubPages([{ body: { value: [], "@odata.nextLink": "https://evil.example.com/steal" } }]);
+    await expect(new SubstrateClient(tokens, null).listFolderGroups()).rejects.toMatchObject({ message: "substrate_url_host_rejected" });
+    expect(urls).toHaveLength(1);
+  });
+
+  it("fails rather than return a partial list when the pages don't end", async () => {
+    const endless = Array.from({ length: 12 }, () => ({ body: { value: [{ Id: "G" }], "@odata.nextLink": `${BASE}/foldergroups?$skiptoken=n` } }));
+    stubPages(endless);
+    await expect(new SubstrateClient(tokens, null).listFolderGroups()).rejects.toMatchObject({ message: "substrate_too_many_pages" });
+  });
+});
