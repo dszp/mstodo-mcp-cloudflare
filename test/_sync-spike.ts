@@ -38,7 +38,7 @@ export function runSyncLogSpike(sql: SqlDb) {
   const noLogOnUnchangedUpdate =
     sql.exec<{ n: number }>("SELECT max(seq) n FROM spike_log").one().n === before;
 
-  const seqs = sql.exec<{ seq: number }>("SELECT seq FROM spike_log ORDER BY sid").toArray().map((r) => r.seq);
+  const seqs = sql.exec<{ seq: number }>("SELECT seq FROM spike_log ORDER BY seq").toArray().map((r) => r.seq);
 
   // AUTOINCREMENT must not reuse a seq after the highest row is deleted.
   const maxBeforeDelete = sql.exec<{ n: number }>("SELECT max(seq) n FROM spike_log").one().n;
