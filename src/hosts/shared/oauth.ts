@@ -162,7 +162,7 @@ export function oauthFront<E>(opts: {
           }
           return socketHandler(req, env, { exp: socketExpiry(ctx.auth.expiresAt) });
         }
-        return handleApiRequest(req, toAppEnv(env), ctx.props);
+        return handleApiRequest(req, toAppEnv(env), ctx.props, ctx);
       },
     },
   });

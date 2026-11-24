@@ -1,6 +1,6 @@
-// The client sync API's read routes (docs/SYNC-API.md sections 4, 14.1, 18.7),
-// shared by both hosts. The OAuth front (src/hosts/shared/oauth.ts) mounts
-// them: handlePublicApiRequest before the /api/v1 resource server, and
+// The client sync API's routes (docs/SYNC-API.md sections 4, 5, 14.1, 18.7),
+// shared by both hosts: the reads here, POST /sync/mutations in ./mutations.ts.
+// The OAuth front (src/hosts/shared/oauth.ts) mounts them: handlePublicApiRequest before the /api/v1 resource server, and
 // handleApiRequest as that resource server's handler, so every request that
 // reaches handleApiRequest carries a valid token whose audience is /api/v1.
 import { refuseApiRequest } from "../auth/grant";
@@ -9,6 +9,8 @@ import { ownerIndex } from "../owner-index";
 import type { AppEnv } from "../ports";
 import type { Props } from "../types";
 import { VERSION } from "../version";
+import { syncMutations, type BackgroundWork } from "./mutations";
+import { json } from "./respond";
 
 export const API_PATH = "/api/v1";
 
@@ -19,9 +21,6 @@ const MAX_QUERY_TERMS = 16;
 // sids are UUIDs; anything else can't name a task.
 const SID_RE = /^[0-9A-Za-z-]{1,64}$/;
 
-function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
-  return Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
-}
 const error = (code: string, status: number) => json({ error: code }, status);
 
 // The one route that answers without a token: the app probes a server before
@@ -41,13 +40,23 @@ export async function handlePublicApiRequest(req: Request, env: AppEnv): Promise
 }
 
 // An authenticated /api/v1 request. The grant gate (epoch, age, pending
-// Microsoft re-auth) runs first, the same check /mcp applies.
-export async function handleApiRequest(req: Request, env: AppEnv, props: Partial<Props> | undefined): Promise<Response> {
+// Microsoft re-auth) runs first, the same check /mcp applies. `bg` keeps a
+// write running after the client disconnects (the host's waitUntil).
+export async function handleApiRequest(
+  req: Request,
+  env: AppEnv,
+  props: Partial<Props> | undefined,
+  bg: BackgroundWork,
+): Promise<Response> {
   const refused = await refuseApiRequest(env, props);
   if (refused) return refused;
 
   const url = new URL(req.url);
   const path = url.pathname.slice(API_PATH.length);
+  if (path === "/sync/mutations") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405, { allow: "POST" });
+    return syncMutations(req, env, props, bg);
+  }
   const route = matchRoute(path);
   if (!route) return error("not_found", 404);
   if (req.method !== "GET") return json({ error: "method_not_allowed" }, 405, { allow: "GET" });

@@ -119,6 +119,16 @@ export function parseBatch(body: unknown): { client_id: string; mutations: unkno
   return { client_id: b.client_id, mutations: b.mutations };
 }
 
+// Exactly one of { before: sid }, { after: sid }, { top: true }, { bottom: true }.
+function isPosition(p: unknown): p is Position {
+  if (!p || typeof p !== "object" || Array.isArray(p)) return false;
+  const entries = Object.entries(p);
+  if (entries.length !== 1) return false;
+  const [k, v] = entries[0];
+  if (k === "before" || k === "after") return typeof v === "string" && SID_RE.test(v.toLowerCase());
+  return (k === "top" || k === "bottom") && v === true;
+}
+
 function validate(raw: unknown): MutationIn | { id: string; error: string } {
   const m = (raw ?? {}) as Record<string, unknown>;
   const id = typeof m.id === "string" && ID_RE.test(m.id) ? m.id : "";
@@ -134,6 +144,7 @@ function validate(raw: unknown): MutationIn | { id: string; error: string } {
     const extra = Object.keys(m.fields).filter((f) => !allowed.includes(f));
     if (extra.length) return { id, error: `unknown_fields:${extra.join(",")}` };
   }
+  if (m.position !== undefined && !isPosition(m.position)) return { id, error: "bad_position" };
   return {
     id,
     at: m.at,

@@ -91,6 +91,9 @@ export async function runMutationChecks(c: IndexCore) {
       { id: "m-10", at: t0, op: "task.update", sid: appSid, fields: { owner: "x" } },
       { id: "m-11", at: t0, op: "task.update", sid: "ffffffffffffffffffffffffffffffff", fields: { title: "x" } },
       { id: "m-12", at: t0, op: "task.create", sid: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", fields: { list_id: "dddddddddddddddddddddddddddddddd", title: "x" } },
+      { id: "m-13", at: t0, op: "task.reorder", sid: appSid, position: { top: false } },
+      { id: "m-14", at: t0, op: "task.reorder", sid: appSid, position: { before: appSid, after: appSid } },
+      { id: "m-15", at: t0, op: "task.reorder", sid: appSid, position: { before: "not-a-sid" } },
     ],
   }, "p");
 
@@ -111,7 +114,7 @@ export async function runMutationChecks(c: IndexCore) {
     "a failure skips the entity's later mutations": st(blocked) === "failed,skipped",
     "a failed mutation can be retried": st(retried) === "applied",
     "an edit to a deleted task is rejected": err(afterDelete) === "deleted",
-    "malformed mutations are rejected one by one": err(bad) === "bad_at,unknown_op,unknown_fields:owner,unknown_sid,unknown_list",
+    "malformed mutations are rejected one by one": err(bad) === "bad_at,unknown_op,unknown_fields:owner,unknown_sid,unknown_list,bad_position,bad_position,bad_position",
     "a running mutation is leased; an expired lease is taken over":
       lease1.state === "new" && lease2.state === "leased" && lease3.state === "new",
     "the batch returns the current cursor": r1.cursor.includes("."),
