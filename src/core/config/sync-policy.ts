@@ -48,6 +48,11 @@ export function withListSync(cfg: ListsConfig, listId: string, sync: ListSync): 
 export interface ListsConfigChange {
   patterns?: ListsConfig["patterns"];
   overrides?: Record<string, ListSync | null>;
+  // Pins to add only where the list has none in the config the change is
+  // applied to. For list_lists auto-pinning, which works out its pins from a
+  // copy of the config that may be stale and must never replace a pin made
+  // since (create_list's todo, a set_list_config change).
+  pin_if_absent?: Record<string, ListSync>;
   no_sync?: string[];
   sync_flagged_emails?: boolean;
   aliases?: Record<string, string | null>;
@@ -73,6 +78,9 @@ export function applyListsConfigChange(cfg: ListsConfig, change: ListsConfigChan
   for (const [listId, sync] of Object.entries(change.overrides ?? {})) {
     if (sync === null) delete next.overrides[listId];
     else next = withListSync(next, listId, sync);
+  }
+  for (const [listId, sync] of Object.entries(change.pin_if_absent ?? {})) {
+    if (!next.overrides[listId]) next = withListSync(next, listId, sync);
   }
   return next;
 }

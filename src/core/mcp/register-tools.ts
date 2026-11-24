@@ -703,11 +703,12 @@ class ToDoTools implements TokenProvider {
               config,
             );
             if (added > 0) {
-              // Write only the new pins (overrides merge per key), so a pin
-              // another writer set meanwhile isn't reverted.
+              // `config` may be a stale KV read, so these pins are added only
+              // where the index's newest config has none: a pin made since
+              // (create_list's todo, say) is never replaced by a pattern's.
               const pins = Object.fromEntries(Object.entries(overrides).filter(([id]) => !config.overrides[id]));
               config = await this.#index()
-                .updateListsConfig({ overrides: pins })
+                .updateListsConfig({ pin_if_absent: pins })
                 .catch((e) => {
                   log.warn("list_pin_persist_failed", { error: String(e) });
                   return { ...config, overrides };

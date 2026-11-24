@@ -91,6 +91,12 @@ describe("applyListsConfigChange", () => {
     expect(next.archive).toEqual([]);
   });
 
+  it("pin_if_absent adds a pin only where there is none", () => {
+    const next = applyListsConfigChange(base, { pin_if_absent: { L1: "excluded", L4: "excluded" } });
+    expect(next.overrides).toEqual({ L1: "todo", L2: "reference", L4: "excluded" });
+    expect(next.archive).toEqual([]);
+  });
+
   it("merges and clears aliases, and leaves unnamed fields as they were", () => {
     expect(applyListsConfigChange(base, { aliases: { a: null, c: "L3" } }).aliases).toEqual({ b: "L2", c: "L3" });
     expect(applyListsConfigChange(base, { clear_aliases: true }).aliases).toEqual({});

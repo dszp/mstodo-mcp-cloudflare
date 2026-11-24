@@ -211,3 +211,18 @@ describe("reads filtered to an excluded list", () => {
     expect(r).not.toHaveProperty("not_mirrored");
   });
 });
+
+describe("list_lists auto-pin", () => {
+  it("doesn't replace a pin newer than its own read of the config", async () => {
+    const h = await harness();
+    h.core.upsertList({ id: "X", displayName: "Junk drawer" } as never);
+    const patterns = [{ pattern: "^Junk", flags: "i", type: "excluded" as const }];
+    await h.core.updateListsConfig({ patterns, overrides: { X: "todo" } });
+    // The Worker's KV read still predates the pin.
+    await storeListsConfig(h.env, ListsConfigSchema.parse({ patterns }));
+    const r = await h.call("list_lists", {});
+    expect(r).toMatchObject({ ok: true, lists: [{ id: "X", type: "todo" }] });
+    expect(h.syncOf("X")).toBe("todo");
+    expect((await loadListsConfig(h.env)).overrides).toEqual({ X: "todo" });
+  });
+});
