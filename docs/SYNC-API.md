@@ -747,8 +747,11 @@ The flow is authorization code with PKCE (S256) through `ASWebAuthenticationSess
 with an **`https` callback on one fixed domain the app owns** — for example
 `https://todo-app.<your domain>/oauth/callback` — that the app claims through an
 Associated Domains entitlement. That domain serves
-`/.well-known/apple-app-site-association`; a static page or a small Worker route is
-enough. The callback is deliberately **not** on each server's host: Associated Domains
+`/.well-known/apple-app-site-association` listing the app under the `webcredentials`
+service, which `ASWebAuthenticationSession` checks for an `https` callback. A static
+page is enough; this server also serves the file when `APPLE_TEAM_ID` and
+`APPLE_BUNDLE_IDS` (comma-separated) are set, as `{"webcredentials":{"apps":["<team>.<bundle>", …]}}`
+with `application/json` and no redirect. Unset, the path is a 404. The callback is deliberately **not** on each server's host: Associated Domains
 are fixed when the app is built, so a per-server callback would need an app update for
 every new server. An OAuth redirect URI doesn't have to share the server's host, so
 every server can send its code to the same domain (section 14).
@@ -787,40 +790,104 @@ test that existing `/mcp` grants survive the change (the library keeps
 
 ### 8.1 Cloudflare Access in front of the app
 
-On deployments that use it (section 16), Access stays a second, independent gate: a request must pass Access at the edge and
-then present a valid OAuth token for the `/api/v1` resource. Neither layer trusts the
-other.
+**Status: built, off by default.** The server-side half is in the code
+(`src/core/auth/access.ts`, `src/hosts/shared/app-signin.ts`). It stays off until the
+owner sets `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`; with neither set, every path behaves
+as it did before. The Access application itself is account configuration, which the
+owner sets up (see **Turning it on** below).
 
-**Which paths Access covers.** One Access application on this hostname, scoped to
-`/api/v1/sync/*`, `/api/v1/tasks/*`, `/api/v1/search`, `/api/v1/attachments/*`, and
-the app's sign-in path (below). These paths stay **outside** Access, because their
-callers can't complete an Access login: `/mcp` and the OAuth endpoints Claude's
-connectors use, `/webhook` (Microsoft Graph), and the single-use-link `/upload` and
-`/download`.
+On deployments that use it (section 16), Access is a second, independent gate: a request
+must pass Access at the edge and then present a valid OAuth token for the `/api/v1`
+resource. Neither layer trusts the other. The server also checks the Access token
+itself, so a gap in the Access application's paths fails closed instead of open.
+
+**Which paths Access covers.** One Access application on this hostname, with these
+paths:
+
+- `/api/v1/*` — every sync API path, including `/api/v1/sync/info`,
+  `/api/v1/sync/socket` and `/api/v1/attachments/*`.
+- `/app/signin` — the app's sign-in path (below).
+
+These paths stay **outside** Access, because their callers can't complete an Access
+login: `/mcp`, the OAuth endpoints (`/authorize`, `/auth/microsoft/callback`, `/token`,
+`/register`, `/.well-known/oauth-*`), `/webhook` (Microsoft Graph), the single-use-link
+`/upload` and `/download`, `/health`, and `/.well-known/apple-app-site-association`.
+
+The anonymous `GET /api/v1/sync/info` probe is behind Access too. An app that probes a
+server before signing in gets Access's login redirect instead of `{ server_id }`, which
+is how it learns that Access is in front (section 16).
+
+**What the server checks.** With Access configured, every `/api/v1` request, including
+the WebSocket upgrade on both hosts, must carry an Access JWT that passes all of these
+checks. The server checks them before the OAuth token, and refuses with `403
+{"error":"access_denied"}` otherwise:
+
+- RS256 signature by a key from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`.
+  The server caches the keys for an hour. A token signed by an unknown key ID triggers a
+  refetch, at most once a minute. If a refetch fails, keys fetched in the last 24 hours
+  keep working.
+- `iss` is `https://<team>.cloudflareaccess.com`, and `aud` contains `ACCESS_AUD`.
+- `exp` and `nbf` hold, with 60 seconds of clock skew.
+- `email` equals `OWNER_EMAIL`, ignoring case. Service tokens carry no email, so they
+  never pass.
+
+The server reads the token from `Cf-Access-Jwt-Assertion` (added by Access to every
+request it lets through) or, failing that, from the `cf-access-token` header the app
+sends. Only the first one present is checked. It never trusts
+`Cf-Access-Authenticated-User-Email` on its own, and it never logs a token or its
+claims, only the reason for a refusal.
+
+If only one of `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` is set, the server treats Access as
+misconfigured: every gated path answers `503 {"error":"access_misconfigured"}`.
 
 **How a native app passes Access.** Access accepts its session token in a
 `cf-access-token` request header, which is how non-browser clients call
 Access-protected APIs. The app gets that token during sign-in:
 
-1. The app opens `https://<host>/app/signin` in `ASWebAuthenticationSession`. That path
-   is behind Access, so the session shows the Access login first.
-2. After Access lets the request through, the Worker reads the validated
-   `Cf-Access-Jwt-Assertion` header, checks its signature and audience against the
-   team's Access keys, and starts the OAuth authorization (consent page, Microsoft
-   sign-in, `OWNER_EMAIL` gate).
-3. The final redirect to the `https` app callback carries the OAuth code and the Access
-   token. The callback is a universal link handled inside the session, so neither
-   value crosses the network again.
-4. The app sends `cf-access-token` and `Authorization: Bearer` on every request,
-   including the WebSocket upgrade. When Access answers with its login redirect
-   instead of the API response, the session has expired and the app repeats sign-in.
-   If the identity provider's session is still valid, that completes without a prompt.
+1. The app opens `https://<host>/app/signin?<its OAuth authorization parameters>` in
+   `ASWebAuthenticationSession`: `response_type=code`, `client_id`, `redirect_uri`,
+   `state`, `code_challenge` with `code_challenge_method=S256`, and
+   `resource=<origin>/api/v1`. That path is behind Access, so the session shows the
+   Access login first.
+2. The server verifies the Access JWT as above. In a browser it also accepts the
+   `CF_Authorization` cookie when the assertion header is absent. It then stores the
+   Access token for ten minutes, sealed, bound to the request's `client_id`,
+   `redirect_uri` and PKCE challenge, puts a handle to it in a `__Host-` cookie, and
+   redirects to `/authorize` with the same parameters.
+3. The authorization runs as it does for every client: consent page, Microsoft sign-in,
+   `OWNER_EMAIL` gate. **The Microsoft step is kept.** A verified Access identity does
+   not skip it, so the owner gate (UPN or object ID, identity-change wipe, grant epoch)
+   is the same code for the app as for every MCP connector, and Access stays an extra
+   gate rather than a replacement identity. With Entra as the Access identity provider,
+   the Microsoft step is usually silent.
+4. At the Microsoft callback, if the handle's record matches the authorization being
+   completed, the new grant carries the handle. When the app redeems the code at
+   `/token`, the response adds two fields, and the grant keeps no trace of the token:
 
-Step 3 is this server's own addition to the redirect, not something Access documents
-for native apps. **To verify in the build:** that Access accepts the assertion JWT from
-step 2 in the `cf-access-token` header (the documented flows use the `CF_Authorization`
-token, and the two may differ), and how long the Access session lasts for this
-application.
+   ```json
+   { "access_token": "…", "refresh_token": "…", "cf_access_token": "<Access JWT>", "cf_access_expires_at": 1795563933 }
+   ```
+
+   The Access token never appears in a redirect URL (section 18.7). The library has
+   already checked the code, the PKCE verifier and the exact `redirect_uri` by then. A
+   refresh doesn't return `cf_access_token`.
+5. The app sends `cf-access-token` and `Authorization: Bearer` on every request,
+   including the WebSocket upgrade. When Access answers with its login redirect instead
+   of the API response, or `cf_access_expires_at` has passed, the session has expired
+   and the app repeats sign-in. If the identity provider's session is still valid, that
+   completes without a prompt.
+
+Without Access configured, `/app/signin` is a 404 and the token response has no
+`cf_access_token`. The app then signs in at `/authorize` directly.
+
+**Not verified yet, because it needs a live Access application:**
+
+- That Access accepts the `Cf-Access-Jwt-Assertion` value, which the server hands over,
+  in the `cf-access-token` header. Cloudflare documents that flow with the
+  `CF_Authorization` token; the two are expected to be the same application token.
+- That Access adds `Cf-Access-Jwt-Assertion` to the WebSocket upgrade it proxies.
+- How long the Access session lasts for this application (the application's session
+  duration setting).
 
 **Passkeys instead of emailed codes.** Access's one-time PIN is the emailed code.
 Replacing it is an Access configuration change, not server code: add Microsoft Entra
@@ -829,6 +896,26 @@ supports passkeys as a sign-in method, so a passkey stored in 1Password signs in
 Access and the OAuth flow's Microsoft step, which is the same account the `OWNER_EMAIL`
 gate already checks. Confirmed 2026-11-23: Microsoft sign-in with a passkey stored in
 1Password works on this tenant.
+
+**Turning it on.** The owner does these steps in the Cloudflare dashboard and the
+deployment's configuration. Nothing in the repository does them.
+
+1. In Zero Trust, add Microsoft Entra ID as an identity provider (Settings →
+   Authentication).
+2. Create a self-hosted Access application on the server's hostname with the paths
+   `/api/v1/*` and `/app/signin`. Don't add `/mcp`, the OAuth endpoints, `/webhook`,
+   `/upload`, `/download` or `/.well-known/*`.
+3. Give it one Allow policy that includes only the owner's email, and allow only the
+   Entra identity provider (remove one-time PIN).
+4. Copy the application's audience (AUD) tag from its overview.
+5. Set `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) and `ACCESS_AUD` on the
+   Worker, as vars in `wrangler.jsonc` or as secrets. `OWNER_EMAIL` must be the email
+   Access reports for the owner.
+6. Deploy. Check that `GET /api/v1/sync/info` without a session redirects to the Access
+   login, and that `/mcp` and `/.well-known/oauth-authorization-server` still answer
+   without one.
+
+On the Node host the same variables apply, with Cloudflare Tunnel and Access in front.
 
 The bearer-token idea in ROADMAP §1 (`HTTP_API_TOKEN`) is for n8n. It isn't the app's
 auth: a static secret can't be revoked per device and doesn't go through Microsoft
@@ -1236,6 +1323,9 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-24: section 8.1 rewritten for what is built: the server-side Access check on
+  `/api/v1` and `/app/signin`, the token hand-over at code redemption, the
+  Apple association file, and the owner's steps to turn Access on.
 - 2026-11-24: section 1.2 replaced. The `archive` sync policy and the separate list
   classification became one per-list setting (`todo` / `reference` / `excluded`), with
   `sync` on feed lists, `list.update { sync }` and `GET /api/v1/lists/excluded`.
@@ -1376,9 +1466,12 @@ a time budget (section 5.1).
 ### 18.7 Security
 - `GET /sync/info` before sign-in returns only what sign-in needs (that the server
   exists, its `server_id`, and whether Access is in front); name, email hint and
-  version need a token.
+  version need a token. Built: the probe answers `{ server_id }` only, and when Access is
+  configured the probe is behind it, so the Access redirect is the "Access is in front"
+  answer (sections 8.1 and 16).
 - The Access token is not put in a redirect URL. The server holds it and hands it
-  over at code redemption, bound to the app's exact redirect URI.
+  over at code redemption, bound to the app's exact redirect URI. Built as
+  `cf_access_token` in the `authorization_code` token response (section 8.1).
 - The Node WebSocket upgrade validates with the library's resource-checking validator,
   not `unwrapToken`, which checks neither audience nor scope.
 - A socket is bound to its grant and epoch and has a lifetime cap, rather than being
