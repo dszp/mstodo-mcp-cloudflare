@@ -1299,6 +1299,17 @@ a time budget (section 5.1).
 - Task bodies are raw HTML, and archived flagged-email tasks hold email content. The
   app renders bodies sanitized, with no remote loads.
 
+### 18.7a Correction: production mirrors flagged email
+Sections 1 and 1.2 describe `flaggedEmails` as not mirrored. That's the default, but
+this deployment opts in (`sync_flagged_emails`), and on 2026-11-24 production held
+13,296 tasks, 10,247 of them in Flagged Emails. Two consequences:
+- **The sub-resource backfill is about five times the section 1.1 estimate** if it
+  covers flagged email. Flagged-email tasks carry a linked resource (the message link)
+  and rarely steps. Proposal: when the list is `archive`, backfill only its open tasks,
+  and fetch a completed one's sub-resources on demand (`GET /api/v1/tasks/{sid}`).
+- **The iPhone's `active` scope** includes every open flagged email. How many are open
+  is unmeasured; a `query_tasks` count on that list answers it before the app is built.
+
 ### 18.8 Later
 - Expose the `sid` in MCP outputs and accept either ID form now, so the after-Graph
   switch doesn't change MCP IDs a second time. Write the switch as a one-way procedure:
