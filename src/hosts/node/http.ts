@@ -1,4 +1,3 @@
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { AlarmScheduler, StateStore } from "../../core/ports";
 import type { IndexCore } from "../../core/index/index-core";
@@ -9,18 +8,15 @@ import { handleDownload } from "../../core/upload/download-handler";
 import { handleWebhook } from "../../core/subscriptions/webhook-handler";
 import { VERSION } from "../../core/version";
 import { log } from "../../core/log";
-import { oauthProviderOptions, type McpHandler } from "../shared/oauth";
-import type { ProviderEnv } from "../shared/auth-handler";
+import { oauthFront, type McpHandler } from "../shared/oauth";
 import { parsePublicOrigin, type NodeEnv } from "./env";
 import { bodyCapFor, limitBody, tooLarge } from "./body-limit";
-
-type ProviderNodeEnv = NodeEnv & ProviderEnv;
 
 // MCP over Streamable HTTP, stateless: a fresh server + transport per request.
 // Registering the tools is cheap and the Node host keeps no session state, so
 // nothing outlives the request. The grant check already ran in front of this
-// (the apiHandler in oauthProviderOptions, with this request's ctx.props).
-const nodeMcpHandler: McpHandler<ProviderNodeEnv> = {
+// (the /mcp resource server in oauthFront, with this request's ctx.props).
+const nodeMcpHandler: McpHandler<NodeEnv> = {
   async fetch(req, env) {
     // Stateless: no server-to-client SSE stream (GET) and no session to end
     // (DELETE). Answering 405 here, after the grant check, keeps clients from
@@ -93,8 +89,8 @@ export function toPublicOrigin(req: Request, origin: string): Request {
 }
 
 // Same routing order as the Worker (src/hosts/cloudflare/worker.ts): /health,
-// the three public capability/webhook endpoints, then the OAuth provider, which
-// owns /authorize, /token, /register, /.well-known/* and the /mcp grant gate.
+// the three public capability/webhook endpoints, then the OAuth front, which
+// owns /authorize, /token, /register, /.well-known/*, /mcp and /api/v1.
 // publicOrigin is required (SERVICE_BASE_URL in main.ts): throws
 // MissingConfigError / InvalidConfigError unless it is https or loopback http.
 export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
@@ -143,14 +139,10 @@ export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
       (await handleUpload(req, env)) ?? (await handleDownload(req, env)) ?? (await handleWebhook(req, env, ctx));
     if (early) return early;
 
-    // Built per request, as on the Worker: the resource is this request's
-    // origin. The env is a per-request copy because the library caches its
-    // helpers on env.OAUTH_PROVIDER, which would otherwise pin the first
-    // request's provider (and origin) for the life of the process.
-    const provider = new OAuthProvider<ProviderNodeEnv>(
-      oauthProviderOptions<ProviderNodeEnv>({ origin: url.origin, mcpHandler: nodeMcpHandler, toAppEnv: (e) => e }),
-    );
-    return provider.fetch(req, { ...env } as ProviderNodeEnv, ctx);
+    // Built per request, as on the Worker: the resources are this request's
+    // origin (always publicOrigin here, after the rewrite). The front never
+    // writes to env; the authorization helpers go to /authorize on a copy.
+    return oauthFront<NodeEnv>({ origin: url.origin, mcpHandler: nodeMcpHandler, toAppEnv: (e) => e }).fetch(req, env, ctx);
   }
 
   return { fetch, drain: background.drain };

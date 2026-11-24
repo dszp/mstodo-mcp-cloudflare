@@ -2,7 +2,7 @@ import { MSToDoMCP } from "./mcp-agent";
 import { TodoIndex } from "./todo-index-do";
 import { ownerIndex } from "../../core/owner-index";
 import { appEnv } from "./env";
-import { buildOAuthProvider } from "./oauth";
+import { buildOAuthFront } from "./oauth";
 import { handleUpload } from "../../core/upload/handler";
 import { handleDownload } from "../../core/upload/download-handler";
 import { handleWebhook } from "../../core/subscriptions/webhook-handler";
@@ -23,7 +23,7 @@ export default {
     }
 
     // Public (non-OAuth) web upload endpoint. Returns null for any other path so
-    // OAuth/MCP routing below is unaffected. Lives before oauthProvider.fetch so
+    // OAuth/MCP routing below is unaffected. Lives before the OAuth front so
     // /upload is reachable without an OAuth access token (it authenticates with a
     // single-use signed link minted by create_upload_link).
     const uploadRes = await handleUpload(req, app);
@@ -41,7 +41,7 @@ export default {
     const webhookRes = await handleWebhook(req, app, ctx);
     if (webhookRes) return webhookRes;
 
-    return buildOAuthProvider(url.origin).fetch(req, env, ctx);
+    return buildOAuthFront(url.origin).fetch(req, env, ctx);
   },
 
   // Phase 5: cron heartbeat. Pokes the singleton TodoIndex DO to (re-)arm its

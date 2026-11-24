@@ -27,12 +27,13 @@ import {
 } from "../../core/auth/microsoft";
 import type { AppEnv } from "../../core/ports";
 
-// OAUTH_PROVIDER is injected into the host env by the OAuthProvider runtime;
-// core ports do not carry it, so the handler adds it beside the core env.
+// OAUTH_PROVIDER is the authorization server's helper API, which the OAuth
+// front (oauth.ts) adds to the host env for this route; core ports do not
+// carry it, so the handler adds it beside the core env.
 type HandlerEnv = AppEnv & { OAUTH_PROVIDER: OAuthHelpers };
 
-// What the handler needs from the env the library hands it: the helpers the
-// library injected. Everything else comes through the host's toAppEnv.
+// What the handler needs from the env it is handed: the helpers. Everything
+// else comes through the host's toAppEnv.
 export type ProviderEnv = { OAUTH_PROVIDER: OAuthHelpers };
 
 // The authorization flow, in three requests:
@@ -57,6 +58,11 @@ const AUTHORIZE_PATH = "/authorize";
 const CALLBACK_PATH = "/auth/microsoft/callback";
 // The consent form is a handle, a decision and a checkbox.
 const MAX_CONSENT_FORM_BYTES = 8 * 1024;
+
+// The paths this handler serves; the OAuth front routes them here.
+export function isAuthUiPath(path: string): boolean {
+  return path === AUTHORIZE_PATH || path === CALLBACK_PATH;
+}
 
 interface UpstreamData {
   verifier: string;
