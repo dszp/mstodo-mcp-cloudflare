@@ -16,13 +16,6 @@ import { log } from "../log";
 //
 // The bytes never touch the model: they arrive at /upload from the browser and
 // are streamed on to Graph here within the same request.
-//
-// Graph can answer 500 generalException on a write that did or did not land.
-// Observed 2026-11-24 on a work account: every inline POST failed with nothing
-// stored, and every upload session's final PUT returned 500 although the
-// attachment was stored. So attachFile snapshots the task's attachment ids
-// first, and on a 5xx looks for a new attachment with the same name before it
-// reports failure (or, for inline, before it retries through a session).
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
@@ -167,6 +160,9 @@ async function sessionAttach(
   graph: GraphClient,
   accessToken: string,
   args: AttachArgs,
+  // Same-name attachments on the task before attachFile began (null: unknown),
+  // so a commit Graph reports as a failure can be told apart (see below).
+  before: Set<string> | null,
 ): Promise<UploadResult> {
   const total = args.bytes.byteLength;
   const session = await graph.postJson(
@@ -220,18 +216,58 @@ async function sessionAttach(
       start = next !== null ? next : end + 1;
       continue;
     }
-    // Anything else: surface a typed error. A 5xx on the final range can come
-    // back after Graph stored the attachment (attachFile checks for that), so
-    // leave that session alone; it expires on its own. Otherwise release it.
+    // Anything else: release the session and surface a typed error.
     const detail = await res.text().catch(() => "");
-    const finalRange = end === total - 1;
-    if (!(finalRange && res.status >= 500)) await cancelSession(session.uploadUrl, accessToken);
+    // Graph can answer the final chunk with a 5xx after it has committed the
+    // attachment (seen live, 2026-11-24: a 6 MB PDF, generalException, file
+    // attached). Look for a new attachment of this name before calling it a
+    // failure, so the person isn't told an attached file failed.
+    if (end + 1 === total && res.status >= 500 && before !== null) {
+      const id = await findCommitted(graph, args, before);
+      if (id !== null) {
+        log.warn("upload_session_commit_after_error", { status: res.status, task_id: args.taskId });
+        return { attachment_id: id, name: args.name, size: total, content_type: args.contentType, via: "session" };
+      }
+    }
+    await cancelSession(session.uploadUrl, accessToken);
     throw new GraphError(res.status, `graph_${res.status}`, detail.slice(0, 500));
   }
 
   // Ran out of bytes without a 201 Created — Graph never finalized.
   await cancelSession(session.uploadUrl, accessToken);
   throw new GraphError(0, "upload_session_incomplete");
+}
+
+// Waits before each look for an attachment Graph committed despite an error.
+const COMMIT_CHECK_DELAYS_MS = [0, 1000, 2000];
+
+async function sameNameIds(graph: GraphClient, args: AttachArgs): Promise<Set<string> | null> {
+  try {
+    const all = await listExistingFileAttachments(graph, args.listId, args.taskId);
+    return new Set(all.filter((a) => a.name === args.name).map((a) => a.id));
+  } catch (e) {
+    log.warn("upload_snapshot_failed", { task_id: args.taskId, error: String(e) });
+    return null;
+  }
+}
+
+async function findCommitted(
+  graph: GraphClient,
+  args: AttachArgs,
+  before: Set<string>,
+  delaysMs: readonly number[] = COMMIT_CHECK_DELAYS_MS,
+): Promise<string | null> {
+  for (const ms of delaysMs) {
+    if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+    try {
+      const all = await listExistingFileAttachments(graph, args.listId, args.taskId);
+      const hit = all.find((a) => a.name === args.name && !before.has(a.id));
+      if (hit) return hit.id;
+    } catch (e) {
+      log.warn("upload_session_commit_check_failed", { task_id: args.taskId, error: String(e) });
+    }
+  }
+  return null;
 }
 
 async function cancelSession(uploadUrl: string, accessToken: string): Promise<void> {
@@ -245,76 +281,38 @@ async function cancelSession(uploadUrl: string, accessToken: string): Promise<vo
   }
 }
 
-/** Ids of every attachment on the task, or null if the task can't be listed. */
-async function attachmentIds(graph: GraphClient, listId: string, taskId: string): Promise<Set<string> | null> {
-  try {
-    const result = await graph.getAllPages(attachmentsUrl(listId, taskId), AttachmentSchema);
-    return result.status === 200 ? new Set(result.items.map((a) => a.id)) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * After a Graph 5xx, find an attachment named `args.name` that was not on the
- * task before the attempt. Returns its id, or null if none landed (or the task
- * can't be listed).
- */
-async function findLanded(
-  graph: GraphClient,
-  args: AttachArgs,
-  before: Set<string>,
-): Promise<string | null> {
-  try {
-    const result = await graph.getAllPages(attachmentsUrl(args.listId, args.taskId), AttachmentSchema);
-    if (result.status !== 200) return null;
-    const hit = result.items.find((a) => !before.has(a.id) && a.name === args.name);
-    return hit?.id ?? null;
-  } catch {
-    return null;
-  }
-}
-
-const isServerError = (e: unknown): e is GraphError => e instanceof GraphError && e.status >= 500;
-
 /**
  * Attach a file to a To Do task, choosing the inline or upload-session path by
  * size. Throws GraphError on a Graph failure (mapped by the caller). The caller
  * must enforce PER_FILE_MAX_BYTES before calling.
  *
- * A Graph 5xx is not taken at its word (see the header comment): if the
- * attachment landed anyway, the upload succeeds; if an inline POST failed and
- * nothing landed, the file is sent again through an upload session. Without a
- * readable "before" snapshot neither recovery runs, since a same-named older
- * attachment could not be told apart from the new one.
+ * Graph can answer 500 generalException to an inline POST (seen live,
+ * 2026-11-24: every inline POST on the Servant Voice account, whatever the task
+ * ID form or Prefer header, with nothing stored). On an inline 5xx we look once
+ * for a new attachment of this name, then send the file through an upload
+ * session, whose 5xx handling is in sessionAttach. Without a same-name snapshot
+ * the inline error stands: a blind retry could attach the file twice.
  */
 export async function attachFile(
   graph: GraphClient,
   accessToken: string,
   args: AttachArgs,
 ): Promise<UploadResult> {
-  const before = await attachmentIds(graph, args.listId, args.taskId);
-  const landed = (via: UploadResult["via"], id: string, status: number): UploadResult => {
-    log.warn("upload_graph_5xx_but_stored", { task_id: args.taskId, via, status });
-    return { attachment_id: id, name: args.name, size: args.bytes.byteLength, content_type: args.contentType, via };
-  };
-
+  const before = await sameNameIds(graph, args);
   if (args.bytes.byteLength <= args.maxInlineBytes) {
     try {
       return await inlineAttach(graph, args);
     } catch (e) {
-      if (!isServerError(e) || !before) throw e;
-      const id = await findLanded(graph, args, before);
-      if (id) return landed("inline", id, e.status);
-      log.warn("upload_inline_5xx_retry_session", { task_id: args.taskId, status: e.status });
+      if (!(e instanceof GraphError) || e.status < 500 || before === null) throw e;
+      // One immediate look: inline failures seen so far stored nothing, even
+      // 4 s later, so the session retry shouldn't wait out the full schedule.
+      const id = await findCommitted(graph, args, before, [0]);
+      if (id !== null) {
+        log.warn("upload_inline_commit_after_error", { status: e.status, task_id: args.taskId });
+        return { attachment_id: id, name: args.name, size: args.bytes.byteLength, content_type: args.contentType, via: "inline" };
+      }
+      log.warn("upload_inline_error_retry_session", { status: e.status, task_id: args.taskId });
     }
   }
-  try {
-    return await sessionAttach(graph, accessToken, args);
-  } catch (e) {
-    if (!isServerError(e) || !before) throw e;
-    const id = await findLanded(graph, args, before);
-    if (id) return landed("session", id, e.status);
-    throw e;
-  }
+  return sessionAttach(graph, accessToken, args, before);
 }

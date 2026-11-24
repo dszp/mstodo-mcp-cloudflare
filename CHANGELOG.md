@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   link mutations that touch an excluded list are rejected with `list_excluded`.
 
 ### Fixed
+- **Uploads over the inline limit no longer report a failure for a file that attached.**
+  Graph can answer the last chunk of an upload session with a 500 after it has stored the
+  attachment (seen with a 6 MB PDF). The upload page then said the file failed, and a retry
+  said "duplicate". The server now looks for a new attachment of that name before reporting
+  an error.
+- **Uploads at or under the inline limit (3 MiB by default) attach again.** Graph has been
+  answering every inline attachment POST with 500 `generalException` and storing nothing, so
+  every small file on the upload page, and every small attachment `move_task` copies, failed
+  with `graph_500`. After an inline 5xx the server now checks whether the file landed and, if
+  not, sends it through an upload session instead.
 - `set_list_config` no longer clears the `archive` list, and `set_list_alias` no longer clears
   every pin and the `archive` list.
 - A list excluded while the sync cycle was fetching it is no longer filled back in and
@@ -49,12 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   completed tasks, which the sub-resource scan skips.
 - A queued app edit of a list's `sync` older than a change made through `set_list_config` no
   longer overrides it.
-- **File uploads no longer fail with `graph_500` when Graph stored the file anyway.** Graph
-  has been answering 500 `generalException` to every inline attachment POST (nothing stored)
-  and to every upload session's final PUT (file stored). The upload page and `move_task`'s
-  attachment copy now snapshot the task's attachments first; after a 5xx they report success
-  if a new attachment with that name appeared, and an inline 5xx that stored nothing is sent
-  again through an upload session. A session whose final PUT got a 5xx is no longer cancelled.
 
 ## [0.17.1] – 2026-10-17
 
