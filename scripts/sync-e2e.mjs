@@ -14,6 +14,10 @@
 // continues by itself; otherwise copy the address the browser ends on (it
 // starts with http://127.0.0.1:8765/cb?code=) and paste it here.
 //
+// With --write, it also sends a create, an update and a delete for a
+// throwaway task in the default list through POST /sync/mutations, and shows
+// each result and the push messages they cause.
+//
 // Tokens are kept in ~/.cache/mstodo-sync-e2e/<host>.json (mode 600) and
 // refreshed as needed, so later runs skip sign-in.
 import { createHash, randomBytes } from "node:crypto";
@@ -25,6 +29,7 @@ import { createInterface } from "node:readline";
 import WebSocket from "ws";
 
 const origin = new URL(process.argv[2] ?? "").origin;
+const WRITE = process.argv.includes("--write");
 const RESOURCE = `${origin}/api/v1`;
 const PORT = 8765;
 const REDIRECT = `http://127.0.0.1:${PORT}/cb`;
@@ -212,6 +217,33 @@ async function main() {
     ws.on("error", (e) => console.log(`${now()} socket error: ${e.message}`));
   };
   await connect();
+  if (WRITE) setTimeout(() => writeRoundTrip(state, changes).catch((e) => console.log(`write test failed: ${e.message}`)), 2000);
+}
+
+async function mutate(state, mutations) {
+  const res = await fetch(`${origin}/api/v1/sync/mutations`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${await token(state)}`, "content-type": "application/json" },
+    body: JSON.stringify({ client_id: "sync-e2e", mutations }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`mutations: ${res.status} ${body.error ?? ""}`);
+  for (const r of body.results) console.log(`${now()} result ${r.id}: ${r.status}${r.error ? ` (${r.error})` : ""}`);
+  return body;
+}
+
+async function writeRoundTrip(state, initial) {
+  const list = initial.find((c) => c.kind === "list" && !c.deleted && c.data.wellknown === "defaultList");
+  if (!list) throw new Error("no default list in the feed");
+  const sid = crypto.randomUUID();
+  const at = () => new Date().toISOString();
+  const id = () => `e2e-${crypto.randomUUID()}`;
+  console.log(`${now()} write test: creating task ${sid.slice(0, 8)} in "${list.data.name}"`);
+  await mutate(state, [{ id: id(), at: at(), op: "task.create", sid, fields: { list_id: list.id, title: "[sync e2e] safe to delete" } }]);
+  await new Promise((r) => setTimeout(r, 1500));
+  await mutate(state, [{ id: id(), at: at(), op: "task.update", sid, fields: { title: "[sync e2e] renamed", importance: "high" } }]);
+  await new Promise((r) => setTimeout(r, 1500));
+  await mutate(state, [{ id: id(), at: at(), op: "task.delete", sid }]);
 }
 
 main().catch((e) => {

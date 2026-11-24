@@ -33,7 +33,6 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
     ctx.blockConcurrencyWhile(async () => this.#core.bootstrap());
   }
 
-  acquireWriteLease(...a: Parameters<IndexCore["acquireWriteLease"]>) { return this.#core.acquireWriteLease(...a); }
   // Push socket upgrade (docs/SYNC-API.md section 7.2). Reached only through
   // this object's stub: the Worker authenticates the request against the
   // /api/v1 resource first and passes what it verified in x-sync-* headers.
@@ -71,6 +70,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
     }
   }
 
+  acquireWriteLease(...a: Parameters<IndexCore["acquireWriteLease"]>) { return this.#core.acquireWriteLease(...a); }
   alarm(...a: Parameters<IndexCore["alarm"]>) { return this.#core.alarm(...a); }
   announceChanges(...a: Parameters<IndexCore["announceChanges"]>) { return this.#core.announceChanges(...a); }
   authState(...a: Parameters<IndexCore["authState"]>) { return this.#core.authState(...a); }
@@ -78,11 +78,13 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   clearMyDayFields(...a: Parameters<IndexCore["clearMyDayFields"]>) { return this.#core.clearMyDayFields(...a); }
   clearReauth(...a: Parameters<IndexCore["clearReauth"]>) { return this.#core.clearReauth(...a); }
   deleteChecklistItem(...a: Parameters<IndexCore["deleteChecklistItem"]>) { return this.#core.deleteChecklistItem(...a); }
+  deleteLinkedResource(...a: Parameters<IndexCore["deleteLinkedResource"]>) { return this.#core.deleteLinkedResource(...a); }
   deleteList(...a: Parameters<IndexCore["deleteList"]>) { return this.#core.deleteList(...a); }
   deleteSubscriptionRecord(...a: Parameters<IndexCore["deleteSubscriptionRecord"]>) { return this.#core.deleteSubscriptionRecord(...a); }
   deleteTask(...a: Parameters<IndexCore["deleteTask"]>) { return this.#core.deleteTask(...a); }
   ensureSyncing(...a: Parameters<IndexCore["ensureSyncing"]>) { return this.#core.ensureSyncing(...a); }
   findListForTask(...a: Parameters<IndexCore["findListForTask"]>) { return this.#core.findListForTask(...a); }
+  findParentOf(...a: Parameters<IndexCore["findParentOf"]>) { return this.#core.findParentOf(...a); }
   findSubscription(...a: Parameters<IndexCore["findSubscription"]>) { return this.#core.findSubscription(...a); }
   forceRefresh(...a: Parameters<IndexCore["forceRefresh"]>) { return this.#core.forceRefresh(...a); }
   forceSubstrateRefresh(...a: Parameters<IndexCore["forceSubstrateRefresh"]>) { return this.#core.forceSubstrateRefresh(...a); }
@@ -102,10 +104,15 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   moveTask(...a: Parameters<IndexCore["moveTask"]>) { return this.#core.moveTask(...a); }
   syncCursor(...a: Parameters<IndexCore["syncCursor"]>) { return this.#core.syncCursor(...a); }
   adoptSid(...a: Parameters<IndexCore["adoptSid"]>) { return this.#core.adoptSid(...a); }
+  reserveSid(...a: Parameters<IndexCore["reserveSid"]>) { return this.#core.reserveSid(...a); }
+  createCandidates(...a: Parameters<IndexCore["createCandidates"]>) { return this.#core.createCandidates(...a); }
+  forgetSubresources(...a: Parameters<IndexCore["forgetSubresources"]>) { return this.#core.forgetSubresources(...a); }
+  setStepOrder(...a: Parameters<IndexCore["setStepOrder"]>) { return this.#core.setStepOrder(...a); }
   fieldClocks(...a: Parameters<IndexCore["fieldClocks"]>) { return this.#core.fieldClocks(...a); }
   mutationAbandon(...a: Parameters<IndexCore["mutationAbandon"]>) { return this.#core.mutationAbandon(...a); }
   mutationBegin(...a: Parameters<IndexCore["mutationBegin"]>) { return this.#core.mutationBegin(...a); }
   mutationFinish(...a: Parameters<IndexCore["mutationFinish"]>) { return this.#core.mutationFinish(...a); }
+  mutationRelease(...a: Parameters<IndexCore["mutationRelease"]>) { return this.#core.mutationRelease(...a); }
   pruneMutations(...a: Parameters<IndexCore["pruneMutations"]>) { return this.#core.pruneMutations(...a); }
   resolveSids(...a: Parameters<IndexCore["resolveSids"]>) { return this.#core.resolveSids(...a); }
   syncChanges(...a: Parameters<IndexCore["syncChanges"]>) { return this.#core.syncChanges(...a); }
@@ -124,6 +131,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   renewSubscriptions(...a: Parameters<IndexCore["renewSubscriptions"]>) { return this.#core.renewSubscriptions(...a); }
   replaceAttachments(...a: Parameters<IndexCore["replaceAttachments"]>) { return this.#core.replaceAttachments(...a); }
   replaceLinkedResources(...a: Parameters<IndexCore["replaceLinkedResources"]>) { return this.#core.replaceLinkedResources(...a); }
+  upsertLinkedResource(...a: Parameters<IndexCore["upsertLinkedResource"]>) { return this.#core.upsertLinkedResource(...a); }
   replaceChecklistItems(...a: Parameters<IndexCore["replaceChecklistItems"]>) { return this.#core.replaceChecklistItems(...a); }
   releaseWriteLease(...a: Parameters<IndexCore["releaseWriteLease"]>) { return this.#core.releaseWriteLease(...a); }
   reportClaimsChallenge(...a: Parameters<IndexCore["reportClaimsChallenge"]>) { return this.#core.reportClaimsChallenge(...a); }

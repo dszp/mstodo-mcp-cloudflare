@@ -33,6 +33,8 @@ function fakeEnv(overrides: Record<string, unknown> = {}) {
   return { env, index };
 }
 
+// No route under test defers work past its response.
+const BG = { waitUntil: () => {} };
 const req = (path: string, init?: RequestInit) => new Request(`https://srv.test/api/v1${path}`, init);
 const body = async (res: Response) => [res.status, await res.json()];
 
@@ -61,7 +63,7 @@ describe("handleApiRequest", () => {
   ])("refuses a grant with %s before any route runs", async (_label, props, reauth) => {
     const { env, index } = fakeEnv();
     index.authState.mockResolvedValue({ epoch: EPOCH, reauth });
-    const res = await handleApiRequest(req("/sync/changes"), env, props);
+    const res = await handleApiRequest(req("/sync/changes"), env, props, BG);
     expect(res.status).toBe(401);
     expect(((await res.json()) as { error: string }).error).toBe("invalid_token");
     expect(index.syncChanges).not.toHaveBeenCalled();
@@ -69,7 +71,7 @@ describe("handleApiRequest", () => {
 
   it("passes cursor, limit and scope to the feed", async () => {
     const { env, index } = fakeEnv();
-    const res = await handleApiRequest(req("/sync/changes?cursor=ab.1&limit=20&scope=active"), env, PROPS);
+    const res = await handleApiRequest(req("/sync/changes?cursor=ab.1&limit=20&scope=active"), env, PROPS, BG);
     expect(await body(res)).toEqual([200, PAGE]);
     expect(index.syncChanges).toHaveBeenCalledWith({ cursor: "ab.1", limit: 20, scope: "active" });
   });
@@ -82,46 +84,46 @@ describe("handleApiRequest", () => {
   ])("maps %s to %i", async (code, status) => {
     const { env, index } = fakeEnv();
     index.syncChanges.mockResolvedValue({ ok: false, error: code });
-    expect(await body(await handleApiRequest(req("/sync/changes"), env, PROPS))).toEqual([status, { error: code }]);
+    expect(await body(await handleApiRequest(req("/sync/changes"), env, PROPS, BG))).toEqual([status, { error: code }]);
   });
 
   it.each(["-1", "1.5", "ten", "1234567"])("refuses limit=%s", async (limit) => {
     const { env, index } = fakeEnv();
-    const res = await handleApiRequest(req(`/sync/changes?limit=${limit}`), env, PROPS);
+    const res = await handleApiRequest(req(`/sync/changes?limit=${limit}`), env, PROPS, BG);
     expect(await body(res)).toEqual([400, { error: "bad_limit" }]);
     expect(index.syncChanges).not.toHaveBeenCalled();
   });
 
   it("serves a task by sid, and 404s an unknown or malformed one without asking the index", async () => {
     const { env, index } = fakeEnv();
-    expect(await body(await handleApiRequest(req("/tasks/s1"), env, PROPS))).toEqual([
+    expect(await body(await handleApiRequest(req("/tasks/s1"), env, PROPS, BG))).toEqual([
       200,
       { kind: "task", id: "s1", data: { title: "t" }, field_clock: {} },
     ]);
-    expect(await body(await handleApiRequest(req("/tasks/s2"), env, PROPS))).toEqual([404, { error: "not_found" }]);
+    expect(await body(await handleApiRequest(req("/tasks/s2"), env, PROPS, BG))).toEqual([404, { error: "not_found" }]);
     index.syncTask.mockClear();
     for (const bad of ["a%2Fb", "%E0%A4%A", "x".repeat(65)]) {
-      expect((await handleApiRequest(req(`/tasks/${bad}`), env, PROPS)).status).toBe(404);
+      expect((await handleApiRequest(req(`/tasks/${bad}`), env, PROPS, BG)).status).toBe(404);
     }
     expect(index.syncTask).not.toHaveBeenCalled();
   });
 
   it("searches with literal terms and returns hits as tasks", async () => {
     const { env, index } = fakeEnv();
-    const res = await handleApiRequest(req(`/search?q=${encodeURIComponent('pay "the" bill')}`), env, PROPS);
+    const res = await handleApiRequest(req(`/search?q=${encodeURIComponent('pay "the" bill')}`), env, PROPS, BG);
     expect(await body(res)).toEqual([200, { results: [{ kind: "task", id: "sid-G1", data: {}, field_clock: {} }] }]);
     expect(index.syncSearch).toHaveBeenCalledWith('"pay"* """the"""* "bill"*', 50);
   });
 
   it.each(["", "   ", "x".repeat(257)])("refuses search q=%j", async (q) => {
     const { env, index } = fakeEnv();
-    expect(await body(await handleApiRequest(req(`/search?q=${q}`), env, PROPS))).toEqual([400, { error: "bad_query" }]);
+    expect(await body(await handleApiRequest(req(`/search?q=${q}`), env, PROPS, BG))).toEqual([400, { error: "bad_query" }]);
     expect(index.syncSearch).not.toHaveBeenCalled();
   });
 
   it("serves the whole info with a token, the address only as a hint", async () => {
     const { env } = fakeEnv();
-    const [status, info] = await body(await handleApiRequest(req("/sync/info"), env, PROPS));
+    const [status, info] = await body(await handleApiRequest(req("/sync/info"), env, PROPS, BG));
     expect(status).toBe(200);
     expect(info).toMatchObject({ server_id: "srv", cursor: "ab.3", account: { name: "David", email_hint: "d…@example.com" } });
     expect(typeof (info as { version: unknown }).version).toBe("string");
@@ -130,11 +132,35 @@ describe("handleApiRequest", () => {
 
   it("answers 404 for an unknown route and 405 for a write to a read route", async () => {
     const { env } = fakeEnv();
-    expect(await body(await handleApiRequest(req("/nope"), env, PROPS))).toEqual([404, { error: "not_found" }]);
-    expect(await body(await handleApiRequest(req(""), env, PROPS))).toEqual([404, { error: "not_found" }]);
-    const res = await handleApiRequest(req("/sync/changes", { method: "POST" }), env, PROPS);
+    expect(await body(await handleApiRequest(req("/nope"), env, PROPS, BG))).toEqual([404, { error: "not_found" }]);
+    expect(await body(await handleApiRequest(req(""), env, PROPS, BG))).toEqual([404, { error: "not_found" }]);
+    const res = await handleApiRequest(req("/sync/changes", { method: "POST" }), env, PROPS, BG);
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("GET");
+    const get = await handleApiRequest(req("/sync/mutations"), env, PROPS, BG);
+    expect([get.status, get.headers.get("allow")]).toEqual([405, "POST"]);
+  });
+
+  describe("POST /sync/mutations refuses a body it can't take before touching the index", () => {
+    const post = (body: string, headers: Record<string, string> = {}) =>
+      req("/sync/mutations", { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
+    it.each([
+      ["not JSON", post("{nope"), 400, { error: "bad_json" }],
+      ["no client_id", post(JSON.stringify({ mutations: [] })), 400, { error: "bad_batch", detail: "client_id required" }],
+      ["mutations not an array", post(JSON.stringify({ client_id: "c", mutations: {} })), 400, { error: "bad_batch", detail: "mutations must be an array" }],
+      [
+        "26 mutations",
+        post(JSON.stringify({ client_id: "c", mutations: Array.from({ length: 26 }, () => ({})) })),
+        400,
+        { error: "bad_batch", detail: "at most 25 mutations per request" },
+      ],
+      ["a declared length over 256 KiB", post("{}", { "content-length": String(256 * 1024 + 1) }), 413, { error: "body_too_large", max: 262144 }],
+      ["an undeclared body over 256 KiB", post(JSON.stringify({ client_id: "c", pad: "x".repeat(256 * 1024) })), 413, { error: "body_too_large", max: 262144 }],
+    ])("%s", async (_label, r, status, expected) => {
+      const { env, index } = fakeEnv();
+      expect(await body(await handleApiRequest(r, env, PROPS, BG))).toEqual([status, expected]);
+      expect(index.syncChanges).not.toHaveBeenCalled();
+    });
   });
 });
 

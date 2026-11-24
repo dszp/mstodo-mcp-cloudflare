@@ -49,6 +49,7 @@ export interface FeedTask {
   due: string | null;
   start: string | null;
   reminder: { on: boolean; at: string | null };
+  // A bare date, like due and start: To Do keeps completion at date granularity.
   completed_at: string | null;
   recurrence: unknown;
   created_at: string | null;
@@ -268,7 +269,7 @@ export function buildTasks(sql: SqlDb, taskIds: string[], timeZone: string): Map
         due: bareDate(t.due_at as number | null, timeZone),
         start: bareDate(t.start_at as number | null, timeZone),
         reminder: { on: t.is_reminder_on === 1, at: iso(t.reminder_at as number | null) },
-        completed_at: iso(t.completed_at as number | null),
+        completed_at: bareDate(t.completed_at as number | null, timeZone),
         recurrence: parseJson<unknown>(t.recurrence_json as string | null, null),
         created_at: iso(t.created_at as number | null),
         modified_at: iso(t.modified_at as number | null),

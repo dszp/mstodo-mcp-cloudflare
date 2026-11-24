@@ -11,10 +11,13 @@ export const REDIRECT_URI = "http://localhost:9/cb";
 
 // Microsoft's token endpoint and Graph /me, scripted. `extra` answers any other
 // URL first (return undefined to fall through to the 404).
-export function stubMicrosoft(mail: string, extra?: (url: string) => Response | undefined) {
-  const fn = vi.fn(async (input: RequestInfo | URL) => {
+export function stubMicrosoft(
+  mail: string,
+  extra?: (url: string, init?: RequestInit) => Response | undefined | Promise<Response | undefined>,
+) {
+  const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : String(input);
-    const scripted = extra?.(url);
+    const scripted = await extra?.(url, init);
     if (scripted) return scripted;
     if (url.endsWith("/oauth2/v2.0/token")) {
       return new Response(

@@ -55,12 +55,15 @@ describe("IndexCore.moveTask", () => {
     const { c, sql } = core();
     c.upsertTask(task("old", "A", "2026-11-23T10:00:00Z"), "L1");
     c.updateMyDayFields("old", { committed_day: "2026-11-23" });
+    const sidOld = c.syncTaskSids(["old"]).old;
     c.upsertTask(task("new", "A (from delta)", "2026-11-23T10:05:00Z"), "L2");
 
     c.moveTask("old", "L2", "new");
 
     expect(row(sql, "old")).toBeUndefined();
-    expect(row(sql, "new")).toMatchObject({ title: "A (from delta)", committed_day: "2026-11-23" });
+    expect(row(sql, "new")).toMatchObject({ list_id: "L2", title: "A (from delta)", committed_day: "2026-11-23" });
+    // The source's sid follows the task; the destination's own is retired.
+    expect(c.syncTaskSids(["new"]).new).toBe(sidOld);
   });
 
   it("only changes the list when the ID is stable", () => {

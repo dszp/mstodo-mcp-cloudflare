@@ -49,6 +49,32 @@ export const UPDATABLE: Record<string, readonly string[]> = {
   "link.update": ["url", "title"],
 };
 
+// Fields every other op accepts. A create takes the update fields plus the
+// sid of its parent; reorders take only `position`.
+const TASK_FIELDS = UPDATABLE["task.update"];
+export const ALLOWED_FIELDS: Record<MutationOp, readonly string[]> = {
+  "list.update": UPDATABLE["list.update"],
+  "task.update": TASK_FIELDS,
+  "step.update": UPDATABLE["step.update"],
+  "link.update": UPDATABLE["link.update"],
+  "list.create": ["name"],
+  "list.delete": [],
+  "task.create": ["list_id", ...TASK_FIELDS],
+  "task.delete": [],
+  "task.move": ["list_id"],
+  "task.reorder": [],
+  "myday.add": [],
+  "myday.remove": [],
+  "myday.reorder": [],
+  "step.create": ["task_id", "title", "checked"],
+  "step.delete": [],
+  "step.reorder": [],
+  "link.create": ["task_id", "url", "title"],
+  "link.delete": [],
+};
+// A parent reference, not a field of the entity: it gets no field clock.
+const PARENT_REFS = new Set(["list_id", "task_id"]);
+
 export const kindOf = (op: MutationOp): EntityKind => {
   const k = op.slice(0, op.indexOf("."));
   return (k === "myday" ? "task" : k) as EntityKind;
@@ -70,8 +96,11 @@ export interface Resolved {
 // The server-side half, run inside the index (one SQLite each call). On
 // Cloudflare these are Durable Object RPCs.
 export interface MutationStore {
+  // `prior_at_ms` is set when an earlier attempt of this id may have written
+  // to Graph (it was released as ambiguous, or its lease ran out): the time it
+  // first began.
   mutationBegin(id: string, principal: string, nowMs: number, leaseMs: number): Promise<
-    | { state: "new" }
+    | { state: "new"; prior_at_ms?: number }
     | { state: "done"; result: unknown }
     | { state: "leased" }
   >;
@@ -81,6 +110,9 @@ export interface MutationStore {
     clocks: Array<{ kind: EntityKind; sid: string; field: string; at_ms: number }>,
   ): Promise<void>;
   mutationAbandon(id: string): Promise<void>;
+  // Keeps the row (and its first at_ms) but frees the lease: the write may
+  // have reached Graph, so the retry looks for it before writing again.
+  mutationRelease(id: string): Promise<void>;
   fieldClocks(kind: EntityKind, sid: string): Promise<Record<string, number>>;
   resolveSids(refs: SidRef[]): Promise<Record<string, Resolved>>;
   adoptSid(kind: EntityKind, sid: string, graphId: string): Promise<boolean>;
@@ -91,17 +123,26 @@ export interface MutationStore {
 // fields.list_id / fields.task_id / position neighbours) to Graph IDs.
 export interface ExecInput {
   op: MutationOp;
+  // The app's sid for the entity. A create records it for the new Graph ID
+  // before the mirror write, so the mirror never mints a sid of its own.
+  sid: string;
   graphId: string | null;
   fields: Record<string, unknown>;
   position?: Position;
   ids: Record<string, string>;
+  // A create retried after an attempt that may have reached Graph: find what
+  // that attempt made (created at or after this time) before creating again.
+  priorAttemptMs?: number;
 }
+// `ambiguous`: the failure came after the request may have reached Graph (a
+// 5xx or a dropped connection on a create), so the retry must check first.
 export type ExecOutcome =
   | { ok: true; graphId: string }
-  | { ok: false; error: string; retry: boolean; rejected?: boolean };
+  | { ok: false; error: string; retry: boolean; rejected?: boolean; ambiguous?: boolean };
 export type Executor = (input: ExecInput) => Promise<ExecOutcome>;
 
 const SID_RE = /^[0-9a-f]{32}$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const AT_RE = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/i;
 const ID_RE = /^[A-Za-z0-9._:-]{1,100}$/;
 
 export function normalizeSid(s: string): string {
@@ -119,21 +160,34 @@ export function parseBatch(body: unknown): { client_id: string; mutations: unkno
   return { client_id: b.client_id, mutations: b.mutations };
 }
 
+// Exactly one of { before: sid }, { after: sid }, { top: true }, { bottom: true }.
+function isPosition(p: unknown): p is Position {
+  if (!p || typeof p !== "object" || Array.isArray(p)) return false;
+  const entries = Object.entries(p);
+  if (entries.length !== 1) return false;
+  const [k, v] = entries[0];
+  if (k === "before" || k === "after") return typeof v === "string" && SID_RE.test(v.toLowerCase());
+  return (k === "top" || k === "bottom") && v === true;
+}
+
 function validate(raw: unknown): MutationIn | { id: string; error: string } {
   const m = (raw ?? {}) as Record<string, unknown>;
   const id = typeof m.id === "string" && ID_RE.test(m.id) ? m.id : "";
   if (!id) return { id: String(m.id ?? ""), error: "bad_id" };
   if (typeof m.op !== "string" || !(OPS as readonly string[]).includes(m.op)) return { id, error: "unknown_op" };
   if (typeof m.sid !== "string" || !SID_RE.test(m.sid.toLowerCase())) return { id, error: "bad_sid" };
-  if (typeof m.at !== "string" || Number.isNaN(Date.parse(m.at))) return { id, error: "bad_at" };
+  // An offset is required: without one Date.parse reads the time in the
+  // server's zone.
+  if (typeof m.at !== "string" || !AT_RE.test(m.at) || Number.isNaN(Date.parse(m.at))) return { id, error: "bad_at" };
   if (m.fields !== undefined && (typeof m.fields !== "object" || m.fields === null || Array.isArray(m.fields))) {
     return { id, error: "bad_fields" };
   }
-  const allowed = UPDATABLE[m.op as string];
-  if (allowed && m.fields) {
+  const allowed = ALLOWED_FIELDS[m.op as MutationOp];
+  if (m.fields) {
     const extra = Object.keys(m.fields).filter((f) => !allowed.includes(f));
     if (extra.length) return { id, error: `unknown_fields:${extra.join(",")}` };
   }
+  if (m.position !== undefined && !isPosition(m.position)) return { id, error: "bad_position" };
   return {
     id,
     at: m.at,
@@ -171,6 +225,11 @@ export async function applyBatch(
   // An entity whose earlier mutation in this batch didn't apply: later ones
   // for it are skipped, so a create followed by edits never runs out of order.
   const blocked = new Set<string>();
+  // An entity whose create in this batch didn't apply: a mutation that names
+  // it (a step under the task, a neighbour) is skipped rather than rejected
+  // for good as unknown_<kind>, since the retried batch creates it first. A
+  // failed edit of an existing parent blocks nothing under it.
+  const uncreated = new Set<string>();
 
   for (const raw of body.mutations) {
     const v = validate(raw);
@@ -180,13 +239,18 @@ export async function applyBatch(
     }
     const m = v;
     const self: SidRef = { kind: kindOf(m.op), sid: m.sid };
-    if (blocked.has(key(self)) || now() > deadline) {
+    const others = refsOf(m).slice(1);
+    if (blocked.has(key(self)) || others.some((r) => uncreated.has(key(r))) || now() > deadline) {
       blocked.add(key(self));
+      if (isCreate(m.op)) uncreated.add(key(self));
       results.push({ id: m.id, status: "skipped" });
       continue;
     }
     const r = await applyOne(store, exec, m, principal, now());
-    if (r.status !== "applied" && r.status !== "duplicate") blocked.add(key(self));
+    if (r.status !== "applied" && r.status !== "duplicate") {
+      blocked.add(key(self));
+      if (isCreate(m.op)) uncreated.add(key(self));
+    }
     results.push(r);
   }
   return { cursor: await store.syncCursor(), results };
@@ -203,8 +267,9 @@ async function applyOne(
   if (begun.state === "done") return { id: m.id, status: "duplicate", result: begun.result };
   if (begun.state === "leased") return { id: m.id, status: "failed", error: "in_progress", retry: true };
 
-  const finish = async (res: MutationResult, clocks: Parameters<MutationStore["mutationFinish"]>[2] = []) => {
+  const finish = async (res: MutationResult, clocks: Parameters<MutationStore["mutationFinish"]>[2] = [], ambiguous = false) => {
     if (res.status === "applied" || res.status === "rejected") await store.mutationFinish(m.id, res, clocks);
+    else if (ambiguous) await store.mutationRelease(m.id);
     else await store.mutationAbandon(m.id);
     return res;
   };
@@ -225,6 +290,11 @@ async function applyOne(
     // create already ran (its result row was lost) or the sid collides; either
     // way nothing new is made.
     if (self.live) return finish({ id: m.id, status: "applied", sid: m.sid });
+    // A sid with a Graph ID but no mirror row, on a retry of this same
+    // mutation: the earlier attempt created the entity and reserved the sid,
+    // then stopped before the mirror write. Graph has it; delta (or the
+    // sub-resource scan, for a step or link) brings the row.
+    if (self.graph_id && begun.prior_at_ms !== undefined) return finish({ id: m.id, status: "applied", sid: m.sid });
     if (self.graph_id) return finish({ id: m.id, status: "rejected", error: "sid_in_use" });
   } else if (!self.graph_id) {
     return finish({ id: m.id, status: "rejected", error: "unknown_sid" });
@@ -246,10 +316,18 @@ async function applyOne(
     }
   }
 
-  const out = await exec({ op: m.op, graphId: self.graph_id, fields, position: m.position, ids });
+  const out = await exec({
+    op: m.op,
+    sid: m.sid,
+    graphId: self.graph_id,
+    fields,
+    position: m.position,
+    ids,
+    ...(isCreate(m.op) && begun.prior_at_ms !== undefined ? { priorAttemptMs: begun.prior_at_ms } : {}),
+  });
   if (!out.ok) {
     if (out.rejected) return finish({ id: m.id, status: "rejected", error: out.error });
-    return finish({ id: m.id, status: "failed", error: out.error, retry: out.retry });
+    return finish({ id: m.id, status: "failed", error: out.error, retry: out.retry }, [], out.ambiguous === true);
   }
   if (isCreate(m.op) && !(await store.adoptSid(kind, m.sid, out.graphId))) {
     // Graph has the entity but the sid couldn't be attached (a race with the
@@ -260,8 +338,16 @@ async function applyOne(
   const res: MutationResult = superseded.length
     ? { id: m.id, status: "applied", sid: m.sid, superseded_fields: superseded }
     : { id: m.id, status: "applied", sid: m.sid };
+  // Each field the app set now holds its edit, so its clock is the edit's
+  // time, even below the stamp the write-through gave it. Graph moves status
+  // and completion together, so setting either sets both.
+  const stamped = new Set(Object.keys(fields).filter((field) => !(isCreate(m.op) && PARENT_REFS.has(field))));
+  if (kind === "task" && (stamped.has("status") || stamped.has("completed_at"))) {
+    stamped.add("status");
+    stamped.add("completed_at");
+  }
   return finish(
     res,
-    Object.keys(fields).map((field) => ({ kind, sid: m.sid, field, at_ms: at })),
+    [...stamped].map((field) => ({ kind, sid: m.sid, field, at_ms: at })),
   );
 }

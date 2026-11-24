@@ -8,7 +8,7 @@ import { loadAttachmentConfig, loadLinkRules } from "../config/loader";
 import { runLinkRules, type LinkRuleMatch } from "../config/link-rules-engine";
 import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
 import { toGraphDate, toGraphDateTime } from "../util/dates";
-import { bestEffort, getGraphInnerErrorCode, isGraphNotFound, type OpsContext } from "./context";
+import { bestEffort, getGraphInnerErrorCode, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
 import { committedDatePart } from "./my-day";
 import { computeOrder, orderValues, type ReorderPosition } from "./position";
@@ -145,6 +145,8 @@ export type CreateTaskInput = {
   isReminderOn?: boolean;
   categories?: string[];
   recurrence?: TodoTask["recurrence"];
+  // The sync API's sid for the new task (see reserveSid).
+  sid?: string;
 };
 
 // Only supplied fields are sent. The body is plain text.
@@ -171,8 +173,18 @@ export function createTask(
       throw e;
     }
     // Committed: nothing below may fail the op.
+    await reserveSid(ctx, "task", input.sid, task.id);
     await upsertTask(ctx, task, list_id);
     const link_rules = await linkRulesAfterWrite(ctx, list_id, async () => task);
+    // A task this create just made has no steps, links or attachments, so its
+    // sub-resources are known now, unless a link rule may have added a link
+    // (the rules write to Graph only); then the scan finds it.
+    const ruleTouched = link_rules.created.length + link_rules.failed.length > 0 || link_rules.error !== undefined;
+    if (!ruleTouched) {
+      await bestEffort("index_mark_subresources_failed", { task_id: task.id }, () =>
+        ctx.index.replaceChecklistItems(task.id, list_id, []),
+      );
+    }
     return ok({ list_id, task, link_rules });
   });
 }
@@ -297,6 +309,56 @@ export function deleteTask(
   });
 }
 
+// ---- create recovery (docs/SYNC-API.md section 5.4) -----------------------
+
+// Graph's clock against ours: how far before an attempt a create it made may
+// be stamped.
+const CREATE_SKEW_MS = 5_000;
+const after = (iso: string | undefined, sinceMs: number) => !!iso && Date.parse(iso) >= sinceMs - CREATE_SKEW_MS;
+
+// Tasks in `list_id` titled `title` and created at or after `since_ms`: what
+// an earlier create attempt that lost its response may have made. Asks Graph,
+// not the mirror, which can lag. A single match is written through, so the
+// caller can adopt it.
+export async function findCreatedTasks(
+  ctx: OpsContext,
+  input: { list_id: string; title: string; since_ms: number; sid?: string },
+): Promise<TodoTask[]> {
+  const url = new URL(tasksUrl(input.list_id));
+  url.searchParams.set("$filter", `createdDateTime ge ${new Date(input.since_ms - CREATE_SKEW_MS).toISOString()}`);
+  let res: Awaited<ReturnType<GraphClient["getAllPages"]>>;
+  try {
+    res = await ctx.graph.getAllPages(url.toString(), TodoTaskSchema);
+  } catch (e) {
+    // A list that refuses the filter is read whole; the match below is the
+    // real test either way.
+    if (!(e instanceof GraphError && e.status === 400)) throw e;
+    res = await ctx.graph.getAllPages(tasksUrl(input.list_id), TodoTaskSchema);
+  }
+  const items = res.status === 200 ? (res.items as TodoTask[]) : [];
+  const titled = items.filter((t) => t.title === input.title && after(t.createdDateTime, input.since_ms));
+  // A task another mutation made (its sid was the app's) is not this one's.
+  const owned = titled.length ? await ctx.index.createCandidates("task", titled.map((t) => t.id)) : {};
+  const found = titled.filter((t) => !owned[t.id]?.app_owned);
+  if (found.length === 1) {
+    await reserveSid(ctx, "task", input.sid, found[0].id);
+    await upsertTask(ctx, found[0], input.list_id);
+  }
+  return found;
+}
+
+// Re-reads one task into the mirror (a move's leftover source).
+export async function refreshTask(ctx: OpsContext, input: { list_id: string; task_id: string }): Promise<ToolResult<TodoTask>> {
+  try {
+    const task = await ctx.graph.getJson(taskUrl(input.list_id, input.task_id), TodoTaskSchema);
+    await upsertTask(ctx, task, input.list_id);
+    return ok(task);
+  } catch (e) {
+    if (isGraphNotFound(e)) return err("task_not_found", input);
+    throw e;
+  }
+}
+
 // ---- move ------------------------------------------------------------------
 
 type MoveIds = { task_id: string; previous_task_id: string; from_list_id: string; to_list_id: string };
@@ -328,6 +390,9 @@ export type MoveTaskOutcome =
 
 type MoveAbortDetail = {
   detail?: string;
+  // The step that stopped the move failed in a way a later retry may not
+  // (throttling, an outage, a dropped connection).
+  transient?: boolean;
   attachment_id?: string;
   size?: number;
   max?: number;
@@ -402,6 +467,10 @@ export function moveTask(
   });
 }
 
+const transient = (e: unknown) =>
+  ((e instanceof GraphError || e instanceof SubstrateError) && (e.status === 429 || e.status >= 500)) || e instanceof TypeError;
+const cause = (e: unknown) => ({ detail: String(e), transient: transient(e) });
+
 async function copyThenDelete(
   ctx: OpsContext,
   srcTask: TodoTask,
@@ -453,7 +522,7 @@ async function copyThenDelete(
       await createChecklistItem(graph, to_list_id, newId, { displayName: it.displayName ?? "", isChecked: it.isChecked });
       checklist_copied += 1;
     } catch (e) {
-      return abort("checklist_copy_failed", { detail: String(e), checklist_copied });
+      return abort("checklist_copy_failed", { ...cause(e), checklist_copied });
     }
   }
 
@@ -470,7 +539,7 @@ async function copyThenDelete(
       });
       linked_resources_copied += 1;
     } catch (e) {
-      return abort("linked_resource_copy_failed", { detail: String(e), checklist_copied });
+      return abort("linked_resource_copy_failed", { ...cause(e), checklist_copied });
     }
   }
 
@@ -486,13 +555,13 @@ async function copyThenDelete(
       cfg = await loadAttachmentConfig(ctx.env);
       accessToken = await ctx.accessToken();
     } catch (e) {
-      return abort("attachment_setup_failed", { detail: String(e), checklist_copied, linked_resources_copied });
+      return abort("attachment_setup_failed", { ...cause(e), checklist_copied, linked_resources_copied });
     }
     let srcAttachments: Attachment[];
     try {
       srcAttachments = await listAttachments(graph, from_list_id, task_id);
     } catch (e) {
-      return abort("attachment_list_failed", { detail: String(e), checklist_copied, linked_resources_copied });
+      return abort("attachment_list_failed", { ...cause(e), checklist_copied, linked_resources_copied });
     }
     if (srcAttachments.length === 0) {
       // hasAttachments but none listed: an inconsistent read. Keep the source.
@@ -508,7 +577,7 @@ async function copyThenDelete(
       try {
         full = await getFileAttachment(graph, from_list_id, task_id, meta.id);
       } catch (e) {
-        return abort("attachment_read_failed", { attachment_id: meta.id, detail: String(e), ...counts });
+        return abort("attachment_read_failed", { attachment_id: meta.id, ...cause(e), ...counts });
       }
       if (!full.contentBytes) return abort("attachment_missing_bytes", { attachment_id: meta.id, ...counts });
       const bytes = bytesFromBase64(full.contentBytes);
@@ -526,7 +595,7 @@ async function copyThenDelete(
         });
         attachments_copied += 1;
       } catch (e) {
-        return abort("attachment_upload_failed", { attachment_id: meta.id, detail: String(e), ...counts });
+        return abort("attachment_upload_failed", { attachment_id: meta.id, ...cause(e), ...counts });
       }
     }
   }
@@ -561,7 +630,7 @@ async function copyThenDelete(
   // re-fetch. If the source survived, the copy is a second task with its own row.
   if (sourceDeleted) {
     await bestEffort("index_move_task_failed", { task_id }, () => ctx.index.moveTask(task_id, to_list_id, newId));
-    await bestEffort("index_mark_checklist_dirty_failed", { task_id: newId }, () => ctx.index.markChecklistDirty(newId));
+    await bestEffort("index_forget_subresources_failed", { task_id: newId }, () => ctx.index.forgetSubresources(newId));
   }
   await upsertTask(ctx, newTask, to_list_id);
 
@@ -691,6 +760,10 @@ export function reorderTask(
     });
     if (!computed.ok) return computed;
     const task = await sub.patchTask(list_id, task_id, { OrderDateTime: computed.value });
+    // Substrate is the order's only store: mirror it so it's logged and pushed.
+    await bestEffort("index_update_order_failed", { task_id }, () =>
+      ctx.index.updateMyDayFields(task_id, { order_datetime: computed.value }),
+    );
     return ok({ list_id, task_id, task, order_datetime: computed.value });
   });
 }
