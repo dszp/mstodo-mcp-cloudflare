@@ -121,7 +121,9 @@ depends on `reference` existing: if it is dropped later, the setting is `todo` o
 **Where the setting comes from**, first hit wins (`classifyList`, `src/core/config/classifier.ts`):
 
 1. An ID pin in `config:lists.overrides`. `set_list_config` and the app's
-   `list.update` both write here, so a pin is the normal way to set a list.
+   `list.update` both write here, so a pin is the normal way to set a list. A list
+   made with `list.create` or `create_list` is pinned `todo`, so a name that matches
+   an `excluded` pattern can't drop it from the mirror.
 2. The legacy arrays, by Graph list ID or `wellknownListName`: `no_sync` means
    `excluded`, `archive` means `reference`. Setting a list through `list.update` drops
    its ID from both.
@@ -143,7 +145,25 @@ the list again and every client gets the new value. An excluded list is never se
 **Changing it from the app**: `list.update` with `{"sync": "excluded"}` (or `todo`,
 `reference`), alone or with `name` (section 5.2). The server applies it before the
 mutation returns, so the response cursor already covers the deletion records. A
-setting is not sent to Microsoft To Do.
+setting is not sent to Microsoft To Do. The `sync` field has a field clock like any
+other (section 6), stamped whenever the setting changes, whether from the app,
+`set_list_config` or an edit to `config:lists`. A queued `list.update` older than
+that change comes back with `sync` in `superseded_fields`.
+
+**Writing into an excluded list**: the sync API refuses `task.*`, `myday.*`,
+`step.*` and `link.*` mutations that touch an excluded list (the task's list, or
+`fields.list_id`) with `rejected` / `list_excluded`. List mutations on the excluded
+list itself still run, so the app can rename it, delete it or switch it back on.
+An MCP write tool can still create or move a task into an excluded list in Microsoft
+To Do; the server keeps no copy of it.
+
+**How a change is applied**: `config:lists` has one writer, the index
+(`IndexCore.updateListsConfig`). It applies the change to the newest config it knows,
+writes it to KV and applies it to the mirror at once. KV can serve the old value for
+up to 60 s after a write, so for 90 s the sync cycle uses the config the index last
+wrote instead of what it reads from KV. A list whose setting changes is synced first
+in a cycle that starts at once, so a list switched back on is baselined without
+waiting for the timer.
 
 **Listing excluded lists**, since the feed doesn't carry them:
 
@@ -155,10 +175,16 @@ GET /api/v1/lists/excluded
 `id` is the list's sid, for `list.update`.
 
 **MCP tools.** `list_lists` reports `type` on every list, and `set_list_config` writes
-the same setting (`overrides`). Cross-list queries (`query_tasks`,
-`get_pending_across_lists`, `search_tasks`) keep today's behaviour: they cover every
-mirrored list, `reference` included, and `exclude_types` filters by setting. An
-excluded list isn't mirrored, so the cache-backed queries don't see it.
+the same setting (`overrides`). `overrides` is merged key by key: the lists it names
+get the new setting, `null` removes a pin, and pins it doesn't name stay as they are.
+Cross-list queries (`query_tasks`, `get_pending_across_lists`, `search_tasks`) keep
+today's behaviour: they cover every mirrored list, `reference` included, and
+`exclude_types` filters by setting. An excluded list isn't mirrored, so the
+cache-backed queries don't see it. When a read's list filter (`lists`, `types`,
+`type` or `list`) names an excluded list, the result carries
+`not_mirrored: [{ "list_id", "display_name" }]` and a one-line note, so an empty
+result isn't mistaken for an empty list. `list_tasks` on an excluded list reads it
+live from Graph (`source: "graph"`) and pages it through `next_cursor` as usual.
 
 ---
 
@@ -491,8 +517,8 @@ Content-Type: application/json
 
 | `op` | Fields | Write-through (today's code path) |
 |---|---|---|
-| `list.create` | `name` | Graph `POST /lists` |
-| `list.update` | `name`, `sync` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. |
+| `list.create` | `name` | Graph `POST /lists`, then the new list is pinned `todo` (section 1.2) |
+| `list.update` | `name`, `sync` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. Allowed on an excluded list. |
 | `list.delete` | — | Graph `DELETE` |
 | `task.create` | `list_id`, any task field | Graph `POST`, then any Substrate fields |
 | `task.update` | any subset of: `title`, `body`, `status`, `completed_at`, `importance`, `due`, `start`, `reminder`, `categories`, `recurrence` | Graph `PATCH` with only those fields |
@@ -536,7 +562,7 @@ per-mutation results are what the app acts on.
 |---|---|---|
 | `applied` | Written to Graph and the mirror. `superseded_fields` lists fields skipped because a newer edit already set them (section 6). | Drop from the queue. |
 | `duplicate` | This `id` was already applied. The stored result is returned. | Drop from the queue. |
-| `rejected` | Will never succeed: validation error, unknown `sid`, entity deleted. `error` names the reason. | Drop, and revert the local change by pulling. |
+| `rejected` | Will never succeed: validation error, unknown `sid`, entity deleted, or `list_excluded` (it touches an excluded list, section 1.2). `error` names the reason. | Drop, and revert the local change by pulling. |
 | `failed` | Not applied. `retry: true` for throttling or Graph outages; `false` otherwise. | Retry later if `retry`, else treat as rejected. |
 | `skipped` | An earlier mutation in this batch for the same entity failed, so this one wasn't tried. | Retry with the batch. |
 

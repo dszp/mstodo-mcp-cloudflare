@@ -17,13 +17,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops mirroring any list currently classified `excluded`**, including a Flagged Emails list
   pinned `excluded` even when `sync_flagged_emails` is on; pin it `reference` first to keep it.
 - `list_lists` reports `type` on every list, not only when patterns or pins exist.
+- **`set_list_config` merges `overrides` per key** instead of replacing the map: the lists it
+  names change, `null` removes a pin, and other pins stay. A caller holding an old copy of the
+  map can no longer revert pins set since.
+- A list made with `create_list` or the sync API's `list.create` is pinned `todo`, so a name
+  matching an `excluded` pattern can't drop it from the mirror.
+- Reads filtered to an excluded list (`query_tasks`, `search_tasks`, `search_checklist_items`,
+  `get_pending_across_lists`, `get_recently_completed`) return `not_mirrored` with a note
+  instead of an unexplained empty result. `list_tasks` on an excluded list pages through
+  `next_cursor` instead of returning one page.
 
 ### Added
 - Sync API: lists in the change feed carry `sync` (`todo` | `reference`); `list.update` accepts
-  `sync`; `GET /api/v1/lists/excluded` lists the excluded lists by sid.
+  `sync`; `GET /api/v1/lists/excluded` lists the excluded lists by sid. Task, My Day, step and
+  link mutations that touch an excluded list are rejected with `list_excluded`.
 
 ### Fixed
-- `set_list_config` no longer clears the `archive` list.
+- `set_list_config` no longer clears the `archive` list, and `set_list_alias` no longer clears
+  every pin and the `archive` list.
+- A list excluded while the sync cycle was fetching it is no longer filled back in and
+  re-baselined, and the cycle no longer flips a just-changed setting back from a stale KV read
+  of `config:lists`.
+- A task created or moved into an excluded list by an MCP tool no longer appears in the mirror
+  and the feed.
+- The sync feed's `backfill.remaining` reaches zero: it no longer counts a reference list's
+  completed tasks, which the sub-resource scan skips.
+- A queued app edit of a list's `sync` older than a change made through `set_list_config` no
+  longer overrides it.
 
 ## [0.17.1] – 2026-10-17
 
