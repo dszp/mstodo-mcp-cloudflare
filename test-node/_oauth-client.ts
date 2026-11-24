@@ -40,7 +40,9 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
   const jar = new Map<string, string>();
   async function send(path: string, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
-    if (jar.size) headers.set("cookie", [...jar].map(([k, v]) => `${k}=${v}`).join("; "));
+    // The jar's cookies go after any the caller sent.
+    const cookies = [headers.get("cookie"), ...[...jar].map(([k, v]) => `${k}=${v}`)].filter(Boolean);
+    if (cookies.length) headers.set("cookie", cookies.join("; "));
     const res = await fetchFn(new Request(`${origin}${path}`, { ...init, headers }));
     for (const c of res.headers.getSetCookie()) {
       const [pair, ...attrs] = c.split(";");
