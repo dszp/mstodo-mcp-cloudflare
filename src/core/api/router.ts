@@ -1,0 +1,141 @@
+// The client sync API's read routes (docs/SYNC-API.md sections 4, 14.1, 18.7),
+// shared by both hosts. The OAuth front (src/hosts/shared/oauth.ts) mounts
+// them: handlePublicApiRequest before the /api/v1 resource server, and
+// handleApiRequest as that resource server's handler, so every request that
+// reaches handleApiRequest carries a valid token whose audience is /api/v1.
+import { refuseApiRequest } from "../auth/grant";
+import { loadIdentity } from "../auth/microsoft";
+import { ownerIndex } from "../owner-index";
+import type { AppEnv } from "../ports";
+import type { Props } from "../types";
+import { VERSION } from "../version";
+
+export const API_PATH = "/api/v1";
+
+// Search hits are returned as whole tasks, one index read each.
+export const SEARCH_LIMIT = 50;
+const MAX_QUERY_CHARS = 256;
+const MAX_QUERY_TERMS = 16;
+// sids are UUIDs; anything else can't name a task.
+const SID_RE = /^[0-9A-Za-z-]{1,64}$/;
+
+function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  return Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
+}
+const error = (code: string, status: number) => json({ error: code }, status);
+
+// The one route that answers without a token: the app probes a server before
+// signing in, to learn its server_id and that it exists. Nothing else is
+// disclosed before sign-in (section 18.7). A request that sends a bearer goes
+// through the resource server instead, so a bad token gets the 401 challenge.
+// Returns null for every other request.
+// server_id never changes, so an isolate asks the index once; anonymous
+// probes don't each queue a request on the index object.
+let cachedServerId: string | null = null;
+
+export async function handlePublicApiRequest(req: Request, env: AppEnv): Promise<Response | null> {
+  if (req.method !== "GET" || req.headers.has("authorization")) return null;
+  if (new URL(req.url).pathname !== `${API_PATH}/sync/info`) return null;
+  cachedServerId ??= (await ownerIndex(env).syncInfo()).server_id;
+  return json({ server_id: cachedServerId });
+}
+
+// An authenticated /api/v1 request. The grant gate (epoch, age, pending
+// Microsoft re-auth) runs first, the same check /mcp applies.
+export async function handleApiRequest(req: Request, env: AppEnv, props: Partial<Props> | undefined): Promise<Response> {
+  const refused = await refuseApiRequest(env, props);
+  if (refused) return refused;
+
+  const url = new URL(req.url);
+  const path = url.pathname.slice(API_PATH.length);
+  const route = matchRoute(path);
+  if (!route) return error("not_found", 404);
+  if (req.method !== "GET") return json({ error: "method_not_allowed" }, 405, { allow: "GET" });
+  return route(url, env);
+}
+
+type Route = (url: URL, env: AppEnv) => Promise<Response>;
+
+function matchRoute(path: string): Route | null {
+  if (path === "/sync/changes") return syncChanges;
+  if (path === "/sync/info") return syncInfo;
+  if (path === "/search") return search;
+  const task = /^\/tasks\/([^/]+)$/.exec(path);
+  if (task) return (_url, env) => taskBySid(task[1], env);
+  return null;
+}
+
+// GET /api/v1/sync/changes?cursor=&limit=&scope= — one page of the change feed.
+async function syncChanges(url: URL, env: AppEnv): Promise<Response> {
+  const q = url.searchParams;
+  const rawLimit = q.get("limit");
+  if (rawLimit !== null && !/^\d{1,6}$/.test(rawLimit)) return error("bad_limit", 400);
+  const result = await ownerIndex(env).syncChanges({
+    cursor: q.get("cursor"),
+    limit: rawLimit === null ? undefined : Number(rawLimit),
+    scope: q.get("scope") ?? undefined,
+  });
+  if (result.ok) return json(result.page);
+  // 410: the client discards its cursor and runs a full sync (section 4.3).
+  const status = result.error === "cursor_reset" || result.error === "cursor_expired" ? 410 : 400;
+  return error(result.error, status);
+}
+
+// GET /api/v1/tasks/{sid} — one task, for a search hit or an out-of-scope link.
+async function taskBySid(rawSid: string, env: AppEnv): Promise<Response> {
+  let sid: string;
+  try {
+    sid = decodeURIComponent(rawSid);
+  } catch {
+    return error("not_found", 404);
+  }
+  if (!SID_RE.test(sid)) return error("not_found", 404);
+  const task = await ownerIndex(env).syncTask(sid);
+  return task ? json({ kind: "task", ...task }) : error("not_found", 404);
+}
+
+// GET /api/v1/search?q= — the index's FTS search over every task, whatever
+// the device's scope, answered with tasks shaped like the feed's. The query is
+// plain text typed by a person, not FTS syntax: see ftsTerms.
+async function search(url: URL, env: AppEnv): Promise<Response> {
+  const raw = url.searchParams.get("q") ?? "";
+  const query = raw.length <= MAX_QUERY_CHARS ? ftsTerms(raw) : "";
+  if (!query) return error("bad_query", 400);
+  const tasks = await ownerIndex(env).syncSearch(query, SEARCH_LIMIT);
+  return json({ results: tasks.map((t) => ({ kind: "task", ...t })) });
+}
+
+// Plain text → an FTS5 query: every word must appear, each as a prefix (so
+// search-as-you-type matches), with quotes and operators taken literally.
+// Each word is a quoted string ("" escapes a quote inside one), so nothing a
+// person types can be FTS syntax or a syntax error. "" when there are no words.
+export function ftsTerms(text: string): string {
+  return text
+    // FTS5 ends a query string at NUL, so control characters become spaces.
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, MAX_QUERY_TERMS)
+    .map((w) => `"${w.replaceAll('"', '""')}"*`)
+    .join(" ");
+}
+
+// GET /api/v1/sync/info with a token: everything the app needs to set up and
+// label the account (section 14.1). The owner's address is sent as a hint.
+async function syncInfo(_url: URL, env: AppEnv): Promise<Response> {
+  const [info, identity] = await Promise.all([ownerIndex(env).syncInfo(), loadIdentity(env)]);
+  return json({
+    server_id: info.server_id,
+    cursor: info.cursor,
+    account: { name: identity?.displayName ?? null, email_hint: emailHint(info.account.email) },
+    version: VERSION,
+    capabilities: info.capabilities,
+  });
+}
+
+// "david@example.com" → "d…@example.com": enough to tell accounts apart.
+export function emailHint(email: string): string | null {
+  const at = email.lastIndexOf("@");
+  if (at < 1) return null;
+  return `${email[0]}…${email.slice(at)}`;
+}

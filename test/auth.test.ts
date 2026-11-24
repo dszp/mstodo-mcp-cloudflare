@@ -16,14 +16,14 @@ import { parseClaimsChallenge, ReauthRequiredError, isReauthRequired } from "../
 import { grantRefusal, refuseMcpRequest, MAX_GRANT_AGE_MS } from "../src/core/auth/grant";
 import { GraphClient } from "../src/core/graph/client";
 import { consentPage } from "../src/hosts/shared/consent-page";
-import { authHandler } from "../src/hosts/shared/auth-handler";
+import { authHandler, type ProviderEnv } from "../src/hosts/shared/auth-handler";
 import { appEnv } from "../src/hosts/cloudflare/env";
 import type { Props } from "../src/core/types";
 import { testAppEnv } from "./_app-env";
 import type { AppEnv } from "../src/core/ports";
 
 const E = testAppEnv();
-const AuthHandler = authHandler(appEnv);
+const AuthHandler = authHandler<Env & ProviderEnv>(appEnv);
 
 function index() {
   return env.TODO_INDEX_DO.getByName(OWNER_DO_NAME);
@@ -297,7 +297,7 @@ describe("authorize flow", () => {
   }
 
   let oauth: ReturnType<typeof oauthStub>;
-  const envWith = () => ({ ...(env as object), OAUTH_PROVIDER: oauth }) as unknown as Env;
+  const envWith = () => ({ ...(env as object), OAUTH_PROVIDER: oauth }) as unknown as Env & ProviderEnv;
 
   beforeEach(() => {
     calls = [];

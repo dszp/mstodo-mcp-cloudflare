@@ -6,7 +6,7 @@ import { buildNodeEnv } from "../src/hosts/node/env";
 import { createHandler, startScheduler } from "../src/hosts/node/http";
 import { bodyCapFor, KiB, MiB } from "../src/hosts/node/body-limit";
 import { installProcessHandlers, withTimeout } from "../src/hosts/node/lifecycle";
-import { oauthProviderOptions } from "../src/hosts/shared/oauth";
+import { authorizationServerOptions } from "../src/hosts/shared/oauth";
 import { UPLOAD_BODY_MAX_BYTES } from "../src/core/upload/handler";
 import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
 import { createUploadCapability } from "../src/core/upload/tokens";
@@ -271,7 +271,7 @@ describe("process lifecycle", () => {
 describe("oauth_error log", () => {
   it("logs the code, status and reason but never the library's detail", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const opts = oauthProviderOptions({ origin: ORIGIN, mcpHandler: { fetch: async () => new Response() }, toAppEnv: (e) => e as never });
+    const opts = authorizationServerOptions({ origin: ORIGIN, toAppEnv: (e) => e as never });
     opts.onError!({
       code: "invalid_grant",
       description: "Invalid authorization code",

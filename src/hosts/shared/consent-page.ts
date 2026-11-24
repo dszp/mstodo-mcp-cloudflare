@@ -41,7 +41,14 @@ ${bodyHtml}
 </html>`;
 }
 
-export function consentPage(details: ConsentDescription, handle: string): string {
+// What each resource lets a client do, in the owner's words.
+const RESOURCE_ACCESS: Record<string, string> = {
+  "/mcp": "As an AI connector, it will be able to read, create, change and delete your tasks and lists.",
+  "/api/v1": "As a task app, it will be able to sync your tasks and lists to this device and change them.",
+};
+
+export function consentPage(details: ConsentDescription, handle: string, resource = "/mcp"): string {
+  const access = RESOURCE_ACCESS[resource] ?? `It will be able to use ${escapeHtml(resource)}.`;
   const name = escapeHtml(details.clientName || "An unnamed app");
   const host = escapeHtml(details.redirectHost);
   const publisher = details.clientDomain
@@ -59,7 +66,7 @@ export function consentPage(details: ConsentDescription, handle: string): string
   <p class="muted">Full address: <code>${escapeHtml(details.redirectUri)}</code></p>
 </div>
 ${loopback}
-<p>The app will be able to read, create, change and delete your tasks and lists. Allow it only if you just connected it yourself.</p>
+<p>${access} Allow it only if you just connected it yourself.</p>
 <form method="post">
   <input type="hidden" name="handle" value="${escapeHtml(handle)}">
   <p><label><input type="checkbox" name="remember" value="1" checked> Don't ask again for this app in this browser for 30 days</label></p>
