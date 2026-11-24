@@ -39,7 +39,7 @@ describe("migration v5 on existing data", () => {
     sql.exec("INSERT INTO tasks (task_id, list_id, status, title) VALUES ('T1', 'L1', 'notStarted', 't')");
     sql.exec("INSERT INTO checklist_items (item_id, task_id, list_id) VALUES ('S1', 'T1', 'L1')");
 
-    expect(applyMigrations(sql).applied).toEqual([5]);
+    expect(applyMigrations(sql).applied).toContain(5);
     const kinds = sql.exec<{ kind: string; n: number }>("SELECT kind, count(*) n FROM entity_map GROUP BY kind ORDER BY kind").toArray();
     expect(kinds).toEqual([{ kind: "list", n: 1 }, { kind: "step", n: 1 }, { kind: "task", n: 1 }]);
     const logged = sql.exec<{ kind: string }>("SELECT kind FROM sync_log ORDER BY seq").toArray();

@@ -481,7 +481,7 @@ describe("TodoIndex delta sync", () => {
     expect(midCycle).toBe(false);
   });
 
-  it("410: purges the list's rows and re-baselines on the next cycle", async () => {
+  it("410: keeps serving the list's rows, then sweeps what the re-baseline didn't return", async () => {
     await seedFreshTokens();
     stubGraph({
       [LISTS_DELTA]: { body: { value: [listA], "@odata.deltaLink": LISTS_DL } },
@@ -504,11 +504,15 @@ describe("TodoIndex delta sync", () => {
       },
     });
 
-    const mid1 = await stub.runSyncCycle(); // 410 → purge + reset to baseline
+    const mid1 = await stub.runSyncCycle(); // 410 → start a mark-and-sweep baseline
     expect(mid1).toBe(true);
-    expect((await stub.query({ lists: ["list-A"] })).rows).toHaveLength(0);
+    // Nothing is dropped up front: the old rows stay served during the baseline.
+    expect((await stub.query({ lists: ["list-A"] })).rows.map((r) => r.task_id).sort()).toEqual([
+      "a",
+      "b",
+    ]);
 
-    await stub.runSyncCycle(); // re-baseline → c
+    await stub.runSyncCycle(); // re-baseline → c; a and b weren't returned, so swept
     expect((await stub.query({ lists: ["list-A"] })).rows.map((r) => r.task_id)).toEqual([
       "c",
     ]);

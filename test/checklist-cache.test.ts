@@ -487,7 +487,7 @@ describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tes
     expect(items[0].display_name).toBe("waiting on acme reply");
   });
 
-  it("a 410 re-baseline purges the list's cached checklist rows (no orphans)", async () => {
+  it("a 410 re-baseline sweeps the checklist rows of tasks it no longer returns (no orphans)", async () => {
     await signIn();
     const stub = named("checklist-410");
     const TK_DELTA = "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/delta";
@@ -510,18 +510,24 @@ describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tes
     await stub.runSyncCycle();
     expect((await stub.getChecklistItems("TKA")).map((i) => i.item_id)).toEqual(["CIA"]);
 
-    // Cycle 2: the stored tasks deltaLink now 410s → purge L1 (tasks + checklist).
+    // Cycle 2: the stored tasks deltaLink now 410s → a mark-and-sweep baseline
+    // starts. Cycle 3: the new baseline no longer contains TKA → swept with its
+    // checklist rows.
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const u = String(input);
       const m = init?.method ?? "GET";
       if (u.includes("/me/todo/lists/delta"))
         return Response.json({ value: [], "@odata.deltaLink": `${LISTS_DELTA}?$deltatoken=z` }, { status: 200 });
       if (u === TK_DL) return Response.json({ error: { code: "syncStateNotFound" } }, { status: 410 });
+      if (u === TK_DELTA) return Response.json({ value: [], "@odata.deltaLink": `${TK_DL}2` }, { status: 200 });
       if (u.endsWith("/subscriptions")) return Response.json({ value: [] }, { status: 200 });
       if (u.includes("substrate.office.com")) return Response.json({ value: [] }, { status: 200 });
       if (u.includes("login.microsoftonline.com")) return Response.json({ access_token: "EXO", expires_in: 3600 }, { status: 200 });
       return new Response(`unscripted ${m} ${u}`, { status: 404 });
     }) as unknown as typeof fetch;
+    await stub.runSyncCycle();
+    // Still served while the baseline runs.
+    expect((await stub.getChecklistItems("TKA")).map((i) => i.item_id)).toEqual(["CIA"]);
     await stub.runSyncCycle();
 
     expect(await stub.getChecklistItems("TKA")).toEqual([]);

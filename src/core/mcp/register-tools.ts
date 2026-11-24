@@ -3598,7 +3598,7 @@ class ToDoTools implements TokenProvider {
       "resync",
       {
         description:
-          "Force a delta re-baseline: drop indexed rows + delta tokens (one list when `list` is given, else everything) and arm the sync alarm now. Manual twin of the automatic 410 re-baseline; use to recover a list that drifted. Returns ok + the resync scope.",
+          "Force a delta re-baseline (one list when `list` is given, else the roster and every list) and arm the sync alarm now. Indexed rows stay served while it runs; rows the new baseline doesn't return are removed when it completes. Manual twin of the automatic 410 re-baseline; use to recover a list that drifted. Returns ok + the resync scope.",
         inputSchema: {
           list: z
             .string()
