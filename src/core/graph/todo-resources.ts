@@ -5,6 +5,8 @@ import {
   ChecklistItemSchema,
   LinkedResourceSchema,
   TaskFileAttachmentSchema,
+  TodoTaskSchema,
+  type TodoTask,
   type Attachment,
   type ChecklistItem,
   type LinkedResource,
@@ -71,6 +73,16 @@ export function createLinkedResource(
   if (fields.externalId !== undefined) body.externalId = fields.externalId;
   if (fields.webUrl !== undefined) body.webUrl = fields.webUrl;
   return graph.postJson(`${taskUrl(listId, taskId)}/linkedResources`, body, LinkedResourceSchema);
+}
+
+// One task with its steps and linked resources expanded (one round-trip; Graph
+// honors this $expand on a todoTask, but not $expand=attachments).
+export function getTaskWithSubresources(
+  graph: GraphClient,
+  listId: string,
+  taskId: string,
+): Promise<TodoTask> {
+  return graph.getJson(`${taskUrl(listId, taskId)}?$expand=checklistItems,linkedResources`, TodoTaskSchema);
 }
 
 // Enumerate the attachments COLLECTION. Note: `$expand=attachments` is silently

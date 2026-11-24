@@ -467,9 +467,14 @@ describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tes
           { status: 200 },
         );
       }
-      if (u.includes("/tasks/TK1/checklistItems") && m === "GET") {
+      // The sub-resource scan: one task GET with steps and links expanded.
+      if (u.includes("/tasks/TK1?$expand=checklistItems,linkedResources") && m === "GET") {
         return Response.json(
-          { value: [{ id: "CI1", displayName: "waiting on acme reply", isChecked: false, createdDateTime: "2026-05-02T00:00:00Z" }] },
+          {
+            id: "TK1", title: "Reply", status: "notStarted", hasAttachments: false,
+            checklistItems: [{ id: "CI1", displayName: "waiting on acme reply", isChecked: false, createdDateTime: "2026-05-02T00:00:00Z" }],
+            linkedResources: [],
+          },
           { status: 200 },
         );
       }
@@ -500,8 +505,8 @@ describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tes
         return Response.json({ value: [{ id: "L1", displayName: "Work" }], "@odata.deltaLink": `${LISTS_DELTA}?$deltatoken=z` }, { status: 200 });
       if (u === TK_DELTA)
         return Response.json({ value: [{ id: "TKA", title: "Reply", status: "notStarted", lastModifiedDateTime: "2026-05-02T00:00:00Z" }], "@odata.deltaLink": TK_DL }, { status: 200 });
-      if (u.includes("/tasks/TKA/checklistItems") && m === "GET")
-        return Response.json({ value: [{ id: "CIA", displayName: "waiting", isChecked: false, createdDateTime: "2026-05-02T00:00:00Z" }] }, { status: 200 });
+      if (u.includes("/tasks/TKA?$expand=checklistItems,linkedResources") && m === "GET")
+        return Response.json({ id: "TKA", title: "Reply", status: "notStarted", hasAttachments: false, checklistItems: [{ id: "CIA", displayName: "waiting", isChecked: false, createdDateTime: "2026-05-02T00:00:00Z" }], linkedResources: [] }, { status: 200 });
       if (u.endsWith("/subscriptions")) return Response.json({ value: [] }, { status: 200 });
       if (u.includes("substrate.office.com")) return Response.json({ value: [] }, { status: 200 });
       if (u.includes("login.microsoftonline.com")) return Response.json({ access_token: "EXO", expires_in: 3600 }, { status: 200 });

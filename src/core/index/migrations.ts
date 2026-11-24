@@ -372,6 +372,79 @@ const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    version: 8,
+    apply: (sql) => {
+      // docs/SYNC-API.md section 1.1: linked resources and attachment details
+      // in the server's copy, filled by the per-task sub-resource scan. Bytes
+      // stay in Graph; only metadata is kept.
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS linked_resources (
+          link_id          TEXT PRIMARY KEY,
+          task_id          TEXT NOT NULL,
+          list_id          TEXT NOT NULL,
+          web_url          TEXT,
+          display_name     TEXT,
+          application_name TEXT,
+          external_id      TEXT
+        )
+      `);
+      sql.exec("CREATE INDEX IF NOT EXISTS linked_resources_task ON linked_resources(task_id)");
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS attachments (
+          attachment_id TEXT PRIMARY KEY,
+          task_id       TEXT NOT NULL,
+          list_id       TEXT NOT NULL,
+          name          TEXT,
+          size          INTEGER,
+          content_type  TEXT,
+          kind          TEXT,
+          modified_at   INTEGER
+        )
+      `);
+      sql.exec("CREATE INDEX IF NOT EXISTS attachments_task ON attachments(task_id)");
+
+      // Same trigger shape as v5's steps: mint a sid, and bump the parent
+      // task's log row while the task exists (the task is the unit of sync).
+      const NOW = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+      const bump = (ref: "new" | "old") => {
+        const live = `(SELECT m.sid FROM entity_map m JOIN tasks t ON t.task_id = m.graph_id
+            WHERE m.kind = 'task' AND m.graph_id = ${ref}.task_id)`;
+        const listSid = `(SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id =
+            (SELECT list_id FROM tasks WHERE task_id = ${ref}.task_id))`;
+        return `
+          DELETE FROM sync_log WHERE kind = 'task' AND sid = ${live};
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            SELECT 'task', ${live}, 0, ${listSid}, ${NOW} WHERE ${live} IS NOT NULL;`;
+      };
+      const mint = (kind: string, col: string) => `
+          INSERT INTO entity_map (kind, sid, graph_id, created_ms)
+            SELECT '${kind}', lower(hex(randomblob(16))), ${col}, ${NOW}
+            WHERE NOT EXISTS (SELECT 1 FROM entity_map WHERE kind = '${kind}' AND graph_id = ${col});`;
+      const tables = [
+        { table: "linked_resources", kind: "link", key: "link_id", prefix: "links",
+          cols: ["task_id", "web_url", "display_name", "application_name", "external_id"] },
+        { table: "attachments", kind: "attachment", key: "attachment_id", prefix: "attachments",
+          cols: ["task_id", "name", "size", "content_type", "kind", "modified_at"] },
+      ];
+      for (const t of tables) {
+        sql.exec(`CREATE TRIGGER IF NOT EXISTS ${t.prefix}_sync_ai AFTER INSERT ON ${t.table} BEGIN
+          ${mint(t.kind, `new.${t.key}`)}
+          ${bump("new")}
+        END`);
+        sql.exec(`CREATE TRIGGER IF NOT EXISTS ${t.prefix}_sync_au AFTER UPDATE ON ${t.table}
+          WHEN ${t.cols.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ")} BEGIN
+          ${bump("new")}
+        END`);
+        sql.exec(`CREATE TRIGGER IF NOT EXISTS ${t.prefix}_sync_ad AFTER DELETE ON ${t.table} BEGIN
+          ${bump("old")}
+        END`);
+      }
+      // Every task needs its links and attachments fetched once: clear the
+      // sub-resource marker (checklist_synced_at) so the scan revisits them.
+      sql.exec("UPDATE tasks SET checklist_synced_at = NULL");
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
