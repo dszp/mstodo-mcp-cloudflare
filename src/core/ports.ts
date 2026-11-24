@@ -30,6 +30,15 @@ export type SqlValue = string | number | null | ArrayBuffer;
 // Don't nest calls.
 export type Transact = <T>(fn: () => T) => T;
 
+// Push to connected app clients (docs/SYNC-API.md section 7). IndexCore calls
+// announce() after writes that moved the change log, with the new cursor; the
+// host fans it out to its open sockets. closeAll() ends every socket after a
+// grant revocation or identity reset, so a client must authenticate again.
+export interface ChangeNotifier {
+  announce(cursor: string): void;
+  closeAll(reason: "revoked" | "reset"): void;
+}
+
 export interface StateStore {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
