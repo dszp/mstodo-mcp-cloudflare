@@ -1660,7 +1660,7 @@ export class IndexCore implements TokenProvider {
         my_day: myDay,
         // Step order is read from Substrate by the sub-resource scan.
         step_order: myDay && checklistCacheEnabled(this.#env),
-        push: "none",
+        push: "websocket",
         source: "graph",
       },
     };
