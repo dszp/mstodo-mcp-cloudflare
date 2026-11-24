@@ -39,7 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /app/signin` (with Access on): verifies Access, then continues into the usual
   `/authorize` flow (consent, Microsoft sign-in, owner gate). The `authorization_code`
   token response then carries `cf_access_token` and `cf_access_expires_at`, so the app can
-  send `cf-access-token`; the token never travels in a redirect URL.
+  send `cf-access-token`; the token never travels in a redirect URL. Only redirect URIs
+  listed in `ACCESS_HANDOFF_REDIRECT_URIS` receive it. When Access's keys can't be fetched,
+  `/api/v1` answers `503 access_unavailable` with `Retry-After`, not `403`.
 - `/.well-known/apple-app-site-association` (`webcredentials`) when `APPLE_TEAM_ID` and
   `APPLE_BUNDLE_IDS` are set, for the app's `https` sign-in callback.
 - Sync API: lists in the change feed carry `sync` (`todo` | `reference`); `list.update` accepts

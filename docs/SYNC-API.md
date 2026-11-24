@@ -820,12 +820,14 @@ is how it learns that Access is in front (section 16).
 **What the server checks.** With Access configured, every `/api/v1` request, including
 the WebSocket upgrade on both hosts, must carry an Access JWT that passes all of these
 checks. The server checks them before the OAuth token, and refuses with `403
-{"error":"access_denied"}` otherwise:
+{"error":"access_denied"}` otherwise. When the team's keys can't be fetched, it answers
+`503 {"error":"access_unavailable"}` with `Retry-After: 30` instead, so the app retries
+rather than signing in again.
 
 - RS256 signature by a key from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`.
   The server caches the keys for an hour. A token signed by an unknown key ID triggers a
-  refetch, at most once a minute. If a refetch fails, keys fetched in the last 24 hours
-  keep working.
+  refetch, at most once a minute. The fetch follows no redirects and times out after 5
+  seconds. If a refetch fails, keys fetched in the last 24 hours keep working.
 - `iss` is `https://<team>.cloudflareaccess.com`, and `aud` contains `ACCESS_AUD`.
 - `exp` and `nbf` hold, with 60 seconds of clock skew.
 - `email` equals `OWNER_EMAIL`, ignoring case. Service tokens carry no email, so they
@@ -850,7 +852,10 @@ Access-protected APIs. The app gets that token during sign-in:
    `resource=<origin>/api/v1`. That path is behind Access, so the session shows the
    Access login first.
 2. The server verifies the Access JWT as above. In a browser it also accepts the
-   `CF_Authorization` cookie when the assertion header is absent. It then stores the
+   `CF_Authorization` cookie when the assertion header is absent. It refuses the request
+   (400) when `resource`, `client_id`, `redirect_uri` or `code_challenge` appears more
+   than once, or when `redirect_uri` isn't listed exactly in
+   `ACCESS_HANDOFF_REDIRECT_URIS`. It then stores the
    Access token for ten minutes, sealed, bound to the request's `client_id`,
    `redirect_uri` and PKCE challenge, puts a handle to it in a `__Host-` cookie, and
    redirects to `/authorize` with the same parameters.
@@ -861,7 +866,8 @@ Access-protected APIs. The app gets that token during sign-in:
    gate rather than a replacement identity. With Entra as the Access identity provider,
    the Microsoft step is usually silent.
 4. At the Microsoft callback, if the handle's record matches the authorization being
-   completed, the new grant carries the handle. When the app redeems the code at
+   completed and its redirect URI is still in `ACCESS_HANDOFF_REDIRECT_URIS`, the new
+   grant carries the handle. When the app redeems the code at
    `/token`, the response adds two fields, and the grant keeps no trace of the token:
 
    ```json
@@ -911,7 +917,12 @@ deployment's configuration. Nothing in the repository does them.
 5. Set `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) and `ACCESS_AUD` on the
    Worker, as vars in `wrangler.jsonc` or as secrets. `OWNER_EMAIL` must be the email
    Access reports for the owner.
-6. Deploy. Check that `GET /api/v1/sync/info` without a session redirects to the Access
+6. Set `ACCESS_HANDOFF_REDIRECT_URIS` to the app's exact callback URI, for example
+   `https://todo-app.<your domain>/oauth/callback` (comma-separated if there are
+   several). Only these redirect URIs receive the Access token. Without this variable,
+   `/app/signin` refuses every request, so a consent page approved for some other client
+   can never hand that client the owner's Access token.
+7. Deploy. Check that `GET /api/v1/sync/info` without a session redirects to the Access
    login, and that `/mcp` and `/.well-known/oauth-authorization-server` still answer
    without one.
 

@@ -309,6 +309,7 @@ you set both variables:
 |---|---|
 | `ACCESS_TEAM_DOMAIN` | Your Zero Trust team domain, `<team>.cloudflareaccess.com`. |
 | `ACCESS_AUD` | The Access application's audience (AUD) tag. |
+| `ACCESS_HANDOFF_REDIRECT_URIS` | The app's exact sign-in callback URIs, comma-separated. Only these receive the Access token at sign-in; empty, `/app/signin` refuses every request. |
 
 With both set, the Worker verifies the Access JWT on every `/api/v1` request (signature
 against the team's keys, audience, issuer, expiry, and `email` equal to `OWNER_EMAIL`),
