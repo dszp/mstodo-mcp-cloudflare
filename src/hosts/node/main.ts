@@ -68,12 +68,17 @@ try {
   db.close();
   configError(e);
 }
-const { env, core, state } = built;
+const { env, core, state, push } = built;
 
 sweepKv(db);
 const scheduler = startScheduler(core, state, { maintenance: () => sweepKv(db) });
 const handler = createHandler(env, { publicOrigin });
 const server = serve({ fetch: handler.fetch, port, hostname });
+// Push sockets at /api/v1/sync/socket (docs/SYNC-API.md section 7.3).
+push.attach(server as unknown as import("node:http").Server, {
+  authorize: (req) => handler.authorizeSocket(req.headers.authorization),
+  cursor: () => core.syncCursor(),
+});
 // A failed listen (EADDRINUSE, EACCES) is fatal; exiting runs the lock release.
 server.once("error", (e) => {
   log.error("listen_failed", { host: hostname, port, error: e.message });

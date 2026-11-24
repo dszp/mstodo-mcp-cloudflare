@@ -7,11 +7,19 @@ import {
 import { log } from "../../core/log";
 import { grantRefusal, refuseMcpRequest, refusalDescription } from "../../core/auth/grant";
 import { API_PATH, handleApiRequest, handlePublicApiRequest } from "../../core/api/router";
+import { refuseApiRequest } from "../../core/auth/grant";
 import type { AppEnv } from "../../core/ports";
 import type { Props } from "../../core/types";
 import { authHandler, isAuthUiPath, type ProviderEnv } from "./auth-handler";
 
 export const MCP_PATH = "/mcp";
+export const SOCKET_PATH = `${API_PATH}/sync/socket`;
+
+// A socket lives until its access token expires (seconds since the epoch); a
+// token without an expiry gets the access-token lifetime from now.
+function socketExpiry(expiresAtSec: number | undefined): number {
+  return (expiresAtSec ?? Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SEC) * 1000;
+}
 export { API_PATH };
 
 // Token lifetimes, shared by both resources. Access tokens stay at the library
@@ -106,8 +114,12 @@ export function oauthFront<E>(opts: {
   origin: string;
   mcpHandler: McpHandler<E>;
   toAppEnv: (env: E) => AppEnv;
+  // The push socket (docs/SYNC-API.md section 7). Cloudflare forwards the
+  // authenticated upgrade to the index object; the Node host serves upgrades
+  // outside the fetch handler (authorizeSocket below) and passes none.
+  socketHandler?: (req: Request, env: E, grant: { exp: number }) => Promise<Response>;
 }) {
-  const { origin, mcpHandler, toAppEnv } = opts;
+  const { origin, mcpHandler, toAppEnv, socketHandler } = opts;
   const authorizationServer = new OAuthAuthorizationServer<E>(authorizationServerOptions({ origin, toAppEnv }));
   const validateToken = (env: E) => async (resource: string, token: string) => {
     const valid = await authorizationServer.validateToken<Props>(resource, token, env);
@@ -140,12 +152,35 @@ export function oauthFront<E>(opts: {
   const api = new OAuthResourceServer<E, Props>({
     resourceMetadata: { resource: `${origin}${API_PATH}`, authorization_servers: [origin] },
     validateToken,
-    handler: { fetch: (req, env, ctx) => handleApiRequest(req, toAppEnv(env), ctx.props) },
+    handler: {
+      async fetch(req, env, ctx) {
+        if (new URL(req.url).pathname === SOCKET_PATH) {
+          const refused = await refuseApiRequest(toAppEnv(env), ctx.props);
+          if (refused) return refused;
+          if (!socketHandler || req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+            return new Response("expected a websocket upgrade", { status: 426 });
+          }
+          return socketHandler(req, env, { exp: socketExpiry(ctx.auth.expiresAt) });
+        }
+        return handleApiRequest(req, toAppEnv(env), ctx.props);
+      },
+    },
   });
 
   const auth = authHandler<E & ProviderEnv>(toAppEnv);
 
   return {
+    // The Node host's upgrade check: the same audience-checked validation and
+    // grant gate as any /api/v1 request (section 18.7). Null refuses.
+    async authorizeSocket(authorization: string | undefined, env: E): Promise<{ exp: number } | null> {
+      const m = /^Bearer\s+(\S+)$/i.exec(authorization ?? "");
+      if (!m) return null;
+      const valid = await validateToken(env)(`${origin}${API_PATH}`, m[1]);
+      if (!valid) return null;
+      if (await refuseApiRequest(toAppEnv(env), valid.props)) return null;
+      return { exp: socketExpiry(valid.expiresAt) };
+    },
+
     async fetch(req: Request, env: E, ctx: ExecutionContext): Promise<Response> {
       const path = new URL(req.url).pathname;
       if (isAuthUiPath(path)) {
