@@ -123,6 +123,9 @@ export interface MutationStore {
 // fields.list_id / fields.task_id / position neighbours) to Graph IDs.
 export interface ExecInput {
   op: MutationOp;
+  // The app's sid for the entity. A create records it for the new Graph ID
+  // before the mirror write, so the mirror never mints a sid of its own.
+  sid: string;
   graphId: string | null;
   fields: Record<string, unknown>;
   position?: Position;
@@ -228,7 +231,11 @@ export async function applyBatch(
     }
     const m = v;
     const self: SidRef = { kind: kindOf(m.op), sid: m.sid };
-    if (blocked.has(key(self)) || now() > deadline) {
+    // Skipped, not tried, when an earlier mutation in the batch for this
+    // entity, or for one it names (its parent, a neighbour), didn't apply: a
+    // step whose task's create failed would otherwise be rejected for good as
+    // unknown_task, though the retried batch would create the task first.
+    if (refsOf(m).some((r) => blocked.has(key(r))) || now() > deadline) {
       blocked.add(key(self));
       results.push({ id: m.id, status: "skipped" });
       continue;
@@ -297,6 +304,7 @@ async function applyOne(
 
   const out = await exec({
     op: m.op,
+    sid: m.sid,
     graphId: self.graph_id,
     fields,
     position: m.position,

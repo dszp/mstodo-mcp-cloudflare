@@ -58,6 +58,14 @@ export function isGraphNotFound(e: unknown): e is GraphError {
   );
 }
 
+// The sync API's create path: the sid the app chose, recorded for the new
+// Graph ID before the op writes the entity to the mirror, so the mirror never
+// mints one of its own. A failure leaves applyBatch's adoptSid to fix it up.
+export async function reserveSid(ctx: OpsContext, kind: "list" | "task" | "step" | "link", sid: string | undefined, graphId: string): Promise<void> {
+  if (!sid) return;
+  await bestEffort("index_reserve_sid_failed", { kind, graph_id: graphId }, () => ctx.index.reserveSid(kind, sid, graphId));
+}
+
 // Index write-through after a Graph write succeeded. The index serves the
 // cached reads, so the write lands immediately — but a failure here must not
 // fail the op: Graph already has the change and the next delta sync reconciles.

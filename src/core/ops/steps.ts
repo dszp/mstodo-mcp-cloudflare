@@ -1,7 +1,7 @@
 import { compareOrderDateTimeDesc } from "../graph/substrate-client";
 import { ChecklistItemSchema, type ChecklistItem } from "../graph/types";
 import { createChecklistItem, listChecklistItems } from "../graph/todo-resources";
-import { bestEffort, isGraphNotFound, type OpsContext } from "./context";
+import { bestEffort, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { computeOrder, orderValues, type ReorderPosition } from "./position";
 import { err, ok, type ToolResult } from "./result";
 
@@ -27,7 +27,7 @@ export type StepResult = { list_id: string; task_id: string; item: ChecklistItem
 
 export function createStep(
   ctx: OpsContext,
-  input: { list_id: string; task_id: string; display_name: string; is_checked?: boolean },
+  input: { list_id: string; task_id: string; display_name: string; is_checked?: boolean; sid?: string },
 ): Promise<ToolResult<StepResult>> {
   const { list_id, task_id } = input;
   return ctx.writes.run(async () => {
@@ -36,6 +36,7 @@ export function createStep(
         displayName: input.display_name,
         isChecked: input.is_checked,
       });
+      await reserveSid(ctx, "step", input.sid, item.id);
       await bestEffort("index_set_flags_failed", { task_id }, () => ctx.index.setTaskFlags(task_id, { has_checklist: true }));
       await cacheUpsert(ctx, task_id, list_id, item);
       return ok({ list_id, task_id, item });
@@ -51,13 +52,16 @@ export function createStep(
 // A single match is written through, so the caller can adopt it.
 export async function findCreatedSteps(
   ctx: OpsContext,
-  input: { list_id: string; task_id: string; title: string; since_ms: number },
+  input: { list_id: string; task_id: string; title: string; since_ms: number; sid?: string },
 ): Promise<ChecklistItem[]> {
   const items = await listChecklistItems(ctx.graph, input.list_id, input.task_id);
   const found = items.filter(
     (i) => i.displayName === input.title && !!i.createdDateTime && Date.parse(i.createdDateTime) >= input.since_ms - 5_000,
   );
-  if (found.length === 1) await cacheUpsert(ctx, input.task_id, input.list_id, found[0]);
+  if (found.length === 1) {
+    await reserveSid(ctx, "step", input.sid, found[0].id);
+    await cacheUpsert(ctx, input.task_id, input.list_id, found[0]);
+  }
   return found;
 }
 
@@ -138,6 +142,8 @@ export function reorderStep(
     const newOrder = computed.value;
 
     await sub.patchSubtask(task_id, item_id, { OrderDateTime: newOrder });
+    // Substrate is the order's only store: mirror it so it's logged and pushed.
+    await bestEffort("index_update_step_order_failed", { task_id }, () => ctx.index.setStepOrder(task_id, item_id, newOrder));
 
     // The new order without a second read: apply newOrder to the moved step
     // locally. Descending OrderDateTime, nulls last.

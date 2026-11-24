@@ -8,7 +8,7 @@ import { loadAttachmentConfig, loadLinkRules } from "../config/loader";
 import { runLinkRules, type LinkRuleMatch } from "../config/link-rules-engine";
 import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
 import { toGraphDate, toGraphDateTime } from "../util/dates";
-import { bestEffort, getGraphInnerErrorCode, isGraphNotFound, type OpsContext } from "./context";
+import { bestEffort, getGraphInnerErrorCode, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
 import { committedDatePart } from "./my-day";
 import { computeOrder, orderValues, type ReorderPosition } from "./position";
@@ -145,6 +145,8 @@ export type CreateTaskInput = {
   isReminderOn?: boolean;
   categories?: string[];
   recurrence?: TodoTask["recurrence"];
+  // The sync API's sid for the new task (see reserveSid).
+  sid?: string;
 };
 
 // Only supplied fields are sent. The body is plain text.
@@ -171,6 +173,7 @@ export function createTask(
       throw e;
     }
     // Committed: nothing below may fail the op.
+    await reserveSid(ctx, "task", input.sid, task.id);
     await upsertTask(ctx, task, list_id);
     const link_rules = await linkRulesAfterWrite(ctx, list_id, async () => task);
     return ok({ list_id, task, link_rules });
@@ -310,7 +313,7 @@ const after = (iso: string | undefined, sinceMs: number) => !!iso && Date.parse(
 // caller can adopt it.
 export async function findCreatedTasks(
   ctx: OpsContext,
-  input: { list_id: string; title: string; since_ms: number },
+  input: { list_id: string; title: string; since_ms: number; sid?: string },
 ): Promise<TodoTask[]> {
   const url = new URL(tasksUrl(input.list_id));
   url.searchParams.set("$filter", `createdDateTime ge ${new Date(input.since_ms - CREATE_SKEW_MS).toISOString()}`);
@@ -325,7 +328,10 @@ export async function findCreatedTasks(
   }
   const items = res.status === 200 ? (res.items as TodoTask[]) : [];
   const found = items.filter((t) => t.title === input.title && after(t.createdDateTime, input.since_ms));
-  if (found.length === 1) await upsertTask(ctx, found[0], input.list_id);
+  if (found.length === 1) {
+    await reserveSid(ctx, "task", input.sid, found[0].id);
+    await upsertTask(ctx, found[0], input.list_id);
+  }
   return found;
 }
 
@@ -742,6 +748,10 @@ export function reorderTask(
     });
     if (!computed.ok) return computed;
     const task = await sub.patchTask(list_id, task_id, { OrderDateTime: computed.value });
+    // Substrate is the order's only store: mirror it so it's logged and pushed.
+    await bestEffort("index_update_order_failed", { task_id }, () =>
+      ctx.index.updateMyDayFields(task_id, { order_datetime: computed.value }),
+    );
     return ok({ list_id, task_id, task, order_datetime: computed.value });
   });
 }

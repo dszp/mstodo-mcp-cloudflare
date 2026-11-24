@@ -1,6 +1,6 @@
 import { GraphError } from "../graph/client";
 import { TodoTaskListSchema, type TodoTaskList } from "../graph/types";
-import { bestEffort, isGraphNotFound, type OpsContext } from "./context";
+import { bestEffort, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { err, ok, type ToolResult } from "./result";
 
 // list.create / list.update / list.delete (docs/SYNC-API.md section 5.2).
@@ -11,9 +11,11 @@ const listUrl = (listId: string) => `${LISTS_URL}/${encodeURIComponent(listId)}`
 const upsertList = (ctx: OpsContext, list: TodoTaskList) =>
   bestEffort("index_upsert_list_failed", { list_id: list.id }, () => ctx.index.upsertList(list));
 
-export function createList(ctx: OpsContext, input: { display_name: string }): Promise<ToolResult<{ list: TodoTaskList }>> {
+// `sid`: the sync API's sid for the new list (see reserveSid).
+export function createList(ctx: OpsContext, input: { display_name: string; sid?: string }): Promise<ToolResult<{ list: TodoTaskList }>> {
   return ctx.writes.run(async () => {
     const list = await ctx.graph.postJson(LISTS_URL, { displayName: input.display_name }, TodoTaskListSchema);
+    await reserveSid(ctx, "list", input.sid, list.id);
     await upsertList(ctx, list);
     return ok({ list });
   });

@@ -507,8 +507,46 @@ export class IndexCore implements TokenProvider {
   // -- Task CRUD ------------------------------------------------------------
   upsertTask(task: TodoTask, listId: string): void {
     const row = taskToRow(task, listId);
-    this.#sql.exec(UPSERT_TASK_SQL, ...TASK_COLUMNS.map((c) => row[c]));
+    const modified = task.lastModifiedDateTime ? Date.parse(task.lastModifiedDateTime) : NaN;
+    this.#clocked("task", task.id, Number.isNaN(modified) ? Date.now() : modified, () =>
+      this.#sql.exec(UPSERT_TASK_SQL, ...TASK_COLUMNS.map((c) => row[c])),
+    );
     this.#stampTask(task.id);
+  }
+
+  // Runs a write to one entity's row and stamps the field clock of each
+  // clocked field it changed with max(existing, atMs). A row the write
+  // inserted stamps nothing: no app edit can predate the entity's arrival,
+  // and stamping a create's defaults would supersede the app's own queued
+  // edits to them.
+  #clocked<T>(kind: string, graphId: string, atMs: number, write: () => T): T {
+    const spec = CLOCKED[kind];
+    const cols = [...new Set(Object.values(spec.fields).flat())];
+    const read = () =>
+      this.#sql
+        .exec<Record<string, SqlValue>>(`SELECT ${cols.join(", ")} FROM ${spec.table} WHERE ${spec.key} = ?`, graphId)
+        .toArray()[0];
+    const before = read();
+    const out = write();
+    if (!before) return out;
+    const after = read();
+    if (!after) return out;
+    const changed = Object.entries(spec.fields)
+      .filter(([, columns]) => columns.some((c) => before[c] !== after[c]))
+      .map(([field]) => field);
+    if (changed.length === 0) return out;
+    const sid = this.#sql
+      .exec<{ sid: string }>("SELECT sid FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
+      .toArray()[0]?.sid;
+    if (!sid) return out;
+    for (const field of changed) {
+      this.#sql.exec(
+        `INSERT INTO field_clock (kind, sid, field, at_ms) VALUES (?, ?, ?, ?)
+         ON CONFLICT(kind, sid, field) DO UPDATE SET at_ms = max(at_ms, excluded.at_ms)`,
+        kind, sid, field, atMs,
+      );
+    }
+    return out;
   }
 
   // While its list is re-baselining, mark a task as seen by this baseline so
@@ -651,14 +689,14 @@ export class IndexCore implements TokenProvider {
     this.#deleteMissing("checklist_items", "item_id", taskId, items.map((i) => i.id));
     for (const item of items) {
       const row = checklistItemToRow(item, taskId, listId);
-      this.#sql.exec(
+      this.#clocked("step", item.id, Date.now(), () => this.#sql.exec(
         `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
            VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})
          ON CONFLICT(item_id) DO UPDATE SET
            task_id=excluded.task_id, list_id=excluded.list_id, display_name=excluded.display_name,
            is_checked=excluded.is_checked, created_at=excluded.created_at, checked_at=excluded.checked_at`,
         ...CHECKLIST_COLUMNS.map((c) => row[c]),
-      );
+      ));
     }
     this.#sql.exec(
       "UPDATE tasks SET checklist_synced_at = ?, has_checklist = ? WHERE task_id = ?",
@@ -683,14 +721,14 @@ export class IndexCore implements TokenProvider {
   replaceLinkedResources(taskId: string, listId: string, links: LinkedResource[]): void {
     this.#deleteMissing("linked_resources", "link_id", taskId, links.map((l) => l.id));
     for (const l of links) {
-      this.#sql.exec(
+      this.#clocked("link", l.id, Date.now(), () => this.#sql.exec(
         `INSERT INTO linked_resources (link_id, task_id, list_id, web_url, display_name, application_name, external_id)
            VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(link_id) DO UPDATE SET task_id=excluded.task_id, list_id=excluded.list_id,
            web_url=excluded.web_url, display_name=excluded.display_name,
            application_name=excluded.application_name, external_id=excluded.external_id`,
         l.id, taskId, listId, l.webUrl ?? null, l.displayName ?? null, l.applicationName ?? null, l.externalId ?? null,
-      );
+      ));
     }
   }
 
@@ -734,14 +772,14 @@ export class IndexCore implements TokenProvider {
   // re-fetch next scan.
   upsertChecklistItem(taskId: string, listId: string, item: ChecklistItem): void {
     const row = checklistItemToRow(item, taskId, listId);
-    this.#sql.exec(
+    this.#clocked("step", item.id, Date.now(), () => this.#sql.exec(
       `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
          VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})
        ON CONFLICT(item_id) DO UPDATE SET
          display_name=excluded.display_name, is_checked=excluded.is_checked,
          created_at=excluded.created_at, checked_at=excluded.checked_at`,
       ...CHECKLIST_COLUMNS.map((c) => row[c]),
-    );
+    ));
     this.#sql.exec("UPDATE tasks SET has_checklist = 1 WHERE task_id = ?", taskId);
   }
 
@@ -762,12 +800,21 @@ export class IndexCore implements TokenProvider {
   // so resolveSids reports it not live until the next sub-resource scan, and an
   // edit sent right after the create is refused as deleted.
   upsertLinkedResource(taskId: string, listId: string, link: LinkedResource): void {
-    this.#sql.exec(
+    this.#clocked("link", link.id, Date.now(), () => this.#sql.exec(
       `INSERT INTO linked_resources (link_id, task_id, list_id, web_url, display_name, application_name, external_id)
          VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(link_id) DO UPDATE SET web_url=excluded.web_url, display_name=excluded.display_name,
          application_name=excluded.application_name, external_id=excluded.external_id`,
       link.id, taskId, listId, link.webUrl ?? null, link.displayName ?? null, link.applicationName ?? null, link.externalId ?? null,
+    ));
+  }
+
+  // A step's manual order after a reorder through this server (Substrate is
+  // its only store), so the change is logged and pushed like the scan's.
+  setStepOrder(taskId: string, itemId: string, order: string | null): void {
+    this.#sql.exec(
+      "UPDATE checklist_items SET order_datetime = ? WHERE item_id = ? AND task_id = ? AND order_datetime IS NOT ?",
+      order, itemId, taskId, order,
     );
   }
 
@@ -882,7 +929,7 @@ export class IndexCore implements TokenProvider {
   // -- List roster ----------------------------------------------------------
   upsertList(list: TodoTaskList): void {
     const r = listToRow(list);
-    this.#sql.exec(
+    this.#clocked("list", r.list_id, Date.now(), () => this.#sql.exec(
       `INSERT INTO lists (list_id, display_name, wellknown, is_owner, is_shared)
          VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(list_id) DO UPDATE SET
@@ -893,7 +940,8 @@ export class IndexCore implements TokenProvider {
       r.wellknown,
       r.is_owner,
       r.is_shared,
-    );    this.#sql.exec(
+    ));
+    this.#sql.exec(
       `UPDATE lists SET baseline_gen = s.sweep_gen FROM sync_state s
         WHERE lists.list_id = ? AND s.resource = 'lists' AND s.sweep_gen IS NOT NULL`,
       r.list_id,
@@ -1712,15 +1760,32 @@ export class IndexCore implements TokenProvider {
     clocks: Array<{ kind: string; sid: string; field: string; at_ms: number }>,
   ): void {
     this.#transact(() => {
+      const begun = this.#sql
+        .exec<{ at_ms: number }>("SELECT at_ms FROM applied_mutations WHERE mutation_id = ?", id)
+        .toArray()[0]?.at_ms;
       this.#sql.exec(
         "UPDATE applied_mutations SET state = 'done', result_json = ?, lease_until = NULL WHERE mutation_id = ?",
         JSON.stringify(result),
         id,
       );
+      // The mutation's own write-through stamped the fields it changed with
+      // Graph's time, which is later than the app's edit. The edit is what
+      // those fields now hold, so they take its time: otherwise the app's next
+      // queued edit to them (made after this one, sent with it) would be
+      // superseded. That covers fields Graph changed as a consequence (status
+      // with a completion date), hence "stamped since the mutation began";
+      // the allowance is for Graph's clock against ours.
+      const at = clocks[0];
+      if (at && begun !== undefined) {
+        this.#sql.exec(
+          "UPDATE field_clock SET at_ms = ? WHERE kind = ? AND sid = ? AND at_ms >= ?",
+          at.at_ms, at.kind, at.sid, begun - CLOCK_SKEW_MS,
+        );
+      }
       for (const c of clocks) {
         this.#sql.exec(
           `INSERT INTO field_clock (kind, sid, field, at_ms) VALUES (?, ?, ?, ?)
-           ON CONFLICT(kind, sid, field) DO UPDATE SET at_ms = max(at_ms, excluded.at_ms)`,
+           ON CONFLICT(kind, sid, field) DO UPDATE SET at_ms = excluded.at_ms`,
           c.kind,
           c.sid,
           c.field,
@@ -1772,11 +1837,33 @@ export class IndexCore implements TokenProvider {
     return out;
   }
 
-  // Gives a newly created entity the sid the app chose. The mirror write that
-  // follows a Graph create mints a random sid first (the insert trigger), so
-  // this renames it, in the map and in the log, while no client can have seen
-  // it yet except through a pull racing this call. False when the app's sid
-  // already names another entity.
+  // Gives a Graph ID about to be written to the mirror the sid the app chose
+  // for it, before the row exists, so the insert trigger never mints one and
+  // no client ever sees another sid for it. False when the sid names another
+  // entity, or the Graph ID already has a sid (the caller then falls back to
+  // adoptSid).
+  reserveSid(kind: string, sid: string, graphId: string): boolean {
+    return this.#transact(() => {
+      const taken = this.#sql
+        .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = ? AND sid = ?", kind, sid)
+        .toArray()[0];
+      if (taken) return taken.graph_id === graphId;
+      const existing = this.#sql
+        .exec<{ sid: string }>("SELECT sid FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
+        .toArray()[0];
+      if (existing) return false;
+      this.#sql.exec("INSERT INTO entity_map (kind, sid, graph_id, created_ms) VALUES (?, ?, ?, ?)", kind, sid, graphId, Date.now());
+      return true;
+    });
+  }
+
+  // Gives a newly created entity the sid the app chose, after the fact: when
+  // reserveSid didn't run first (or lost a race with delta), the entity is
+  // already mirrored under a minted sid M that a client may have pulled. M is
+  // retired the way a deletion is (a tombstone at a new seq, for lists and
+  // tasks) and the entity is logged again under the app's sid; for a step or
+  // link, which are logged on their task, the task is logged again. False when
+  // the app's sid already names another entity.
   adoptSid(kind: string, sid: string, graphId: string): boolean {
     return this.#transact(() => {
       const taken = this.#sql
@@ -1786,20 +1873,41 @@ export class IndexCore implements TokenProvider {
       const minted = this.#sql
         .exec<{ sid: string }>("SELECT sid FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
         .toArray()[0];
-      if (!minted) {
-        this.#sql.exec(
-          "INSERT INTO entity_map (kind, sid, graph_id, created_ms) VALUES (?, ?, ?, ?)",
-          kind,
-          sid,
-          graphId,
-          Date.now(),
-        );
+      const now = Date.now();
+      if (minted) {
+        this.#sql.exec("UPDATE entity_map SET graph_id = NULL WHERE kind = ? AND sid = ?", kind, minted.sid);
+        this.#sql.exec("UPDATE field_clock SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
+      }
+      this.#sql.exec("INSERT INTO entity_map (kind, sid, graph_id, created_ms) VALUES (?, ?, ?, ?)", kind, sid, graphId, now);
+      if (!minted) return true;
+      const relog = (k: string, s: string, deleted: 0 | 1, listSid: string | null) => {
+        this.#sql.exec("DELETE FROM sync_log WHERE kind = ? AND sid = ?", k, s);
+        this.#sql.exec("INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms) VALUES (?, ?, ?, ?, ?)", k, s, deleted, listSid, now);
+      };
+      if (kind === "task" || kind === "list") {
+        const logged = this.#sql
+          .exec<{ list_sid: string | null }>("SELECT list_sid FROM sync_log WHERE kind = ? AND sid = ?", kind, minted.sid)
+          .toArray()[0];
+        if (!logged) return true;
+        relog(kind, minted.sid, 1, logged.list_sid);
+        relog(kind, sid, 0, kind === "list" ? sid : logged.list_sid);
         return true;
       }
-      this.#sql.exec("UPDATE entity_map SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
-      this.#sql.exec("UPDATE sync_log SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
-      if (kind === "list") this.#sql.exec("UPDATE sync_log SET list_sid = ? WHERE list_sid = ?", sid, minted.sid);
-      this.#sql.exec("UPDATE field_clock SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
+      // A step or link: log its task again, so a client that pulled the task
+      // with the minted sid inside gets it with the app's.
+      const table = kind === "step" ? "checklist_items" : kind === "link" ? "linked_resources" : null;
+      if (!table) return true;
+      const key = kind === "step" ? "item_id" : "link_id";
+      const task = this.#sql
+        .exec<{ sid: string; list_sid: string | null }>(
+          `SELECT m.sid, (SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id = t.list_id) AS list_sid
+             FROM ${table} c JOIN tasks t ON t.task_id = c.task_id
+             JOIN entity_map m ON m.kind = 'task' AND m.graph_id = t.task_id
+            WHERE c.${key} = ?`,
+          graphId,
+        )
+        .toArray()[0];
+      if (task) relog("task", task.sid, 0, task.list_sid);
       return true;
     });
   }
@@ -2393,6 +2501,11 @@ export class IndexCore implements TokenProvider {
       await this.#runChecklistScanBatch(skip).catch((e) =>
         log.warn("checklist_scan_failed", { error: String(e) }),
       );
+      try {
+        this.pruneMutations(Date.now() - MUTATION_RETENTION_MS);
+      } catch (e) {
+        log.warn("prune_mutations_failed", { error: String(e) });
+      }
     }
     return anyOutstanding;
   }
@@ -2958,6 +3071,37 @@ const WRITE_LEASE_MIN_TTL_MS = 1_000;
 const WRITE_LEASE_MAX_TTL_MS = 120_000;
 const WRITE_LEASE_MAX_WAIT_MS = 120_000;
 const clampMs = (v: number, min: number, max: number) => Math.min(Math.max(Number.isFinite(v) ? v : 0, min), max);
+
+// The columns behind each sync API field that carries a field clock
+// (docs/SYNC-API.md section 6), per kind: a server-side write that changes
+// one stamps that field's clock, so an older queued app edit is superseded.
+// Idempotency rows outlive any edit the app still holds (section 5.4).
+const MUTATION_RETENTION_MS = 30 * 86_400_000;
+
+// How far Graph's clock may run behind ours.
+const CLOCK_SKEW_MS = 5_000;
+
+const CLOCKED: Record<string, { table: string; key: string; fields: Record<string, readonly string[]> }> = {
+  task: {
+    table: "tasks",
+    key: "task_id",
+    fields: {
+      title: ["title"],
+      body: ["body_content", "body_type"],
+      status: ["status"],
+      completed_at: ["completed_at"],
+      importance: ["importance"],
+      due: ["due_at"],
+      start: ["start_at"],
+      reminder: ["reminder_at", "is_reminder_on"],
+      categories: ["categories_json"],
+      recurrence: ["recurrence_json"],
+    },
+  },
+  list: { table: "lists", key: "list_id", fields: { name: ["display_name"] } },
+  step: { table: "checklist_items", key: "item_id", fields: { title: ["display_name"], checked: ["is_checked"] } },
+  link: { table: "linked_resources", key: "link_id", fields: { url: ["web_url"], title: ["display_name"] } },
+};
 
 // Every public method — the RPC surface the Cloudflare shell delegates and
 // core callers use via ownerIndex(). bootstrap() is host lifecycle, not surface.

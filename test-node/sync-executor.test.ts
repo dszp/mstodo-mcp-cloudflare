@@ -23,8 +23,9 @@ function ctxThrowing(e: unknown, vars: Record<string, string> = {}) {
   return { ctx, markMyDayUnavailable };
 }
 
-const listUpdate: ExecInput = { op: "list.update", graphId: "L1", fields: { name: "x" }, ids: {} };
-const listCreate: ExecInput = { op: "list.create", graphId: null, fields: { name: "x" }, ids: {} };
+const S = "0190a1b2c3d47e5f8a9b0000000000ff";
+const listUpdate: ExecInput = { op: "list.update", sid: S, graphId: "L1", fields: { name: "x" }, ids: {} };
+const listCreate: ExecInput = { op: "list.create", sid: S, graphId: null, fields: { name: "x" }, ids: {} };
 
 beforeEach(() => {
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -65,7 +66,7 @@ describe("syncExecutor maps what an op throws", () => {
     expect([out.ok, !out.ok && out.retry, !out.ok && out.ambiguous === true]).toEqual([false, true, ambiguous]);
   });
 
-  const myDayAdd: ExecInput = { op: "myday.add", graphId: "T1", fields: {}, ids: {} };
+  const myDayAdd: ExecInput = { op: "myday.add", sid: S, graphId: "T1", fields: {}, ids: {} };
   it.each([
     ["Substrate 503", new SubstrateError(503, "down"), { ok: false, error: "substrate_503", retry: true }, false],
     ["Substrate 403 (latched)", new SubstrateError(403, "no scope"), { ok: false, error: "my_day_unavailable", retry: true }, true],
@@ -81,14 +82,14 @@ describe("syncExecutor maps what an op throws", () => {
 describe("syncExecutor gates Substrate ops on ENABLE_MY_DAY", () => {
   const ids = { "0190a1b2c3d47e5f8a9b000000000001": "L2" };
   it.each([
-    ["myday.add", { op: "myday.add", graphId: "T1", fields: {}, ids: {} }],
-    ["myday.remove", { op: "myday.remove", graphId: "T1", fields: {}, ids: {} }],
-    ["myday.reorder", { op: "myday.reorder", graphId: "T1", fields: {}, position: { top: true }, ids: {} }],
-    ["task.reorder", { op: "task.reorder", graphId: "T1", fields: {}, position: { top: true }, ids: {} }],
-    ["step.reorder", { op: "step.reorder", graphId: "S1", fields: {}, position: { top: true }, ids: {} }],
+    ["myday.add", { op: "myday.add", sid: S, graphId: "T1", fields: {}, ids: {} }],
+    ["myday.remove", { op: "myday.remove", sid: S, graphId: "T1", fields: {}, ids: {} }],
+    ["myday.reorder", { op: "myday.reorder", sid: S, graphId: "T1", fields: {}, position: { top: true }, ids: {} }],
+    ["task.reorder", { op: "task.reorder", sid: S, graphId: "T1", fields: {}, position: { top: true }, ids: {} }],
+    ["step.reorder", { op: "step.reorder", sid: S, graphId: "S1", fields: {}, position: { top: true }, ids: {} }],
     [
       "task.move with a position",
-      { op: "task.move", graphId: "T1", fields: { list_id: "0190a1b2c3d47e5f8a9b000000000001" }, position: { top: true }, ids },
+      { op: "task.move", sid: S, graphId: "T1", fields: { list_id: "0190a1b2c3d47e5f8a9b000000000001" }, position: { top: true }, ids },
     ],
   ] as Array<[string, ExecInput]>)("%s", async (_label, input) => {
     expect(await syncExecutor(ctxThrowing(new Error("unreached")).ctx)(input)).toEqual({
@@ -150,7 +151,7 @@ describe("taskFields translates the feed's shapes to the ops' input", () => {
     ["categories that aren't strings", { categories: [1] }, "categories"],
     ["an empty title", { title: "  " }, "title"],
   ])("refuses %s", async (_label, fields, field) => {
-    const out = await syncExecutor(ctxThrowing(new Error("unreached")).ctx)({ op: "task.update", graphId: "T1", fields, ids: {} });
+    const out = await syncExecutor(ctxThrowing(new Error("unreached")).ctx)({ op: "task.update", sid: S, graphId: "T1", fields, ids: {} });
     expect(out).toEqual({ ok: false, error: `invalid_field:${field}`, retry: false, rejected: true });
   });
 });

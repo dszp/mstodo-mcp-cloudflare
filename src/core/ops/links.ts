@@ -1,6 +1,6 @@
 import { LinkedResourceSchema, type LinkedResource } from "../graph/types";
 import { createLinkedResource } from "../graph/todo-resources";
-import { bestEffort, isGraphNotFound, type OpsContext } from "./context";
+import { bestEffort, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { err, ok, type ToolResult } from "./result";
 
 // link.create / link.update / link.delete (docs/SYNC-API.md section 5.2). To Do
@@ -21,7 +21,16 @@ export type LinkResult = { list_id: string; task_id: string; linked_resource: Li
 
 export function createLink(
   ctx: OpsContext,
-  input: { list_id: string; task_id: string; application_name: string; display_name?: string; external_id?: string; web_url?: string },
+  input: {
+    list_id: string;
+    task_id: string;
+    application_name: string;
+    display_name?: string;
+    external_id?: string;
+    web_url?: string;
+    // The sync API's sid for the new link (see reserveSid).
+    sid?: string;
+  },
 ): Promise<ToolResult<LinkResult>> {
   const { list_id, task_id } = input;
   return ctx.writes.run(async () => {
@@ -32,6 +41,7 @@ export function createLink(
         externalId: input.external_id,
         webUrl: input.web_url,
       });
+      await reserveSid(ctx, "link", input.sid, linked_resource.id);
       await cacheUpsert(ctx, task_id, list_id, linked_resource);
       return ok({ list_id, task_id, linked_resource });
     } catch (e) {

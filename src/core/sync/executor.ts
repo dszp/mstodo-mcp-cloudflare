@@ -137,7 +137,7 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
 
   switch (op) {
     case "list.create": {
-      const r = await createList(ctx, { display_name: requiredText(fields, "name") });
+      const r = await createList(ctx, { display_name: requiredText(fields, "name"), sid: input.sid });
       return r.ok ? applied(r.value.list.id) : rejected(r.reason);
     }
     case "list.update": {
@@ -158,11 +158,11 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       const t = completion(taskFields(fields), today(ctx));
       if (input.priorAttemptMs !== undefined) {
         // An earlier attempt may have made it (section 5.4).
-        const found = await findCreatedTasks(ctx, { list_id, title, since_ms: input.priorAttemptMs });
+        const found = await findCreatedTasks(ctx, { list_id, title, since_ms: input.priorAttemptMs, sid: input.sid });
         if (found.length === 1) return applied(found[0].id);
         if (found.length > 1) return rejected("ambiguous_create");
       }
-      const r = await createTask(ctx, { list_id, title, ...createFields(t) });
+      const r = await createTask(ctx, { list_id, title, ...createFields(t), sid: input.sid });
       if (!r.ok) return rejected(r.reason);
       const taskId = r.value.task.id;
       // Graph's create takes no completion date; a backdated completion is a
@@ -270,11 +270,11 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       if (!list_id) return rejected("unknown_task");
       const title = requiredText(fields, "title");
       if (input.priorAttemptMs !== undefined) {
-        const found = await findCreatedSteps(ctx, { list_id, task_id, title, since_ms: input.priorAttemptMs });
+        const found = await findCreatedSteps(ctx, { list_id, task_id, title, since_ms: input.priorAttemptMs, sid: input.sid });
         if (found.length === 1) return applied(found[0].id);
         if (found.length > 1) return rejected("ambiguous_create");
       }
-      const r = await createStep(ctx, { list_id, task_id, display_name: title, is_checked: optionalBool(fields, "checked") });
+      const r = await createStep(ctx, { list_id, task_id, display_name: title, is_checked: optionalBool(fields, "checked"), sid: input.sid });
       return r.ok ? applied(r.value.item.id) : rejected(r.reason);
     }
     case "step.update": {
@@ -314,6 +314,7 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
         list_id,
         task_id,
         application_name: SYNC_LINK_APPLICATION,
+        sid: input.sid,
         web_url: requiredText(fields, "url"),
         display_name: optionalText(fields, "title"),
       });
