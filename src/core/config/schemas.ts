@@ -105,8 +105,8 @@ export const ListsConfigSchema = z.object({
       "Map of Graph list ID → classification, pinned so a rename can't silently change a list's class. " +
       "The class is also the list's sync setting (docs/SYNC-API.md section 1.2). " +
       "Checked BEFORE everything else; auto-populated by list_lists the first time a list is classified by a " +
-      "pattern, then it follows the immutable ID. Edit via set_list_config.overrides; drop a key to revert a " +
-      "list to pattern-based (it re-pins from patterns on the next list_lists).",
+      "pattern, then it follows the immutable ID. Edit via set_list_config.overrides (merged per key); set a key to null " +
+      "to revert a list to pattern-based (it re-pins from patterns on the next list_lists).",
     ),
   no_sync: z
     .array(z.string().min(1))
