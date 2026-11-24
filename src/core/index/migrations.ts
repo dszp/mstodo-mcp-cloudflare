@@ -124,6 +124,20 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    apply: (sql) => {
+      // docs/SYNC-API.md section 18.2: task IDs switch to Graph's immutable form
+      // (the GraphClient now always sends Prefer: IdType="ImmutableId"). Rows
+      // and delta links stored under default REST IDs are dropped, so every
+      // list re-baselines and every task is re-fetched with its immutable ID.
+      // The My Day scan state is reset so it refills the Substrate fields. List
+      // rows, subscriptions and config are kept: list IDs don't change form.
+      sql.exec("DELETE FROM tasks");
+      sql.exec("DELETE FROM checklist_items");
+      sql.exec("DELETE FROM sync_state WHERE resource LIKE 'tasks:%' OR resource LIKE 'myday:%'");
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
