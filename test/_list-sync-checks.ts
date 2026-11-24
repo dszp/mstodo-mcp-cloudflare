@@ -77,11 +77,14 @@ export async function runListSyncChecks(c: IndexCore, env: AppEnv) {
         { id: "m2", at, op: "task.create", sid: "0123456789abcdef0123456789abcdef", fields: { list_id: lxSid, title: "x" } },
         { id: "m3", at, op: "task.move", sid: tmSid, fields: { list_id: lxSid } },
         { id: "m4", at, op: "list.update", sid: lxSid, fields: { name: "Renamed" } },
+        // Queued before the exclusion above: the newer setting stands.
+        { id: "m5", at: new Date(Date.now() - 60_000).toISOString(), op: "list.update", sid: lxSid, fields: { sync: "todo" } },
       ],
     },
     "p",
   );
   const errors = batch.results.map((r) => (r.status === "rejected" ? r.error : r.status));
+  const m5 = batch.results[4];
 
   // Switch it back on: the list returns under its old sid.
   const backCfg = await c.updateListsConfig({ overrides: { LX: "todo" } });
@@ -108,6 +111,10 @@ export async function runListSyncChecks(c: IndexCore, env: AppEnv) {
     "a task moved into an excluded list leaves the mirror": writes.moved,
     "the sync API refuses task writes that touch an excluded list":
       errors.slice(0, 3).every((e) => e === "list_excluded"),
+    "a setting change from any path is stamped on the field clock":
+      Math.abs((c.fieldClocks("list", lxSid!).sync ?? 0) - Date.now()) < 5_000,
+    "an app edit older than that change loses to it":
+      m5.status === "applied" && JSON.stringify(m5.superseded_fields) === '["sync"]',
     "an excluded list itself can still be updated": errors[3] === "applied" && execCalls.map((x) => x.op).join() === "list.update",
     "a re-included list comes back under its old sid":
       back.all.some((x) => x.kind === "list" && !x.deleted && x.id === lxSid && x.data.sync === "todo"),

@@ -1024,13 +1024,23 @@ export class IndexCore implements TokenProvider {
   // Copy each roster list's sync setting (section 1.2) onto its row, where the
   // change feed reads it. Writes only rows whose setting changed; the v11
   // trigger logs those lists again. Returns the lists that changed.
+  //
+  // A change is stamped on the list's `sync` field clock at the time it is
+  // stored, whichever path made it (set_list_config, the app, a config edit
+  // the sync cycle picked up), so a queued app edit older than it loses
+  // (section 6). The first value recorded for a list is not a change and
+  // stamps nothing.
   #storeListSync(rows: ListRow[], cfg: ListsConfig): Array<{ list_id: string; from: string | null; to: ListSync }> {
     const changed: Array<{ list_id: string; from: string | null; to: ListSync }> = [];
+    const now = Date.now();
     for (const l of rows) {
       const to = listSync(l, cfg);
-      if ((l.sync ?? null) === to) continue;
-      this.#sql.exec("UPDATE lists SET sync = ? WHERE list_id = ?", to, l.list_id);
-      changed.push({ list_id: l.list_id, from: l.sync ?? null, to });
+      const from = l.sync ?? null;
+      if (from === to) continue;
+      const write = () => this.#sql.exec("UPDATE lists SET sync = ? WHERE list_id = ?", to, l.list_id);
+      if (from === null) write();
+      else this.#clocked("list", l.list_id, now, write);
+      changed.push({ list_id: l.list_id, from, to });
     }
     return changed;
   }
@@ -3311,7 +3321,7 @@ const CLOCKED: Record<string, { table: string; key: string; fields: Record<strin
       recurrence: ["recurrence_json"],
     },
   },
-  list: { table: "lists", key: "list_id", fields: { name: ["display_name"] } },
+  list: { table: "lists", key: "list_id", fields: { name: ["display_name"], sync: ["sync"] } },
   step: { table: "checklist_items", key: "item_id", fields: { title: ["display_name"], checked: ["is_checked"] } },
   link: { table: "linked_resources", key: "link_id", fields: { url: ["web_url"], title: ["display_name"] } },
 };
