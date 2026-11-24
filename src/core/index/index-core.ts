@@ -1577,12 +1577,12 @@ export class IndexCore implements TokenProvider {
 
   // One page of the change feed. See change-feed.ts for the cursor rules.
   syncChanges(opts: { cursor?: string | null; limit?: number; scope?: string }): FeedResult {
-    return changesSince(this.#sql, opts);
+    return changesSince(this.#sql, { ...opts, timeZone: this.#env.TIMEZONE });
   }
 
   // One task by sid, with its steps, links and attachment details.
   syncTask(sid: string): ReturnType<typeof taskBySid> {
-    return taskBySid(this.#sql, sid);
+    return taskBySid(this.#sql, sid, this.#env.TIMEZONE);
   }
 
   // FTS search answered with feed-shaped tasks, in one call (one RPC on

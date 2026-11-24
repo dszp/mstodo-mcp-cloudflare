@@ -98,22 +98,33 @@ export function currentCursor(sql: SqlDb): string {
   return `${readEpoch(sql)}.${maxSeq(sql)}`;
 }
 
-// Parses "<epoch>.<seq>"; "", "0" and undefined mean a full sync.
-export function parseCursor(raw: string | null | undefined): { epoch: string; seq: number } | null | "bad" {
+// Parses "<epoch>.<seq>", or "<epoch>.<seq>.f" while a full sync is still
+// paging; "", "0" and undefined start a full sync. Clients treat the cursor as
+// opaque.
+export function parseCursor(
+  raw: string | null | undefined,
+): { epoch: string; seq: number; walk: boolean } | null | "bad" {
   if (raw == null || raw === "" || raw === "0") return null;
-  const m = /^([0-9a-f]{1,32})\.(\d{1,15})$/.exec(raw);
-  return m ? { epoch: m[1], seq: Number(m[2]) } : "bad";
+  const m = /^([0-9a-f]{1,32})\.(\d{1,15})(\.f)?$/.exec(raw);
+  return m ? { epoch: m[1], seq: Number(m[2]), walk: !!m[3] } : "bad";
 }
 
 const iso = (ms: number | null): string | null => (ms == null ? null : new Date(ms).toISOString());
 
 // Due and start are dates, stored either at UTC midnight (Graph write-through)
-// or at local midnight (the To Do app). Both lie within 12 hours of UTC
-// midnight on the intended date (src/core/util/dates.ts), so rounding to the
-// nearest UTC midnight recovers the date without knowing the zone.
-export function bareDate(ms: number | null): string | null {
+// or at local midnight in the owner's zone (the To Do app; see
+// src/core/util/dates.ts). An exact UTC midnight is read as a UTC date; any
+// other instant is local midnight, read in `timeZone`. (Local midnight is never
+// an exact UTC midnight except in UTC itself, where both readings agree.)
+export function bareDate(ms: number | null, timeZone: string): string | null {
   if (ms == null) return null;
-  return new Date(Math.round(ms / 86_400_000) * 86_400_000).toISOString().slice(0, 10);
+  if (ms % 86_400_000 === 0) return new Date(ms).toISOString().slice(0, 10);
+  try {
+    // en-CA formats as YYYY-MM-DD.
+    return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
+  } catch {
+    return new Date(Math.round(ms / 86_400_000) * 86_400_000).toISOString().slice(0, 10);
+  }
 }
 
 function parseJson<T>(s: string | null, fallback: T): T {
@@ -126,6 +137,14 @@ function parseJson<T>(s: string | null, fallback: T): T {
 }
 
 type Row = Record<string, SqlValue>;
+
+// Every tasks column the feed reads; body_plain (the search copy) is left out,
+// so a page doesn't load each body twice.
+const TASK_FEED_COLUMNS = [
+  "task_id", "list_id", "status", "title", "body_content", "body_type", "importance", "categories_json",
+  "due_at", "start_at", "is_reminder_on", "reminder_at", "completed_at", "recurrence_json", "created_at",
+  "modified_at", "order_datetime", "committed_day", "committed_order", "postponed_day", "checklist_synced_at",
+].join(", ");
 
 // Every sid of `kind` for the given Graph IDs, in one query.
 function sidsFor(sql: SqlDb, kind: string, graphIds: string[]): Map<string, string> {
@@ -151,7 +170,7 @@ function inPlaceholders(n: number): string {
 // Builds FeedTask payloads for a set of task Graph IDs (a page's worth), with
 // their steps, links and attachments, every reference translated to a sid.
 // Tasks whose row is gone are absent from the result.
-export function buildTasks(sql: SqlDb, taskIds: string[]): Map<string, { data: FeedTask; field_clock: Record<string, number> }> {
+export function buildTasks(sql: SqlDb, taskIds: string[], timeZone: string): Map<string, { data: FeedTask; field_clock: Record<string, number> }> {
   const out = new Map<string, { data: FeedTask; field_clock: Record<string, number> }>();
   if (taskIds.length === 0) return out;
   const tasks: Row[] = [];
@@ -161,7 +180,7 @@ export function buildTasks(sql: SqlDb, taskIds: string[]): Map<string, { data: F
   for (let i = 0; i < taskIds.length; i += 200) {
     const chunk = taskIds.slice(i, i + 200);
     const ph = inPlaceholders(chunk.length);
-    tasks.push(...sql.exec(`SELECT * FROM tasks WHERE task_id IN (${ph})`, ...chunk).toArray());
+    tasks.push(...sql.exec(`SELECT ${TASK_FEED_COLUMNS} FROM tasks WHERE task_id IN (${ph})`, ...chunk).toArray());
     steps.push(...sql.exec(`SELECT * FROM checklist_items WHERE task_id IN (${ph}) ORDER BY created_at, item_id`, ...chunk).toArray());
     links.push(...sql.exec(`SELECT * FROM linked_resources WHERE task_id IN (${ph}) ORDER BY link_id`, ...chunk).toArray());
     atts.push(...sql.exec(`SELECT * FROM attachments WHERE task_id IN (${ph}) ORDER BY attachment_id`, ...chunk).toArray());
@@ -246,8 +265,8 @@ export function buildTasks(sql: SqlDb, taskIds: string[]): Map<string, { data: F
         body: content == null || content === "" ? null : { type: ((t.body_type as string | null) ?? "text").toLowerCase(), content },
         importance: (t.importance as string | null) ?? null,
         categories: parseJson<string[]>(t.categories_json as string | null, []),
-        due: bareDate(t.due_at as number | null),
-        start: bareDate(t.start_at as number | null),
+        due: bareDate(t.due_at as number | null, timeZone),
+        start: bareDate(t.start_at as number | null, timeZone),
         reminder: { on: t.is_reminder_on === 1, at: iso(t.reminder_at as number | null) },
         completed_at: iso(t.completed_at as number | null),
         recurrence: parseJson<unknown>(t.recurrence_json as string | null, null),
@@ -302,7 +321,7 @@ export function backfillRemaining(sql: SqlDb): number {
 
 export function changesSince(
   sql: SqlDb,
-  opts: { cursor?: string | null; limit?: number; scope?: string; now?: number },
+  opts: { cursor?: string | null; limit?: number; scope?: string; now?: number; timeZone?: string },
 ): FeedResult {
   const scope = (opts.scope ?? "all") as FeedScope;
   if (scope !== "all" && scope !== "active") return { ok: false, error: "bad_scope" };
@@ -319,27 +338,36 @@ export function changesSince(
     // too old yet. When it is, a cursor below min_cursor returns cursor_expired.
     from = parsed.seq;
   }
-  const full = parsed === null;
-  const limit = Math.max(1, Math.min(MAX_PAGE_LIMIT, Math.floor(opts.limit ?? DEFAULT_PAGE_LIMIT)));
+  // A full sync (no cursor, then ".f" cursors until caught up) sends only what
+  // the device keeps. An incremental pull also tells the device what to drop.
+  const walk = parsed === null || parsed.walk;
+  const rawLimit = Number(opts.limit ?? DEFAULT_PAGE_LIMIT);
+  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(MAX_PAGE_LIMIT, Math.floor(rawLimit))) : DEFAULT_PAGE_LIMIT;
   const cutoff = (opts.now ?? Date.now()) - ACTIVE_COMPLETED_WINDOW_MS;
+  const timeZone = opts.timeZone ?? "UTC";
 
-  // Scope is filtered in SQL so a page isn't spent on rows the device won't
-  // keep. A deletion record always passes: the client deletes the entity if it
-  // has it. The first page of a full sync skips deletion records, since the
-  // client has nothing; later pages carry a cursor and may include some, which
-  // the client ignores (deleting what it doesn't have is a no-op).
+  // `out`: a task this device's scope excludes (completed more than 30 days
+  // ago, under `active`). On a full sync it's skipped; on an incremental pull
+  // it goes out as a deletion record, because the device may hold it from
+  // before it left scope — completed while the device was offline, say — and
+  // its own aging rule only prunes tasks it knows are completed.
+  const outExpr =
+    scope === "active"
+      ? "(l.kind = 'task' AND t.status = 'completed' AND t.completed_at IS NOT NULL AND t.completed_at < ?)"
+      : "0";
   const where: string[] = ["l.seq > ?"];
-  const params: SqlValue[] = [from];
-  if (full) where.push("l.deleted = 0");
-  if (scope === "active") {
-    where.push(
-      "(l.kind <> 'task' OR l.deleted = 1 OR t.task_id IS NULL OR t.status <> 'completed' OR t.completed_at IS NULL OR t.completed_at >= ?)",
-    );
-    params.push(cutoff);
+  const params: SqlValue[] = scope === "active" ? [cutoff, from] : [from];
+  if (walk) {
+    where.push("l.deleted = 0");
+    if (scope === "active") {
+      where.push(`NOT ${outExpr}`);
+      params.push(cutoff);
+    }
   }
   const rows = sql
-    .exec<{ seq: number; kind: string; sid: string; deleted: number; graph_id: string | null }>(
-      `SELECT l.seq, l.kind, l.sid, l.deleted, m.graph_id
+    .exec<{ seq: number; kind: string; sid: string; deleted: number; graph_id: string | null; out: number; body_len: number }>(
+      `SELECT l.seq, l.kind, l.sid, l.deleted, m.graph_id, ${outExpr} AS out,
+              coalesce(length(t.body_content), 0) AS body_len
          FROM sync_log l
          LEFT JOIN entity_map m ON m.kind = l.kind AND m.sid = l.sid
          LEFT JOIN tasks t ON l.kind = 'task' AND t.task_id = m.graph_id
@@ -351,16 +379,23 @@ export function changesSince(
     )
     .toArray();
 
-  const more = rows.length > limit;
-  const pageRows = more ? rows.slice(0, limit) : rows;
-  const taskData = buildTasks(
-    sql,
-    pageRows.filter((r) => r.kind === "task" && r.deleted === 0 && r.graph_id).map((r) => r.graph_id!),
-  );
-  const listData = buildLists(
-    sql,
-    pageRows.filter((r) => r.kind === "list" && r.deleted === 0 && r.graph_id).map((r) => r.graph_id!),
-  );
+  // Trim to the byte budget before loading anything, using the body length as
+  // the estimate (bodies dominate a task's size), so a page of large bodies
+  // isn't loaded and then mostly thrown away. Always keep one row.
+  let more = rows.length > limit;
+  let pageRows = more ? rows.slice(0, limit) : rows;
+  let estimate = 0;
+  for (let i = 0; i < pageRows.length; i++) {
+    estimate += pageRows[i].body_len + 600;
+    if (i > 0 && estimate > PAGE_BYTE_BUDGET) {
+      pageRows = pageRows.slice(0, i);
+      more = true;
+      break;
+    }
+  }
+  const live = (r: (typeof rows)[number]) => r.deleted === 0 && !r.out && !!r.graph_id;
+  const taskData = buildTasks(sql, pageRows.filter((r) => r.kind === "task" && live(r)).map((r) => r.graph_id!), timeZone);
+  const listData = buildLists(sql, pageRows.filter((r) => r.kind === "list" && live(r)).map((r) => r.graph_id!));
 
   const changes: FeedChange[] = [];
   let bytes = 0;
@@ -369,14 +404,14 @@ export function changesSince(
   for (const r of pageRows) {
     let c: FeedChange | null = null;
     const kind = r.kind as "task" | "list";
-    if (r.deleted === 0 && kind === "task" && r.graph_id && taskData.has(r.graph_id)) {
-      const t = taskData.get(r.graph_id)!;
+    if (live(r) && kind === "task" && taskData.has(r.graph_id!)) {
+      const t = taskData.get(r.graph_id!)!;
       c = { kind, id: r.sid, seq: r.seq, deleted: false, data: t.data, field_clock: t.field_clock };
-    } else if (r.deleted === 0 && kind === "list" && r.graph_id && listData.has(r.graph_id)) {
-      c = { kind, id: r.sid, seq: r.seq, deleted: false, data: listData.get(r.graph_id)! };
-    } else if (!full) {
-      // Logged as live but the row is gone (or the log says deleted): tell the
-      // client to drop it. A later insert logs it again as live.
+    } else if (live(r) && kind === "list" && listData.has(r.graph_id!)) {
+      c = { kind, id: r.sid, seq: r.seq, deleted: false, data: listData.get(r.graph_id!)! };
+    } else if (!walk) {
+      // Deleted, out of this device's scope, or logged as live with its row
+      // gone: the device drops it. A later change logs it again as live.
       c = { kind, id: r.sid, seq: r.seq, deleted: true };
     }
     if (c) {
@@ -397,7 +432,7 @@ export function changesSince(
   return {
     ok: true,
     page: {
-      cursor: `${epoch}.${cursorSeq}`,
+      cursor: `${epoch}.${cursorSeq}${walk && hasMore ? ".f" : ""}`,
       has_more: hasMore,
       changes,
       backfill: { remaining: backfillRemaining(sql) },
@@ -407,12 +442,12 @@ export function changesSince(
 
 // One task by sid, for GET /api/v1/tasks/{sid}: a search hit or a link to a
 // task outside the device's scope.
-export function taskBySid(sql: SqlDb, sid: string): { id: string; data: FeedTask; field_clock: Record<string, number> } | null {
+export function taskBySid(sql: SqlDb, sid: string, timeZone: string): { id: string; data: FeedTask; field_clock: Record<string, number> } | null {
   const m = sql
     .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = 'task' AND sid = ?", sid)
     .toArray()[0];
   if (!m?.graph_id) return null;
-  const t = buildTasks(sql, [m.graph_id]).get(m.graph_id);
+  const t = buildTasks(sql, [m.graph_id], timeZone).get(m.graph_id);
   return t ? { id: sid, ...t } : null;
 }
 
