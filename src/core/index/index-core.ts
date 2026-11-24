@@ -115,8 +115,10 @@ export function selectDueScanLists(
 const UPSERT_TASK_SQL = (() => {
   const cols = TASK_COLUMNS.join(", ");
   const placeholders = TASK_COLUMNS.map(() => "?").join(", ");
+  // has_checklist comes from an expanded checklistItems; a delta row or a bare
+  // write response has none, and must not erase what the scan found.
   const updates = TASK_COLUMNS.filter((c) => c !== "task_id")
-    .map((c) => `${c}=excluded.${c}`)
+    .map((c) => (c === "has_checklist" ? `${c}=COALESCE(excluded.${c}, tasks.${c})` : `${c}=excluded.${c}`))
     .join(", ");
   // The WHERE keeps an older copy from overwriting a newer one: a delta page
   // fetched before an MCP write-through landed must not revert it (the write's
@@ -771,6 +773,13 @@ export class IndexCore implements TokenProvider {
       "UPDATE tasks SET checklist_synced_at = -abs(checklist_synced_at) WHERE task_id = ? AND checklist_synced_at IS NOT NULL",
       taskId,
     );
+  }
+
+  // The task's cached steps no longer match Graph's (a copy-move re-keyed the
+  // source's rows onto the copy, whose step IDs differ): report it as not
+  // fetched until the scan replaces them.
+  forgetSubresources(taskId: string): void {
+    this.#sql.exec("UPDATE tasks SET checklist_synced_at = NULL WHERE task_id = ?", taskId);
   }
 
   // Drop a task's cached checklist rows (task deletion already cascades via
@@ -1851,22 +1860,30 @@ export class IndexCore implements TokenProvider {
         .exec<{ sid: string }>("SELECT sid FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
         .toArray()[0];
       if (existing) return false;
-      this.#sql.exec("INSERT INTO entity_map (kind, sid, graph_id, created_ms) VALUES (?, ?, ?, ?)", kind, sid, graphId, Date.now());
+      this.#sql.exec(
+        "INSERT INTO entity_map (kind, sid, graph_id, created_ms, app_owned) VALUES (?, ?, ?, ?, 1)",
+        kind, sid, graphId, Date.now(),
+      );
       return true;
     });
   }
 
-  // When the mirror first saw each Graph ID (its entity_map row). The
-  // ambiguous-create recovery for lists uses it: a list first seen after the
-  // earlier attempt began, or not seen at all yet, may be what that attempt
-  // made. IDs the mirror has never seen are absent from the result.
-  firstSeenMs(kind: string, graphIds: string[]): Record<string, number> {
-    const out: Record<string, number> = {};
+  // For the ambiguous-create recovery: when the mirror first saw each Graph
+  // ID (its entity_map row), and whether its sid was chosen by the app (set by
+  // reserveSid/adoptSid). An entity that already carries an app's sid was made
+  // by some other mutation and is never a candidate. IDs the mirror has never
+  // seen are absent from the result.
+  createCandidates(kind: string, graphIds: string[]): Record<string, { first_seen_ms: number; app_owned: boolean }> {
+    const out: Record<string, { first_seen_ms: number; app_owned: boolean }> = {};
     for (const id of graphIds) {
       const row = this.#sql
-        .exec<{ created_ms: number }>("SELECT created_ms FROM entity_map WHERE kind = ? AND graph_id = ?", kind, id)
+        .exec<{ created_ms: number; app_owned: number }>(
+          "SELECT created_ms, app_owned FROM entity_map WHERE kind = ? AND graph_id = ?",
+          kind,
+          id,
+        )
         .toArray()[0];
-      if (row) out[id] = row.created_ms;
+      if (row) out[id] = { first_seen_ms: row.created_ms, app_owned: row.app_owned === 1 };
     }
     return out;
   }
@@ -1885,14 +1902,17 @@ export class IndexCore implements TokenProvider {
         .toArray()[0];
       if (taken) return taken.graph_id === graphId;
       const minted = this.#sql
-        .exec<{ sid: string }>("SELECT sid FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
+        .exec<{ sid: string; app_owned: number }>("SELECT sid, app_owned FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
         .toArray()[0];
+      // Another mutation's sid is never retired: that would delete an entity
+      // the app made from under it.
+      if (minted?.app_owned === 1) return false;
       const now = Date.now();
       if (minted) {
         this.#sql.exec("UPDATE entity_map SET graph_id = NULL WHERE kind = ? AND sid = ?", kind, minted.sid);
         this.#sql.exec("UPDATE field_clock SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
       }
-      this.#sql.exec("INSERT INTO entity_map (kind, sid, graph_id, created_ms) VALUES (?, ?, ?, ?)", kind, sid, graphId, now);
+      this.#sql.exec("INSERT INTO entity_map (kind, sid, graph_id, created_ms, app_owned) VALUES (?, ?, ?, ?, 1)", kind, sid, graphId, now);
       if (!minted) return true;
       const relog = (k: string, s: string, deleted: 0 | 1, listSid: string | null) => {
         this.#sql.exec("DELETE FROM sync_log WHERE kind = ? AND sid = ?", k, s);

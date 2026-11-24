@@ -2,9 +2,14 @@
 // 5.4): a create whose earlier attempt may have reached Graph adopts what that
 // attempt made instead of making a second one.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { GraphError } from "../src/core/graph/client";
+import { IndexCore } from "../src/core/index/index-core";
 import type { OpsContext } from "../src/core/ops/context";
 import { syncExecutor } from "../src/core/sync/executor";
-import type { ExecInput } from "../src/core/sync/mutations";
+import { applyBatch, type ExecInput } from "../src/core/sync/mutations";
+import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
+import { stateStore } from "../src/hosts/node/state-store";
+import { storeOf } from "../test/_mutation-checks";
 
 const S = "0190a1b2c3d47e5f8a9b0000000000ff";
 const ATTEMPT = Date.parse("2026-11-24T12:00:00Z");
@@ -23,8 +28,10 @@ function fakeCtx(opts: { lists?: Array<{ id: string; displayName: string }>; fir
       },
     },
     index: {
-      firstSeenMs: async (_kind: string, ids: string[]) =>
-        Object.fromEntries(ids.filter((id) => opts.firstSeen?.[id] !== undefined).map((id) => [id, opts.firstSeen![id]])),
+      createCandidates: async (_kind: string, ids: string[]) =>
+        Object.fromEntries(
+          ids.filter((id) => opts.firstSeen?.[id] !== undefined).map((id) => [id, { first_seen_ms: opts.firstSeen![id], app_owned: false }]),
+        ),
       reserveSid: async (...a: unknown[]) => {
         reserved.push(a);
         return true;
@@ -120,5 +127,107 @@ describe("link.create carries its sid as the externalId", () => {
     const { ctx, posts } = fakeCtx({ links: [{ id: "K-other", applicationName: "x", externalId: "someone-else" }] });
     expect(await syncExecutor(ctx)(linkCreate(ATTEMPT))).toEqual({ ok: true, graphId: "K-new" });
     expect(["created once", posts.length]).toEqual(["created once", 1]);
+  });
+});
+
+// The same, on a real index: what the recovery may and may not adopt.
+function realCore() {
+  const db = openDatabase(":memory:");
+  const state = stateStore(db);
+  const c = new IndexCore({ sql: sqlDb(db), transact: transactor(db), state, alarms: state, env: { TIMEZONE: "UTC" } as never });
+  c.bootstrap();
+  c.upsertList({ id: "L1", displayName: "One" } as never);
+  return c;
+}
+const pull = (c: IndexCore, cursor: string | null) => {
+  const r = c.syncChanges({ cursor });
+  if (!r.ok) throw new Error(r.error);
+  return r.page;
+};
+
+describe("recovery never takes another mutation's entity", () => {
+  const S1 = "0190aaaa-0000-7000-8000-000000000001";
+  const S2 = "0190aaaa-0000-7000-8000-000000000002";
+
+  it("two same-name list creates, the second failing before Graph: both lists exist, each under its own sid", async () => {
+    const c = realCore();
+    const graphLists: Array<{ id: string; displayName: string }> = [{ id: "L1", displayName: "One" }];
+    let posts = 0;
+    let failNext = false;
+    const ctx = {
+      env: { TIMEZONE: "UTC" },
+      graph: {
+        getAllPages: async () => ({ status: 200, items: graphLists }),
+        postJson: async (_u: string, body: { displayName: string }) => {
+          posts++;
+          if (failNext) {
+            failNext = false;
+            throw new GraphError(503, "service unavailable"); // didn't commit
+          }
+          const l = { id: `G${posts}`, displayName: body.displayName };
+          graphLists.push(l);
+          return l;
+        },
+      },
+      index: c,
+      writes: { run: (fn: () => Promise<unknown>) => fn() },
+    } as unknown as OpsContext;
+    const exec = syncExecutor(ctx);
+    const store = storeOf(c);
+    const at = new Date().toISOString();
+    const m1 = { id: "m1", at, op: "list.create", sid: S1, fields: { name: "Untitled list" } };
+    const m2 = { id: "m2", at, op: "list.create", sid: S2, fields: { name: "Untitled list" } };
+    await applyBatch(store, exec, { mutations: [m1] }, "p");
+    failNext = true;
+    await applyBatch(store, exec, { mutations: [m2] }, "p");
+    const retry = await applyBatch(store, exec, { mutations: [m2] }, "p");
+    expect(["retry applied", retry.results[0].status]).toEqual(["retry applied", "applied"]);
+    expect(["two lists in Graph", graphLists.filter((l) => l.displayName === "Untitled list").length]).toEqual(["two lists in Graph", 2]);
+    const sids = c.resolveSids([{ kind: "list", sid: S1 }, { kind: "list", sid: S2 }]);
+    expect(["S1 still live", sids[`list:${S1}`]]).toEqual(["S1 still live", { graph_id: "G1", live: true }]);
+    expect(["S2 on the new list", sids[`list:${S2}`]]).toEqual(["S2 on the new list", { graph_id: "G3", live: true }]);
+  });
+
+  it("adoptSid refuses to retire a sid the app chose", () => {
+    const c = realCore();
+    expect(c.reserveSid("list", S1, "G1")).toBe(true);
+    c.upsertList({ id: "G1", displayName: "x" } as never);
+    expect(["second sid refused", c.adoptSid("list", S2, "G1")]).toEqual(["second sid refused", false]);
+    expect(c.resolveSids([{ kind: "list", sid: S1 }])[`list:${S1}`]).toEqual({ graph_id: "G1", live: true });
+  });
+});
+
+describe("subresources_complete reaches clients", () => {
+  it("the first fetch of a task's sub-resources is logged even when has_checklist doesn't change", () => {
+    const c = realCore();
+    c.upsertTask({ id: "T", title: "t", status: "notStarted", lastModifiedDateTime: "2026-11-24T10:00:00Z" } as never, "L1");
+    const item = { id: "S1", displayName: "step", isChecked: false, createdDateTime: "2026-11-24T10:00:01Z" };
+    c.upsertChecklistItem("T", "L1", item as never); // has_checklist = 1, marker still NULL
+    const p = pull(c, null);
+    const before = p.changes.find((x) => x.kind === "task") as unknown as { data: { subresources_complete: boolean } };
+    expect(["before the scan", before.data.subresources_complete]).toEqual(["before the scan", false]);
+    c.replaceChecklistItems("T", "L1", [item] as never);
+    const after = pull(c, p.cursor).changes.find((x) => x.kind === "task") as unknown as { data: { subresources_complete: boolean } } | undefined;
+    expect(["after the scan", after?.data.subresources_complete]).toEqual(["after the scan", true]);
+  });
+
+  it("a delta copy without checklistItems keeps has_checklist and isn't re-sent", () => {
+    const c = realCore();
+    const T = { id: "T", title: "t", status: "notStarted", lastModifiedDateTime: "2026-11-24T10:00:00Z" };
+    c.upsertTask(T as never, "L1");
+    c.replaceChecklistItems("T", "L1", []);
+    const p = pull(c, null);
+    c.upsertTask(T as never, "L1"); // the delta echo
+    expect(["echo logs nothing", pull(c, p.cursor).changes.length]).toEqual(["echo logs nothing", 0]);
+  });
+
+  it("a copy-move's re-keyed steps report not-fetched until the scan", () => {
+    const c = realCore();
+    c.upsertTask({ id: "T", title: "t", status: "notStarted", lastModifiedDateTime: "2026-11-24T10:00:00Z" } as never, "L1");
+    c.replaceChecklistItems("T", "L1", []);
+    const p = pull(c, null);
+    c.forgetSubresources("T");
+    const t = pull(c, p.cursor).changes.find((x) => x.kind === "task") as unknown as { data: { subresources_complete: boolean } } | undefined;
+    expect(["after forget", t?.data.subresources_complete]).toEqual(["after forget", false]);
   });
 });

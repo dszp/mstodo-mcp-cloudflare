@@ -469,6 +469,44 @@ const MIGRATIONS: Migration[] = [
       END`);
     },
   },
+  {
+    version: 10,
+    apply: (sql) => {
+      // Which sids the app chose (reserveSid / adoptSid). adoptSid never
+      // retires one, and the ambiguous-create recovery never adopts an entity
+      // that carries one: it belongs to another mutation (section 5.4). Rows
+      // from before this migration count as minted.
+      const cols = sql.exec<{ name: string }>("PRAGMA table_info(entity_map)").toArray().map((c) => c.name);
+      if (!cols.includes("app_owned")) sql.exec("ALTER TABLE entity_map ADD COLUMN app_owned INTEGER NOT NULL DEFAULT 0");
+
+      // v7's update trigger, plus the sub-resource marker becoming known or
+      // unknown: subresources_complete in the feed flips then, and without a
+      // log row a client would keep the old value (docs/SYNC-API.md 4.2).
+      // Same statement shape as v5/v7.
+      const NOW = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+      const sid = "(SELECT sid FROM entity_map WHERE kind = 'task' AND graph_id = new.task_id)";
+      const listSid = "(SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id = new.list_id)";
+      const SYNCED = [
+        "task_id", "list_id", "status", "title", "body_plain", "body_content", "body_type",
+        "created_at", "due_at", "completed_at", "modified_at", "start_at", "reminder_at",
+        "is_reminder_on", "importance", "has_checklist", "has_attachments", "categories_json",
+        "recurrence_json", "committed_day", "committed_order", "order_datetime", "postponed_day",
+      ];
+      const when = [
+        ...SYNCED.map((c) => `old.${c} IS NOT new.${c}`),
+        "(old.checklist_synced_at IS NULL) IS NOT (new.checklist_synced_at IS NULL)",
+      ].join(" OR ");
+      sql.exec("DROP TRIGGER IF EXISTS tasks_sync_au");
+      sql.exec(`
+        CREATE TRIGGER tasks_sync_au AFTER UPDATE ON tasks
+          WHEN ${when} BEGIN
+          DELETE FROM sync_log WHERE kind = 'task' AND sid = ${sid};
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            SELECT 'task', ${sid}, 0, ${listSid}, ${NOW} WHERE ${sid} IS NOT NULL;
+        END
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

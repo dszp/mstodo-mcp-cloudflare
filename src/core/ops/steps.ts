@@ -55,9 +55,12 @@ export async function findCreatedSteps(
   input: { list_id: string; task_id: string; title: string; since_ms: number; sid?: string },
 ): Promise<ChecklistItem[]> {
   const items = await listChecklistItems(ctx.graph, input.list_id, input.task_id);
-  const found = items.filter(
+  const titled = items.filter(
     (i) => i.displayName === input.title && !!i.createdDateTime && Date.parse(i.createdDateTime) >= input.since_ms - 5_000,
   );
+  // A step another mutation made (its sid was the app's) is not this one's.
+  const owned = titled.length ? await ctx.index.createCandidates("step", titled.map((i) => i.id)) : {};
+  const found = titled.filter((i) => !owned[i.id]?.app_owned);
   if (found.length === 1) {
     await reserveSid(ctx, "step", input.sid, found[0].id);
     await cacheUpsert(ctx, input.task_id, input.list_id, found[0]);

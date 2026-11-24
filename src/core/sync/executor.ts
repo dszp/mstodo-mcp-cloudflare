@@ -367,7 +367,7 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
 // move is not reported failed, since a retry would make another copy.
 async function finishCopyMove(ctx: OpsContext, sourceId: string, from: string, to: string, copyId: string): Promise<void> {
   await bestEffort("index_move_task_failed", { task_id: sourceId }, () => ctx.index.moveTask(sourceId, to, copyId));
-  await bestEffort("index_mark_checklist_dirty_failed", { task_id: copyId }, () => ctx.index.markChecklistDirty(copyId));
+  await bestEffort("index_forget_subresources_failed", { task_id: copyId }, () => ctx.index.forgetSubresources(copyId));
   let gone = false;
   try {
     const r = await deleteTask(ctx, { list_id: from, task_id: sourceId });

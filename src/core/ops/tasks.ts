@@ -175,13 +175,16 @@ export function createTask(
     // Committed: nothing below may fail the op.
     await reserveSid(ctx, "task", input.sid, task.id);
     await upsertTask(ctx, task, list_id);
-    // A task this create just made has no steps, links or attachments, so its
-    // sub-resources are known now: the scan has nothing to add, and a client
-    // isn't sent the task a second time when it would have finished.
-    await bestEffort("index_mark_subresources_failed", { task_id: task.id }, () =>
-      ctx.index.replaceChecklistItems(task.id, list_id, []),
-    );
     const link_rules = await linkRulesAfterWrite(ctx, list_id, async () => task);
+    // A task this create just made has no steps, links or attachments, so its
+    // sub-resources are known now, unless a link rule may have added a link
+    // (the rules write to Graph only); then the scan finds it.
+    const ruleTouched = link_rules.created.length + link_rules.failed.length > 0 || link_rules.error !== undefined;
+    if (!ruleTouched) {
+      await bestEffort("index_mark_subresources_failed", { task_id: task.id }, () =>
+        ctx.index.replaceChecklistItems(task.id, list_id, []),
+      );
+    }
     return ok({ list_id, task, link_rules });
   });
 }
@@ -333,7 +336,10 @@ export async function findCreatedTasks(
     res = await ctx.graph.getAllPages(tasksUrl(input.list_id), TodoTaskSchema);
   }
   const items = res.status === 200 ? (res.items as TodoTask[]) : [];
-  const found = items.filter((t) => t.title === input.title && after(t.createdDateTime, input.since_ms));
+  const titled = items.filter((t) => t.title === input.title && after(t.createdDateTime, input.since_ms));
+  // A task another mutation made (its sid was the app's) is not this one's.
+  const owned = titled.length ? await ctx.index.createCandidates("task", titled.map((t) => t.id)) : {};
+  const found = titled.filter((t) => !owned[t.id]?.app_owned);
   if (found.length === 1) {
     await reserveSid(ctx, "task", input.sid, found[0].id);
     await upsertTask(ctx, found[0], input.list_id);
@@ -624,7 +630,7 @@ async function copyThenDelete(
   // re-fetch. If the source survived, the copy is a second task with its own row.
   if (sourceDeleted) {
     await bestEffort("index_move_task_failed", { task_id }, () => ctx.index.moveTask(task_id, to_list_id, newId));
-    await bestEffort("index_mark_checklist_dirty_failed", { task_id: newId }, () => ctx.index.markChecklistDirty(newId));
+    await bestEffort("index_forget_subresources_failed", { task_id: newId }, () => ctx.index.forgetSubresources(newId));
   }
   await upsertTask(ctx, newTask, to_list_id);
 
