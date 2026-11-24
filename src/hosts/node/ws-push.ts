@@ -37,23 +37,41 @@ export class SocketHub implements ChangeNotifier {
     for (const ws of [...this.#sockets.keys()]) this.#endForReauth(ws);
   }
 
+  // Each socket has its own expiry timer; nothing to sweep.
+  sweep(): void {}
+
   // Serves the socket path's upgrades on `server`. `authorize` runs the same
   // checks as any /api/v1 request (audience-checked token validation plus the
   // grant gate) and returns null to refuse; the upgrade never reaches the
   // fetch-style handler, so the request rewrite and body caps don't apply.
   attach(
     server: Pick<Server, "on">,
-    opts: { authorize: (req: IncomingMessage) => Promise<SocketGrant | null>; cursor: () => string | Promise<string> },
+    // `cursor` is read synchronously after the socket is registered, so a
+    // change landing during the upgrade is either in the hello or announced.
+    opts: { authorize: (req: IncomingMessage) => Promise<SocketGrant | null>; cursor: () => string },
   ): void {
     const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_CLIENT_FRAME });
     server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+      // Node's server drops its own error listener before emitting
+      // "upgrade"; without one, a client resetting the connection while the
+      // token is checked is an uncaught exception that ends the process.
+      const onError = () => socket.destroy();
+      socket.on("error", onError);
       const path = new URL(req.url ?? "/", "http://localhost").pathname;
       if (path !== SOCKET_PATH) return refuse(socket, 404, "Not Found");
       opts.authorize(req).then(
-        async (grant) => {
+        (grant) => {
           if (!grant || !(grant.exp > Date.now())) return refuse(socket, 401, "Unauthorized");
-          const cursor = await opts.cursor();
-          wss.handleUpgrade(req, socket, head, (ws) => this.#add(ws, grant, cursor));
+          if (socket.destroyed) return;
+          socket.removeListener("error", onError);
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            try {
+              this.#add(ws, grant, opts.cursor);
+            } catch (e) {
+              log.warn("sync_socket_open_failed", { error: String(e) });
+              ws.terminate();
+            }
+          });
         },
         (e) => {
           log.warn("sync_socket_auth_failed", { error: String(e) });
@@ -63,17 +81,18 @@ export class SocketHub implements ChangeNotifier {
     });
   }
 
-  #add(ws: WebSocket, grant: SocketGrant, cursor: string): void {
+  #add(ws: WebSocket, grant: SocketGrant, cursor: () => string): void {
     const ttl = Math.min(grant.exp - Date.now(), MAX_SOCKET_LIFETIME_MS);
     const timer = setTimeout(() => this.#endForReauth(ws), Math.max(0, ttl));
     timer.unref();
     this.#sockets.set(ws, timer);
     ws.on("message", (data, isBinary) => {
       if (!isBinary && data.toString() === "ping") ws.send("pong");
+      else ws.close(1008, "only ping is accepted");
     });
     ws.on("close", () => this.#drop(ws));
     ws.on("error", () => this.#drop(ws));
-    ws.send(JSON.stringify({ type: "hello", cursor }));
+    ws.send(JSON.stringify({ type: "hello", cursor: cursor() }));
   }
 
   #drop(ws: WebSocket): void {

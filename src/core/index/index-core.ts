@@ -1948,12 +1948,21 @@ export class IndexCore implements TokenProvider {
     if (await this.#state.get(REAUTH_KEY)) return;
     const midCycle = await this.runSyncCycle();
     const intervalMs = this.#intervalMs();
-    const next = midCycle
-      ? MID_CYCLE_REARM_MS
-      : this.#scanBacklog
-        ? Math.min(intervalMs, BACKFILL_REARM_MS)
-        : intervalMs;
+    // A webhook that arrived while this cycle ran armed the alarm for now, and
+    // the setAlarm below would push it back a whole interval: run again at once
+    // for any list it named.
+    const next =
+      this.#hotLists.size > 0
+        ? 1
+        : midCycle
+          ? MID_CYCLE_REARM_MS
+          : this.#scanBacklog
+            ? Math.min(intervalMs, BACKFILL_REARM_MS)
+            : intervalMs;
     await this.#alarms.setAlarm(Date.now() + next);
+    // Ends push sockets whose token expired even when nothing changed, since
+    // an idle socket is otherwise only checked when a change goes out.
+    this.#notifier?.sweep();
   }
 
   // Force a re-baseline: drop rows + delta tokens (one list or everything) and
@@ -2156,7 +2165,11 @@ export class IndexCore implements TokenProvider {
       const r = await this.#syncResource(`tasks:${listId}`, tasksDeltaUrl(listId), remaining);
       remaining -= r.pagesFetched;
       anyOutstanding ||= r.midCycle;
-      this.announceChanges();
+      try {
+        this.announceChanges();
+      } catch (e) {
+        log.warn("sync_announce_failed", { error: String(e) });
+      }
     }
 
     // 4. Background My Day Substrate scan — only when nothing is still draining

@@ -51,13 +51,14 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // The protocol carries only pings (answered above without waking the
-  // object). Anything else is ignored, except that it's a chance to end an
-  // expired socket; oversize frames close the socket.
+  // The protocol carries only pings, answered by the auto-response without
+  // waking the object. Any other frame is a protocol violation; closing on it
+  // stops a client from keeping the object awake.
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const size = typeof message === "string" ? message.length : message.byteLength;
     if (size > MAX_CLIENT_FRAME) return ws.close(1009, "message too big");
-    if (expired(ws)) endForReauth(ws);
+    if (expired(ws)) return endForReauth(ws);
+    ws.close(1008, "only ping is accepted");
   }
 
   webSocketClose(ws: WebSocket, code: number) {
@@ -175,6 +176,9 @@ function socketNotifier(ctx: DurableObjectState): ChangeNotifier {
     },
     closeAll() {
       for (const ws of ctx.getWebSockets()) endForReauth(ws);
+    },
+    sweep() {
+      for (const ws of ctx.getWebSockets()) if (expired(ws)) endForReauth(ws);
     },
   };
 }
