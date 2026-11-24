@@ -100,6 +100,13 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   markReauthRequired(...a: Parameters<IndexCore["markReauthRequired"]>) { return this.#core.markReauthRequired(...a); }
   moveTask(...a: Parameters<IndexCore["moveTask"]>) { return this.#core.moveTask(...a); }
   syncCursor(...a: Parameters<IndexCore["syncCursor"]>) { return this.#core.syncCursor(...a); }
+  adoptSid(...a: Parameters<IndexCore["adoptSid"]>) { return this.#core.adoptSid(...a); }
+  fieldClocks(...a: Parameters<IndexCore["fieldClocks"]>) { return this.#core.fieldClocks(...a); }
+  mutationAbandon(...a: Parameters<IndexCore["mutationAbandon"]>) { return this.#core.mutationAbandon(...a); }
+  mutationBegin(...a: Parameters<IndexCore["mutationBegin"]>) { return this.#core.mutationBegin(...a); }
+  mutationFinish(...a: Parameters<IndexCore["mutationFinish"]>) { return this.#core.mutationFinish(...a); }
+  pruneMutations(...a: Parameters<IndexCore["pruneMutations"]>) { return this.#core.pruneMutations(...a); }
+  resolveSids(...a: Parameters<IndexCore["resolveSids"]>) { return this.#core.resolveSids(...a); }
   syncChanges(...a: Parameters<IndexCore["syncChanges"]>) { return this.#core.syncChanges(...a); }
   syncInfo(...a: Parameters<IndexCore["syncInfo"]>) { return this.#core.syncInfo(...a); }
   syncSearch(...a: Parameters<IndexCore["syncSearch"]>) { return this.#core.syncSearch(...a); }
