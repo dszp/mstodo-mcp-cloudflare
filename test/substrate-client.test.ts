@@ -225,7 +225,7 @@ describe("SubstrateClient.listFolders / listFolderGroups (sidebar appearance)", 
 
   it("asks for only the appearance fields and parses them, keeping theme values as sent", async () => {
     const urls = stubPages([
-      { body: { value: [{ Id: DEST, OrderDateTime: "2026-11-20T10:00:00Z", ParentFolderGroupId: "G1", ThemeColor: "blue", ThemeBackground: { Image: "x" } }, { Name: "no Id" }] } },
+      { body: { value: [{ Id: DEST, OrderDateTime: "2026-11-20T10:00:00Z", ParentFolderGroupId: "G1", ThemeColor: "blue", ThemeBackground: { Image: "x" } }] } },
     ]);
     const folders = await new SubstrateClient(tokens, null).listFolders();
     expect(urls).toEqual([`${BASE}/taskfolders?$select=Id,OrderDateTime,ParentFolderGroupId,ThemeColor,ThemeBackground`]);
@@ -253,6 +253,45 @@ describe("SubstrateClient.listFolders / listFolderGroups (sidebar appearance)", 
   it("refuses a next link on another host before sending the token", async () => {
     const urls = stubPages([{ body: { value: [], "@odata.nextLink": "https://evil.example.com/steal" } }]);
     await expect(new SubstrateClient(tokens, null).listFolderGroups()).rejects.toMatchObject({ message: "substrate_url_host_rejected" });
+    expect(urls).toHaveLength(1);
+  });
+
+  it("fails the read on an envelope it doesn't recognize", async () => {
+    stubPages([{ body: { groups: [{ Id: "G1" }] } }]);
+    await expect(new SubstrateClient(tokens, null).listFolderGroups()).rejects.toMatchObject({ message: "substrate_unexpected_shape" });
+  });
+
+  it("fails the read when one item doesn't parse, instead of dropping it", async () => {
+    stubPages([{ body: { value: [{ Id: "G1", Name: "ok" }, { Name: "no Id" }] } }]);
+    await expect(new SubstrateClient(tokens, null).listFolderGroups()).rejects.toMatchObject({ message: "substrate_unexpected_item" });
+  });
+
+  it("accepts an empty collection", async () => {
+    stubPages([{ body: { value: [] } }]);
+    expect(await new SubstrateClient(tokens, null).listFolderGroups()).toEqual([]);
+  });
+
+  it("normalizes an OrderDateTime sent as { DateTime, TimeZone } to an instant string", async () => {
+    stubPages([
+      { body: { value: [
+        { Id: "A", OrderDateTime: { DateTime: "2026-11-23T23:45:45.623", TimeZone: "UTC" } },
+        { Id: "B", OrderDateTime: { DateTime: "2026-11-23T23:45:47Z", TimeZone: "UTC" } },
+        { Id: "C", OrderDateTime: "2026-11-23T23:45:48Z" },
+        { Id: "D", OrderDateTime: null },
+      ] } },
+    ]);
+    const folders = await new SubstrateClient(tokens, null).listFolders();
+    expect(folders.map((f) => f.OrderDateTime)).toEqual([
+      "2026-11-23T23:45:45.623Z",
+      "2026-11-23T23:45:47Z",
+      "2026-11-23T23:45:48Z",
+      null,
+    ]);
+  });
+
+  it("with fast set, doesn't retry a 429", async () => {
+    const urls = stubPages([{ status: 429, body: {} }, { body: { value: [] } }]);
+    await expect(new SubstrateClient(tokens, null).listFolderGroups({ fast: true })).rejects.toMatchObject({ status: 429 });
     expect(urls).toHaveLength(1);
   });
 

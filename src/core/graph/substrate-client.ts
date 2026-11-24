@@ -254,10 +254,22 @@ export function extractSubtasks(json: unknown): SubstrateSubtask[] {
 // the sidebar position (null for the default list), ParentFolderGroupId the
 // Id of the list group holding it. ThemeColor and ThemeBackground have no
 // documented format, so they are kept as whatever Substrate sends.
+// A sidebar position: an ISO string, or a { DateTime, TimeZone } object like
+// the task dates above, normalized to one string. "UTC" without a designator
+// gets a Z, so the value still parses as the same instant.
+const SidebarOrder = DateTimeTimeZoneLike.transform((v): string | null => {
+  if (v == null) return null;
+  if (typeof v === "string") return v;
+  const dt = typeof v.DateTime === "string" ? v.DateTime : null;
+  if (dt === null) return null;
+  const utc = (v.TimeZone ?? "UTC").toUpperCase() === "UTC";
+  return utc && !/(Z|[+-]\d\d:?\d\d)$/.test(dt) ? `${dt}Z` : dt;
+}).optional();
+
 export const SubstrateFolderSchema = z
   .object({
     Id: z.string(),
-    OrderDateTime: z.string().nullable().optional(),
+    OrderDateTime: SidebarOrder,
     ParentFolderGroupId: z.string().nullable().optional(),
     ThemeColor: z.unknown().optional(),
     ThemeBackground: z.unknown().optional(),
@@ -270,7 +282,7 @@ export const SubstrateFolderGroupSchema = z
   .object({
     Id: z.string(),
     Name: z.string().nullable().optional(),
-    OrderDateTime: z.string().nullable().optional(),
+    OrderDateTime: SidebarOrder,
   })
   .passthrough();
 export type SubstrateFolderGroup = z.infer<typeof SubstrateFolderGroupSchema>;
@@ -281,17 +293,18 @@ const FOLDER_SELECT = "Id,OrderDateTime,ParentFolderGroupId,ThemeColor,ThemeBack
 // spending the sync cycle's subrequests on it.
 const MAX_COLLECTION_PAGES = 10;
 
-// Items of one collection page (value / Value / bare array), each parsed
-// leniently: a malformed item is skipped.
-function extractItems<T>(json: unknown, schema: z.ZodType<T>): T[] {
-  const raw: unknown = Array.isArray(json) ? json : isRecord(json) ? (json.value ?? json.Value ?? []) : [];
-  if (!Array.isArray(raw)) return [];
-  const out: T[] = [];
-  for (const item of raw) {
+// Items of one collection page (value / Value / bare array). Strict, unlike
+// extractTasks: the caller replaces its whole copy with the result (and
+// deletes what is missing), so an envelope it doesn't recognize, or an item
+// that doesn't parse, fails the read instead of shrinking it.
+function extractItems<T>(json: unknown, schema: z.ZodType<T, unknown>): T[] {
+  const raw: unknown = Array.isArray(json) ? json : isRecord(json) ? (json.value ?? json.Value) : undefined;
+  if (!Array.isArray(raw)) throw new SubstrateError(0, "substrate_unexpected_shape");
+  return raw.map((item) => {
     const parsed = schema.safeParse(item);
-    if (parsed.success) out.push(parsed.data);
-  }
-  return out;
+    if (!parsed.success) throw new SubstrateError(0, "substrate_unexpected_item", parsed.error.issues[0]?.path.join("."));
+    return parsed.data;
+  });
 }
 
 function nextLinkOf(json: unknown): string | null {
@@ -403,29 +416,35 @@ export class SubstrateClient {
   // Every task folder (list) with its sidebar appearance. Asks for only the
   // fields the mirror needs; if Substrate refuses the $select (a 400, as Graph
   // does for lists), asks again without it.
-  async listFolders(): Promise<SubstrateFolder[]> {
+  // `fast` skips 429 retries, so a background read never sleeps on a
+  // throttled mailbox.
+  async listFolders(opts?: { fast?: boolean }): Promise<SubstrateFolder[]> {
     try {
-      return await this.#collect(`${SUBSTRATE_BASE}/taskfolders?$select=${FOLDER_SELECT}`, SubstrateFolderSchema);
+      return await this.#collect(`${SUBSTRATE_BASE}/taskfolders?$select=${FOLDER_SELECT}`, SubstrateFolderSchema, opts);
     } catch (e) {
       if (!(e instanceof SubstrateError) || e.status !== 400) throw e;
       log.warn("substrate_select_refused", { resource: "taskfolders" });
-      return this.#collect(`${SUBSTRATE_BASE}/taskfolders`, SubstrateFolderSchema);
+      return this.#collect(`${SUBSTRATE_BASE}/taskfolders`, SubstrateFolderSchema, opts);
     }
   }
 
   // Every sidebar list group.
-  async listFolderGroups(): Promise<SubstrateFolderGroup[]> {
-    return this.#collect(`${SUBSTRATE_BASE}/foldergroups`, SubstrateFolderGroupSchema);
+  async listFolderGroups(opts?: { fast?: boolean }): Promise<SubstrateFolderGroup[]> {
+    return this.#collect(`${SUBSTRATE_BASE}/foldergroups`, SubstrateFolderGroupSchema, opts);
   }
 
   // GETs a collection and follows @odata.nextLink (host-pinned by
   // #fetchWithRetry) up to MAX_COLLECTION_PAGES. A delta link at the end is
   // ignored: the mirror re-reads the whole collection each time.
-  async #collect<T>(url: string, schema: z.ZodType<T>): Promise<T[]> {
+  async #collect<T>(
+    url: string,
+    schema: z.ZodType<T, unknown>,
+    opts?: { fast?: boolean },
+  ): Promise<T[]> {
     const out: T[] = [];
     let next: string | null = url;
     for (let page = 0; next && page < MAX_COLLECTION_PAGES; page++) {
-      const res = await this.#fetchWithRetry(next, "GET");
+      const res = await this.#fetchWithRetry(next, "GET", undefined, { retry429: !opts?.fast });
       const json = (await res.json()) as unknown;
       out.push(...extractItems(json, schema));
       next = nextLinkOf(json);
