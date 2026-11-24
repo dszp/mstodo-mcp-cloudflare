@@ -131,3 +131,13 @@ describe("write tools into an excluded list", () => {
     expect(h.calls.some((c) => c.method === "POST" && c.url === `${G}/LX/tasks`)).toBe(true);
   });
 });
+
+describe("create_list", () => {
+  it("pins the new list todo, so a name matching an excluded pattern can't exclude it", async () => {
+    const h = await harness([on("POST", G, (b) => json({ id: "LNEW", ...(b as Record<string, unknown>) }, 201))]);
+    await storeListsConfig(h.env, ListsConfigSchema.parse({ patterns: [{ pattern: "^Junk", type: "excluded" }] }));
+    expect(await h.call("create_list", { display_name: "Junk drawer" })).toMatchObject({ ok: true });
+    expect((await loadListsConfig(h.env)).overrides).toEqual({ LNEW: "todo" });
+    expect(h.syncOf("LNEW")).toBe("todo");
+  });
+});

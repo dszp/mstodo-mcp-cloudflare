@@ -12,12 +12,19 @@ const listUrl = (listId: string) => `${LISTS_URL}/${encodeURIComponent(listId)}`
 const upsertList = (ctx: OpsContext, list: TodoTaskList) =>
   bestEffort("index_upsert_list_failed", { list_id: list.id }, () => ctx.index.upsertList(list));
 
+// A list made here is meant to be used, so it is pinned todo (section 1.2).
+// Unpinned, its sync setting would come from name patterns, and a name that
+// matches an excluded pattern would purge the new list on the next cycle.
+const pinTodo = (ctx: OpsContext, list: TodoTaskList) =>
+  bestEffort("list_pin_failed", { list_id: list.id }, () => ctx.index.updateListsConfig({ overrides: { [list.id]: "todo" } }));
+
 // `sid`: the sync API's sid for the new list (see reserveSid).
 export function createList(ctx: OpsContext, input: { display_name: string; sid?: string }): Promise<ToolResult<{ list: TodoTaskList }>> {
   return ctx.writes.run(async () => {
     const list = await ctx.graph.postJson(LISTS_URL, { displayName: input.display_name }, TodoTaskListSchema);
     await reserveSid(ctx, "list", input.sid, list.id);
     await upsertList(ctx, list);
+    await pinTodo(ctx, list);
     return ok({ list });
   });
 }
@@ -45,6 +52,7 @@ export async function findCreatedLists(
   if (found.length === 1) {
     await reserveSid(ctx, "list", input.sid, found[0].id);
     await upsertList(ctx, found[0]);
+    await pinTodo(ctx, found[0]);
   }
   return found;
 }
