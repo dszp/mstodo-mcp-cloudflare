@@ -26,7 +26,7 @@ import { GraphClient, looksImmutable, GraphError, type TokenProvider } from "../
 import { followToTerminal, type DeltaRow } from "../graph/delta";
 import { encodeCursor, decodeCursor } from "../util/cursor";
 import { log } from "../log";
-import type { AlarmScheduler, AppEnv, SqlDb, SqlValue, StateStore, Transact } from "../ports";
+import type { AlarmScheduler, AppEnv, ChangeNotifier, SqlDb, SqlValue, StateStore, Transact } from "../ports";
 import {
   SCHEMA_DDL,
   TASK_COLUMNS,
@@ -244,8 +244,21 @@ export class IndexCore implements TokenProvider {
   readonly #transact: Transact;
   // Set by the sub-resource scan while more than one batch is waiting.
   #scanBacklog = false;
+  readonly #notifier: ChangeNotifier | null;
+  // The highest change-log seq announced to push clients.
+  #announcedSeq = -1;
+  // Lists named by webhooks since the last sync cycle; synced first.
+  #hotLists = new Set<string>();
 
-  constructor(deps: { sql: SqlDb; transact: Transact; state: StateStore; alarms: AlarmScheduler; env: AppEnv }) {
+  constructor(deps: {
+    sql: SqlDb;
+    transact: Transact;
+    state: StateStore;
+    alarms: AlarmScheduler;
+    env: AppEnv;
+    notifier?: ChangeNotifier;
+  }) {
+    this.#notifier = deps.notifier ?? null;
     this.#sql = deps.sql;
     this.#transact = deps.transact;
     this.#state = deps.state;
@@ -298,6 +311,7 @@ export class IndexCore implements TokenProvider {
   async revokeAllGrants(): Promise<string> {
     const epoch = await this.#newEpoch();
     log.warn("mcp_grants_revoked", {});
+    this.#notifier?.closeAll("revoked");
     return epoch;
   }
 
@@ -1575,6 +1589,26 @@ export class IndexCore implements TokenProvider {
   // -- Ops ------------------------------------------------------------------
   // ---- Client sync API, read side (docs/SYNC-API.md sections 4 and 14.1) ----
 
+  // The current position of the change log, for a push client's hello.
+  syncCursor(): string {
+    return currentCursor(this.#sql);
+  }
+
+  // Tells push clients the log moved, at most once per new seq. The hosts call
+  // it after every RPC (announcing() below); the sync cycle also calls it after
+  // each resource, so a webhook-driven edit doesn't wait for the whole walk.
+  announceChanges(): void {
+    if (!this.#notifier) return;
+    const cursor = currentCursor(this.#sql);
+    const seq = Number(cursor.slice(cursor.indexOf(".") + 1));
+    if (seq === this.#announcedSeq) return;
+    // The first check after a start only records where the log is: a client
+    // connecting gets the cursor in its hello, so nothing was missed.
+    const first = this.#announcedSeq < 0;
+    this.#announcedSeq = seq;
+    if (!first) this.#notifier.announce(cursor);
+  }
+
   // One page of the change feed. See change-feed.ts for the cursor rules.
   syncChanges(opts: { cursor?: string | null; limit?: number; scope?: string }): FeedResult {
     return changesSince(this.#sql, { ...opts, timeZone: this.#env.TIMEZONE });
@@ -1750,6 +1784,7 @@ export class IndexCore implements TokenProvider {
         continue;
       }
       accepted += 1;
+      this.#hotLists.add(rec.list_id);
       work.push({ listId: rec.list_id, taskId: item.resourceId, changeType: item.changeType });
     }
 
@@ -1925,12 +1960,21 @@ export class IndexCore implements TokenProvider {
     if (await this.#state.get(REAUTH_KEY)) return;
     const midCycle = await this.runSyncCycle();
     const intervalMs = this.#intervalMs();
-    const next = midCycle
-      ? MID_CYCLE_REARM_MS
-      : this.#scanBacklog
-        ? Math.min(intervalMs, BACKFILL_REARM_MS)
-        : intervalMs;
+    // A webhook that arrived while this cycle ran armed the alarm for now, and
+    // the setAlarm below would push it back a whole interval: run again at once
+    // for any list it named.
+    const next =
+      this.#hotLists.size > 0
+        ? 1
+        : midCycle
+          ? MID_CYCLE_REARM_MS
+          : this.#scanBacklog
+            ? Math.min(intervalMs, BACKFILL_REARM_MS)
+            : intervalMs;
     await this.#alarms.setAlarm(Date.now() + next);
+    // Ends push sockets whose token expired even when nothing changed, since
+    // an idle socket is otherwise only checked when a change goes out.
+    this.#notifier?.sweep();
   }
 
   // Force a re-baseline: drop rows + delta tokens (one list or everything) and
@@ -2024,6 +2068,7 @@ export class IndexCore implements TokenProvider {
     // cleans up when it safely can and otherwise leaves the orphans to lapse
     // (≤2.94d). It never blocks or fails the wipe below.
     await this.#teardownAllSubscriptions();
+    this.#notifier?.closeAll("reset");
     this.#substrateToken = null;
     this.#substrateUnavailable = false;
     // Kill every MCP grant paired with the outgoing account; the new account's
@@ -2119,13 +2164,24 @@ export class IndexCore implements TokenProvider {
     //    priority rotation guarantees the unvisited tail is covered on following
     //    cycles. Running out of budget is NOT "outstanding" work — only a
     //    resource that returned an outstanding nextLink is (set via r.midCycle).
+    // Lists a webhook just named go first, and each list's changes are
+    // announced as soon as they land (docs/SYNC-API.md section 7.2), so an
+    // edit reaches push clients without waiting for the rest of the walk.
     let remaining = maxTaskPages;
-    for (const listId of this.#listIdsByPriority()) {
+    const hot = [...this.#hotLists];
+    this.#hotLists.clear();
+    const order = this.#listIdsByPriority();
+    for (const listId of [...hot.filter((id) => order.includes(id)), ...order.filter((id) => !hot.includes(id))]) {
       if (skip(listId)) continue;
       if (remaining <= 0) break;
       const r = await this.#syncResource(`tasks:${listId}`, tasksDeltaUrl(listId), remaining);
       remaining -= r.pagesFetched;
       anyOutstanding ||= r.midCycle;
+      try {
+        this.announceChanges();
+      } catch (e) {
+        log.warn("sync_announce_failed", { error: String(e) });
+      }
     }
 
     // 4. Background My Day Substrate scan — only when nothing is still draining
@@ -2596,3 +2652,44 @@ type Promisified<T> = {
   [K in keyof T]: T[K] extends (...a: infer A) => infer R ? (...a: A) => Promise<Awaited<R>> : never;
 };
 export type IndexBackendSurface = Promisified<Omit<IndexCoreMethods, "alarm">>;
+
+// Wraps an IndexCore so every method call is followed by announceChanges():
+// one check of the log's top seq per RPC, so a burst of writes inside one call
+// sends one message. Both hosts route their RPC surface through it.
+export function announcing(core: IndexCore): IndexCore {
+  return new Proxy(core, {
+    get(target, key) {
+      const member: unknown = Reflect.get(target, key);
+      if (typeof member !== "function" || key === "announceChanges" || key === "constructor") {
+        return typeof member === "function" ? member.bind(target) : member;
+      }
+      return (...args: unknown[]) => {
+        const after = () => {
+          try {
+            target.announceChanges();
+          } catch (e) {
+            log.warn("sync_announce_failed", { error: String(e) });
+          }
+        };
+        let out: unknown;
+        try {
+          out = (member as (...a: unknown[]) => unknown).apply(target, args);
+        } catch (e) {
+          after();
+          throw e;
+        }
+        if (out instanceof Promise) {
+          return out.then(
+            (v) => (after(), v),
+            (e) => {
+              after();
+              throw e;
+            },
+          );
+        }
+        after();
+        return out;
+      };
+    },
+  });
+}

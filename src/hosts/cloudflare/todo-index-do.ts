@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import { IndexCore, type IndexCoreMethods } from "../../core/index/index-core";
+import { IndexCore, announcing, type IndexCoreMethods } from "../../core/index/index-core";
+import type { ChangeNotifier } from "../../core/ports";
 import { appEnv } from "./env";
 
 // Re-exported for existing importers; the implementations live in core.
@@ -15,12 +16,62 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.#core = new IndexCore({ sql: ctx.storage.sql, transact: (fn) => ctx.storage.transactionSync(fn), state: ctx.storage, alarms: ctx.storage, env: appEnv(env) });
+    this.#core = announcing(
+      new IndexCore({
+        sql: ctx.storage.sql,
+        transact: (fn) => ctx.storage.transactionSync(fn),
+        state: ctx.storage,
+        alarms: ctx.storage,
+        env: appEnv(env),
+        notifier: socketNotifier(ctx),
+      }),
+    );
+    // A "ping" text frame is answered by the runtime without waking the
+    // object, so idle sockets cost no duration (docs/SYNC-API.md section 7.1).
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     // Runs once per instance before any request is delivered.
     ctx.blockConcurrencyWhile(async () => this.#core.bootstrap());
   }
 
+  // Push socket upgrade (docs/SYNC-API.md section 7.2). Reached only through
+  // this object's stub: the Worker authenticates the request against the
+  // /api/v1 resource first and passes what it verified in x-sync-* headers.
+  async fetch(req: Request): Promise<Response> {
+    if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("expected a websocket upgrade", { status: 426 });
+    }
+    const exp = Number(req.headers.get("x-sync-exp"));
+    if (!Number.isFinite(exp) || exp <= Date.now()) return new Response("expired", { status: 401 });
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.ctx.acceptWebSocket(server);
+    const meta: SocketMeta = { exp: Math.min(exp, Date.now() + MAX_SOCKET_LIFETIME_MS), client: (req.headers.get("x-sync-client") ?? "").slice(0, 100) };
+    server.serializeAttachment(meta);
+    server.send(JSON.stringify({ type: "hello", cursor: this.#core.syncCursor() }));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // The protocol carries only pings, answered by the auto-response without
+  // waking the object. Any other frame is a protocol violation; closing on it
+  // stops a client from keeping the object awake.
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    const size = typeof message === "string" ? message.length : message.byteLength;
+    if (size > MAX_CLIENT_FRAME) return ws.close(1009, "message too big");
+    if (expired(ws)) return endForReauth(ws);
+    ws.close(1008, "only ping is accepted");
+  }
+
+  webSocketClose(ws: WebSocket, code: number) {
+    // Complete the close handshake (needed on older compatibility dates).
+    try {
+      ws.close(code === 1005 ? 1000 : code, "closing");
+    } catch {
+      // already closed
+    }
+  }
+
   alarm(...a: Parameters<IndexCore["alarm"]>) { return this.#core.alarm(...a); }
+  announceChanges(...a: Parameters<IndexCore["announceChanges"]>) { return this.#core.announceChanges(...a); }
   authState(...a: Parameters<IndexCore["authState"]>) { return this.#core.authState(...a); }
   clearChecklistItems(...a: Parameters<IndexCore["clearChecklistItems"]>) { return this.#core.clearChecklistItems(...a); }
   clearMyDayFields(...a: Parameters<IndexCore["clearMyDayFields"]>) { return this.#core.clearMyDayFields(...a); }
@@ -48,6 +99,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   markMyDayUnavailable(...a: Parameters<IndexCore["markMyDayUnavailable"]>) { return this.#core.markMyDayUnavailable(...a); }
   markReauthRequired(...a: Parameters<IndexCore["markReauthRequired"]>) { return this.#core.markReauthRequired(...a); }
   moveTask(...a: Parameters<IndexCore["moveTask"]>) { return this.#core.moveTask(...a); }
+  syncCursor(...a: Parameters<IndexCore["syncCursor"]>) { return this.#core.syncCursor(...a); }
   syncChanges(...a: Parameters<IndexCore["syncChanges"]>) { return this.#core.syncChanges(...a); }
   syncInfo(...a: Parameters<IndexCore["syncInfo"]>) { return this.#core.syncInfo(...a); }
   syncSearch(...a: Parameters<IndexCore["syncSearch"]>) { return this.#core.syncSearch(...a); }
@@ -80,4 +132,54 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   upsertChecklistItem(...a: Parameters<IndexCore["upsertChecklistItem"]>) { return this.#core.upsertChecklistItem(...a); }
   upsertList(...a: Parameters<IndexCore["upsertList"]>) { return this.#core.upsertList(...a); }
   upsertTask(...a: Parameters<IndexCore["upsertTask"]>) { return this.#core.upsertTask(...a); }
+}
+
+// Socket lifetime: until the access token the client connected with expires,
+// and never longer than this, so a revoked or changed grant can't keep a
+// socket open indefinitely (section 18.7). The app reconnects with a fresh
+// token after a reauth message.
+const MAX_SOCKET_LIFETIME_MS = 24 * 3_600_000;
+const MAX_CLIENT_FRAME = 1024;
+
+interface SocketMeta {
+  exp: number;
+  client: string;
+}
+
+function expired(ws: WebSocket): boolean {
+  const meta = ws.deserializeAttachment() as SocketMeta | null;
+  return !meta || meta.exp <= Date.now();
+}
+
+function endForReauth(ws: WebSocket) {
+  try {
+    ws.send(JSON.stringify({ type: "reauth" }));
+    ws.close(4001, "reauth");
+  } catch {
+    // already closed
+  }
+}
+
+function socketNotifier(ctx: DurableObjectState): ChangeNotifier {
+  return {
+    announce(cursor) {
+      const msg = JSON.stringify({ type: "changed", cursor });
+      for (const ws of ctx.getWebSockets()) {
+        if (expired(ws)) endForReauth(ws);
+        else {
+          try {
+            ws.send(msg);
+          } catch {
+            // closing; the runtime drops it
+          }
+        }
+      }
+    },
+    closeAll() {
+      for (const ws of ctx.getWebSockets()) endForReauth(ws);
+    },
+    sweep() {
+      for (const ws of ctx.getWebSockets()) if (expired(ws)) endForReauth(ws);
+    },
+  };
 }
