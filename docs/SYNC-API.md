@@ -185,6 +185,9 @@ cache-backed queries don't see it. When a read's list filter (`lists`, `types`,
 `not_mirrored: [{ "list_id", "display_name" }]` and a one-line note, so an empty
 result isn't mistaken for an empty list. `list_tasks` on an excluded list reads it
 live from Graph (`source: "graph"`) and pages it through `next_cursor` as usual.
+`list_my_day_tasks` names every excluded list the same way, since any of them can
+hold My Day tasks it can't show. `list_lists` adds pins only for lists that have none,
+so it never replaces a pin set since its own read of the config.
 
 ---
 

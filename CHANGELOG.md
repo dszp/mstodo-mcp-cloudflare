@@ -25,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reads filtered to an excluded list (`query_tasks`, `search_tasks`, `search_checklist_items`,
   `get_pending_across_lists`, `get_recently_completed`) return `not_mirrored` with a note
   instead of an unexplained empty result. `list_tasks` on an excluded list pages through
-  `next_cursor` instead of returning one page.
+  `next_cursor` instead of returning one page. `list_my_day_tasks` names every excluded list,
+  since My Day tasks in them (flagged emails, for one) are missing from it.
 
 ### Added
 - Sync API: lists in the change feed carry `sync` (`todo` | `reference`); `list.update` accepts
@@ -38,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A list excluded while the sync cycle was fetching it is no longer filled back in and
   re-baselined, and the cycle no longer flips a just-changed setting back from a stale KV read
   of `config:lists`.
+- `list_lists` auto-pinning no longer replaces a newer pin (such as `create_list`'s `todo`)
+  with a pattern's class from a stale read of `config:lists`.
+- A list excluded and switched back on while its pages were being fetched no longer ends up
+  empty but marked synced; the next cycle baselines it.
 - A task created or moved into an excluded list by an MCP tool no longer appears in the mirror
   and the feed.
 - The sync feed's `backfill.remaining` reaches zero: it no longer counts a reference list's
