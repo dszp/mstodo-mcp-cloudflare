@@ -670,6 +670,35 @@ describe("TodoIndex delta sync fairness (rotation + error retry)", () => {
     expect(await lastSynced(stub, "list-A")).toBe(3000);
   });
 
+  it("syncs todo lists before reference lists, however stale (section 1.2)", async () => {
+    await seedFreshTokens();
+    await env.TODO_CACHE.put("config:lists", JSON.stringify({ overrides: { "list-R": "reference" } }));
+    try {
+      stubGraph({
+        [LISTS_DELTA]: {
+          body: { value: [{ id: "list-T", displayName: "T" }, { id: "list-R", displayName: "R" }], "@odata.deltaLink": LISTS_DL },
+        },
+        [tasksDelta("list-T")]: { body: { value: [syncTask("t")], "@odata.deltaLink": tasksDL("list-T") } },
+        [tasksDelta("list-R")]: { body: { value: [syncTask("r")], "@odata.deltaLink": tasksDL("list-R") } },
+      });
+      const stub = indexStub("sync-reference-last");
+      await stub.runSyncCycle();
+      // The reference list is the stalest, and still waits for the todo list.
+      await setLastSynced(stub, "list-T", 3000);
+      await setLastSynced(stub, "list-R", 1000);
+      stubGraph({
+        [LISTS_DL]: { body: { value: [], "@odata.deltaLink": LISTS_DL } },
+        [tasksDL("list-T")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-T", 2) } },
+        [tasksDL("list-R")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-R", 2) } },
+      });
+      await stub.runSyncCycle(1);
+      expect(await lastSynced(stub, "list-T")).toBeGreaterThan(3000);
+      expect(await lastSynced(stub, "list-R")).toBe(1000);
+    } finally {
+      await env.TODO_CACHE.delete("config:lists");
+    }
+  });
+
   it("retries an errored list ahead of a fresher idle one, recovering it", async () => {
     await seedFreshTokens();
     stubGraph({

@@ -623,7 +623,8 @@ class ToDoTools implements TokenProvider {
       {
         description:
           "Return the owner's Microsoft To Do task lists (id, displayName, isOwner, isShared, wellknownListName, type). " +
-          "Each list includes a 'type' field (todo | reference | excluded | unclassified) when classification patterns are configured. " +
+          "Each list includes a 'type' field (todo | reference | excluded | unclassified), which is also its sync setting: " +
+          "excluded lists aren't mirrored, reference lists sync more slowly, unclassified syncs as todo. Change it with set_list_config overrides. " +
           "Pass 'type' to filter to a specific class. " +
           "Served from the TodoIndex roster (source: 'index'); falls back to a live Graph enumerate (source: 'graph_cold') while the index is warming.",
         inputSchema: {
@@ -631,8 +632,7 @@ class ToDoTools implements TokenProvider {
             .enum(["todo", "reference", "excluded", "unclassified"])
             .optional()
             .describe(
-              "When provided, return only lists matching this classification. " +
-              "Requires list classification patterns to be configured via set_list_config.",
+              "When provided, return only lists matching this classification.",
             ),
         },
       },
@@ -646,7 +646,7 @@ class ToDoTools implements TokenProvider {
           // matched list is pinned this writes nothing (added === 0).
           if (config.patterns.length > 0) {
             const { overrides, added } = pinClassifications(
-              lists.map((l) => ({ list_id: l.id, display_name: l.displayName ?? null })),
+              lists.map((l) => ({ list_id: l.id, display_name: l.displayName ?? null, wellknown: l.wellknownListName ?? null })),
               config,
             );
             if (added > 0) {
@@ -657,12 +657,11 @@ class ToDoTools implements TokenProvider {
             }
           }
 
-          // Annotate when any classification exists (patterns OR manual pins).
-          const hasClass =
-            config.patterns.length > 0 || Object.keys(config.overrides).length > 0;
+          // Every list has a type: it is also the list's sync setting
+          // (todo | reference | excluded; unclassified syncs as todo).
           const annotated = lists.map((l) => ({
             ...summarizeList(l),
-            ...(hasClass ? { type: classifyList(l.displayName ?? "", config, l.id) } : {}),
+            type: classifyList(l.displayName ?? "", config, l.id, l.wellknownListName ?? null),
           }));
 
           const filtered = typeFilter
@@ -2142,15 +2141,15 @@ class ToDoTools implements TokenProvider {
       "set_list_config",
       {
         description:
-          "Update list config. Omitted fields are preserved (not reset). `patterns` replaces the " +
-          "classification pattern list (pass [] to clear; first match wins, emoji stripped, each must be " +
-          "valid JS RegExp). `overrides` replaces the ID-pinned classification map (Graph list ID → class), " +
-          "which wins over name patterns and survives renames; list_lists auto-pins newly name-matched lists, " +
-          "so use this to change a pin or drop a key to revert a list to pattern-based. `no_sync` excludes " +
-          'lists from delta sync, matched by wellknownListName (e.g. "flaggedEmails") or Graph list ID — the ' +
-          "list stays visible and on-demand-readable but is not indexed. `sync_flagged_emails` opts the large " +
-          "flaggedEmails well-known list back IN (it is skipped by default to conserve the daily write budget). " +
-          "Does not affect aliases — use set_list_alias.",
+          "Update list config. Omitted fields are preserved (not reset). A list's class is also its sync " +
+          "setting: todo = mirrored with live updates; reference = mirrored on a slower cadence, no live " +
+          "updates; excluded = not mirrored (still listed and readable live). Unclassified lists sync as todo. " +
+          "`overrides` replaces the ID-pinned class map (Graph list ID → class); a pin wins over everything " +
+          "else and survives renames, so set a list's class here. `patterns` replaces the name-pattern list " +
+          "(pass [] to clear; first match wins, emoji stripped, each must be valid JS RegExp); list_lists " +
+          "auto-pins newly name-matched lists. `no_sync` (legacy) marks lists excluded by wellknownListName or " +
+          "Graph list ID, below pins. `sync_flagged_emails` makes the flaggedEmails list default to reference " +
+          "instead of excluded when it has no pin. Does not affect aliases — use set_list_alias.",
         inputSchema: {
           patterns: z
             .array(ListPatternSchema)
@@ -2171,13 +2170,16 @@ class ToDoTools implements TokenProvider {
             .array(z.string().min(1))
             .optional()
             .describe(
-              'Lists excluded from sync, by wellknownListName (e.g. "flaggedEmails") or Graph list ID. ' +
-              "Omit to leave unchanged. flaggedEmails is already skipped by default.",
+              'Legacy: lists treated as excluded, by wellknownListName (e.g. "flaggedEmails") or Graph list ID, ' +
+              "unless pinned in overrides. Omit to leave unchanged. Prefer overrides.",
             ),
           sync_flagged_emails: z
             .boolean()
             .optional()
-            .describe("Set true to index the large flaggedEmails list (off by default). Omit to leave unchanged."),
+            .describe(
+              "Set true to make the flaggedEmails list default to reference (mirrored) instead of excluded. " +
+              "A pin in overrides wins. Omit to leave unchanged.",
+            ),
         },
       },
       async ({ patterns, overrides, no_sync, sync_flagged_emails }): Promise<McpResponse> =>
@@ -2202,13 +2204,15 @@ class ToDoTools implements TokenProvider {
             aliases: existing.aliases,
             overrides: overrides ?? existing.overrides,
             no_sync: no_sync ?? existing.no_sync,
+            archive: existing.archive,
             sync_flagged_emails: sync_flagged_emails ?? existing.sync_flagged_emails,
           });
           await storeListsConfig(this.ctx.env, config);
-          // Reconcile promptly (purge or re-enable) instead of waiting for cron.
+          // Apply the sync settings now (purge an excluded list, re-baseline a
+          // re-included one) instead of waiting for the next cycle.
           await this.#index()
-            .ensureSyncing()
-            .catch((e) => log.warn("index_ensure_syncing_failed", { error: String(e) }));
+            .refreshListSync()
+            .catch((e) => log.warn("index_refresh_list_sync_failed", { error: String(e) }));
           return {
             content: [
               {
@@ -2437,7 +2441,7 @@ class ToDoTools implements TokenProvider {
               log.warn("index_roster_read_failed", { error: String(e) });
             }
             listIds = resolveListScope({
-              roster: roster.map((r) => ({ list_id: r.list_id, display_name: r.display_name })),
+              roster: roster.map((r) => ({ list_id: r.list_id, display_name: r.display_name, wellknown: r.wellknown })),
               config: cfg,
               lists: explicitIds,
               types,
@@ -2533,7 +2537,7 @@ class ToDoTools implements TokenProvider {
               log.warn("index_roster_read_failed", { error: String(e) });
             }
             listIds = resolveListScope({
-              roster: roster.map((r) => ({ list_id: r.list_id, display_name: r.display_name })),
+              roster: roster.map((r) => ({ list_id: r.list_id, display_name: r.display_name, wellknown: r.wellknown })),
               config: cfg,
               lists: explicitIds,
               types,
@@ -2736,7 +2740,7 @@ class ToDoTools implements TokenProvider {
             log.warn("index_roster_read_failed", { error: String(e) });
           }
           const listIds = roster
-            .filter((l) => classifyList(l.display_name ?? "", config, l.list_id) === type)
+            .filter((l) => classifyList(l.display_name ?? "", config, l.list_id, l.wellknown) === type)
             .map((l) => l.list_id);
           // No lists of this class → genuinely empty (NOT "all lists": an empty
           // `lists` filter would widen query() to every list).
@@ -2789,7 +2793,7 @@ class ToDoTools implements TokenProvider {
               log.warn("index_roster_read_failed", { error: String(e) });
             }
             listIds = roster
-              .filter((l) => classifyList(l.display_name ?? "", config, l.list_id) === type)
+              .filter((l) => classifyList(l.display_name ?? "", config, l.list_id, l.wellknown) === type)
               .map((l) => l.list_id);
             // type given but no lists match → empty (don't widen to all lists).
             if (listIds.length === 0) {

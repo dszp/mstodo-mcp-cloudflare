@@ -119,6 +119,23 @@ describe("reconcileSubscriptions", () => {
     expect((await stub.getSubscriptions()).length).toBe(5);
   });
 
+  it("subscribes todo lists only: reference lists sync on the timer, excluded aren't mirrored", async () => {
+    await signIn();
+    await env.TODO_CACHE.put("config:lists", JSON.stringify({ overrides: { REF: "reference", EXC: "excluded" } }));
+    try {
+      const stub = indexStub("recon-settings");
+      for (const id of ["TODO", "REF", "EXC"]) {
+        await stub.upsertList({ id, displayName: id, isOwner: true, isShared: false });
+      }
+      const { calls } = installGraph();
+      await stub.reconcileSubscriptions();
+      const resources = calls.filter((c) => c.method === "POST").map((c) => c.body.resource);
+      expect(resources).toEqual(["/me/todo/lists/TODO/tasks"]);
+    } finally {
+      await env.TODO_CACHE.delete("config:lists");
+    }
+  });
+
   it("creates subscriptions with a lifecycleNotificationUrl on the same /webhook endpoint", async () => {
     await signIn();
     const stub = indexStub("recon-lifecycle");

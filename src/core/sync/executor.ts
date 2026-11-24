@@ -15,7 +15,8 @@ import { GraphError } from "../graph/client";
 import { SubstrateError } from "../graph/substrate-client";
 import { bestEffort, type OpsContext } from "../ops/context";
 import { createLink, deleteLink, findCreatedLinks, updateLink } from "../ops/links";
-import { createList, deleteList, findCreatedLists, updateList } from "../ops/lists";
+import { createList, deleteList, findCreatedLists, setListSync, updateList } from "../ops/lists";
+import { LIST_SYNC_VALUES, type ListSync } from "../config/sync-policy";
 import { addToMyDay, removeFromMyDay, reorderMyDayTask, todayInTimeZone } from "../ops/my-day";
 import type { ReorderPosition } from "../ops/position";
 import type { ToolResult } from "../ops/result";
@@ -148,8 +149,19 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       return r.ok ? applied(r.value.list.id) : rejected(r.reason);
     }
     case "list.update": {
-      const r = await updateList(ctx, { list_id: graphId, display_name: requiredText(fields, "name") });
-      return r.ok ? applied(graphId) : rejected(r.reason);
+      // Either field alone is an update; a list.update with neither is invalid.
+      const sync = fields.sync;
+      const name = fields.name !== undefined || sync === undefined ? requiredText(fields, "name") : undefined;
+      if (sync !== undefined && !(LIST_SYNC_VALUES as readonly unknown[]).includes(sync)) invalid("sync");
+      if (name !== undefined) {
+        const r = await updateList(ctx, { list_id: graphId, display_name: name });
+        if (!r.ok) return rejected(r.reason);
+      }
+      if (sync !== undefined) {
+        const r = await setListSync(ctx, { list_id: graphId, sync: sync as ListSync });
+        if (!r.ok) return rejected(r.reason);
+      }
+      return applied(graphId);
     }
     case "list.delete": {
       const r = await deleteList(ctx, { list_id: graphId });

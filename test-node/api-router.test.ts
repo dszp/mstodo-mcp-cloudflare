@@ -24,6 +24,7 @@ function fakeEnv(overrides: Record<string, unknown> = {}) {
     })),
     search: vi.fn(async (_o: unknown) => ({ rows: [{ task_id: "G1" }, { task_id: "G-unmapped" }] })),
     syncSearch: vi.fn(async (_q: string, _limit: number) => [{ id: "sid-G1", data: {}, field_clock: {} }]),
+    excludedLists: vi.fn(async () => [{ id: "sid-X", name: "GRAVEYARD", wellknown: null }]),
     ...overrides,
   };
   const env = {
@@ -106,6 +107,14 @@ describe("handleApiRequest", () => {
       expect((await handleApiRequest(req(`/tasks/${bad}`), env, PROPS, BG)).status).toBe(404);
     }
     expect(index.syncTask).not.toHaveBeenCalled();
+  });
+
+  it("lists the excluded lists by sid and name", async () => {
+    const { env } = fakeEnv();
+    expect(await body(await handleApiRequest(req("/lists/excluded"), env, PROPS, BG))).toEqual([
+      200,
+      { lists: [{ id: "sid-X", name: "GRAVEYARD", wellknown: null }] },
+    ]);
   });
 
   it("searches with literal terms and returns hits as tasks", async () => {

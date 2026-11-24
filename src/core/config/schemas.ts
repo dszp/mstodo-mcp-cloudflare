@@ -103,7 +103,8 @@ export const ListsConfigSchema = z.object({
     .default({})
     .describe(
       "Map of Graph list ID → classification, pinned so a rename can't silently change a list's class. " +
-      "Checked BEFORE name patterns; auto-populated by list_lists the first time a list is classified by a " +
+      "The class is also the list's sync setting (docs/SYNC-API.md section 1.2). " +
+      "Checked BEFORE everything else; auto-populated by list_lists the first time a list is classified by a " +
       "pattern, then it follows the immutable ID. Edit via set_list_config.overrides; drop a key to revert a " +
       "list to pattern-based (it re-pins from patterns on the next list_lists).",
     ),
@@ -111,19 +112,19 @@ export const ListsConfigSchema = z.object({
     .array(z.string().min(1))
     .default([])
     .describe(
-      'Lists to exclude from delta sync, matched by wellknownListName (e.g. "flaggedEmails") or Graph list ID. Not indexed; still listed and readable on-demand. (Note: flaggedEmails is skipped by default regardless — see sync_flagged_emails.)',
+      'Legacy: lists classified excluded (not mirrored), matched by wellknownListName (e.g. "flaggedEmails") or Graph list ID. An override pin wins.',
     ),
   archive: z
     .array(z.string().min(1))
     .default([])
     .describe(
-      'Lists kept but shown only in the app\'s archive area, matched by wellknownListName or Graph list ID (docs/SYNC-API.md section 1.2). The server fetches steps, links and attachment details for their OPEN tasks only. flaggedEmails, when synced, is treated as archive and gets no such fetch at all.',
+      'Legacy: lists classified reference, matched by wellknownListName or Graph list ID. An override pin wins.',
     ),
   sync_flagged_emails: z
     .boolean()
     .default(false)
     .describe(
-      "Opt in to indexing the flaggedEmails well-known list. Off by default because it is typically huge and not used as a task list; leaving it off conserves the daily rows-written budget and storage.",
+      "When the flaggedEmails well-known list has no override pin, classify it reference (mirrored) instead of excluded. Off by default because it is typically huge and not used as a task list.",
     ),
 });
 export type ListsConfig = z.infer<typeof ListsConfigSchema>;

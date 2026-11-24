@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A list's class is now its sync setting** (docs/SYNC-API.md section 1.2). `todo` and
+  unclassified lists sync as before, with a Graph subscription. `reference` lists sync after
+  every todo list in each cycle, get no subscription, and have steps, links and attachments
+  fetched for open tasks only. `excluded` lists are no longer mirrored (they stay in
+  `list_lists` and readable live). A pin in `overrides` decides a list ahead of the legacy
+  `no_sync`/`archive` arrays, the flaggedEmails default and name patterns. **Deploying this
+  stops mirroring any list currently classified `excluded`**, including a Flagged Emails list
+  pinned `excluded` even when `sync_flagged_emails` is on; pin it `reference` first to keep it.
+- `list_lists` reports `type` on every list, not only when patterns or pins exist.
+
+### Added
+- Sync API: lists in the change feed carry `sync` (`todo` | `reference`); `list.update` accepts
+  `sync`; `GET /api/v1/lists/excluded` lists the excluded lists by sid.
+
+### Fixed
+- `set_list_config` no longer clears the `archive` list.
+
 ## [0.17.1] – 2026-10-17
 
 ### Security

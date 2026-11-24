@@ -44,7 +44,9 @@ export type MutationResult =
 // stamps every field it sets.
 export const UPDATABLE: Record<string, readonly string[]> = {
   "task.update": ["title", "body", "status", "completed_at", "importance", "due", "start", "reminder", "categories", "recurrence"],
-  "list.update": ["name"],
+  // `sync` is the list's sync setting (section 1.2), kept by this server
+  // rather than in Microsoft To Do.
+  "list.update": ["name", "sync"],
   "step.update": ["title", "checked"],
   "link.update": ["url", "title"],
 };

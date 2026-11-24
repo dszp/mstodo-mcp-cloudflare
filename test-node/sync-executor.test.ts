@@ -178,3 +178,50 @@ describe("completion", () => {
     expect(completion({ completed_date: null }, "2026-11-24")).toEqual({ completed_date: null });
   });
 });
+
+describe("list.update sync (docs/SYNC-API.md section 1.2)", () => {
+  function syncCtx() {
+    const kv = new Map<string, string>();
+    const patchJson = vi.fn(async () => ({ id: "L1", displayName: "renamed" }));
+    const refreshListSync = vi.fn(async () => ({ changed: 1 }));
+    const ctx = {
+      env: {
+        TIMEZONE: "UTC",
+        TODO_CACHE: {
+          get: async (k: string) => (kv.has(k) ? JSON.parse(kv.get(k)!) : null),
+          put: async (k: string, v: string) => void kv.set(k, v),
+        },
+      },
+      graph: { patchJson },
+      index: { refreshListSync, upsertList: async () => {} },
+      writes: { run: (fn: () => Promise<unknown>) => fn() },
+    } as unknown as OpsContext;
+    return { ctx, kv, patchJson, refreshListSync };
+  }
+  const update = (fields: Record<string, unknown>): ExecInput => ({ ...listUpdate, fields });
+
+  it("pins the setting in config:lists, skips Graph, and applies it in the index", async () => {
+    const h = syncCtx();
+    expect(await syncExecutor(h.ctx)(update({ sync: "excluded" }))).toEqual({ ok: true, graphId: "L1" });
+    expect(JSON.parse(h.kv.get("config:lists")!).overrides).toEqual({ L1: "excluded" });
+    expect(h.patchJson).not.toHaveBeenCalled();
+    expect(h.refreshListSync).toHaveBeenCalledOnce();
+  });
+
+  it("renames and sets the setting in one mutation", async () => {
+    const h = syncCtx();
+    expect(await syncExecutor(h.ctx)(update({ name: "renamed", sync: "reference" }))).toEqual({ ok: true, graphId: "L1" });
+    expect(h.patchJson).toHaveBeenCalledOnce();
+    expect(JSON.parse(h.kv.get("config:lists")!).overrides).toEqual({ L1: "reference" });
+  });
+
+  it.each([
+    ["an unknown setting", { sync: "archive" }, "invalid_field:sync"],
+    ["neither field", {}, "invalid_field:name"],
+    ["an empty name", { name: "", sync: "todo" }, "invalid_field:name"],
+  ])("rejects %s", async (_label, fields, error) => {
+    const h = syncCtx();
+    expect(await syncExecutor(h.ctx)(update(fields))).toEqual({ ok: false, error, retry: false, rejected: true });
+    expect(h.refreshListSync).not.toHaveBeenCalled();
+  });
+});

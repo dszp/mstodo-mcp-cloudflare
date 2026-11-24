@@ -45,7 +45,8 @@ import {
 import { applyMigrations } from "./migrations";
 import { changesSince, currentCursor, taskBySid, taskSids, type FeedResult } from "./change-feed";
 import { loadListsConfig } from "../config/loader";
-import { isArchiveList, shouldSkipSync } from "../config/sync-policy";
+import type { ListsConfig } from "../config/schemas";
+import { isArchiveList, listSync, shouldSkipSync, type ListSync } from "../config/sync-policy";
 import {
   taskSubscriptionsEnabled,
   webhookUrl,
@@ -985,6 +986,49 @@ export class IndexCore implements TokenProvider {
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
   }
 
+  // Copy each roster list's sync setting (section 1.2) onto its row, where the
+  // change feed reads it. Writes only rows whose setting changed; the v11
+  // trigger logs those lists again. Returns the lists that changed.
+  #storeListSync(rows: ListRow[], cfg: ListsConfig): Array<{ list_id: string; from: string | null; to: ListSync }> {
+    const changed: Array<{ list_id: string; from: string | null; to: ListSync }> = [];
+    for (const l of rows) {
+      const to = listSync(l, cfg);
+      if ((l.sync ?? null) === to) continue;
+      this.#sql.exec("UPDATE lists SET sync = ? WHERE list_id = ?", to, l.list_id);
+      changed.push({ list_id: l.list_id, from: l.sync ?? null, to });
+    }
+    return changed;
+  }
+
+  // Apply config:lists now rather than at the next cycle: record every list's
+  // setting, drop the mirrored rows of a list that became excluded (its tasks
+  // leave the feed as deletion records), and start a cycle when a list came
+  // back from excluded, so its baseline brings the tasks back under their old
+  // sids. Called after any config:lists write (set_list_config, list.update).
+  async refreshListSync(): Promise<{ changed: number }> {
+    const cfg = await loadListsConfig(this.#env);
+    const changed = this.#transact(() => {
+      const c = this.#storeListSync(this.listLists(), cfg);
+      for (const x of c) if (x.to === "excluded") this.#purgeSkippedList(x.list_id);
+      return c;
+    });
+    if (changed.some((x) => x.from === "excluded" || x.to === "excluded")) await this.#alarms.setAlarm(Date.now() + 1);
+    return { changed: changed.length };
+  }
+
+  // Excluded lists, which the feed never carries, so the app can offer to
+  // switch one back on (section 1.2). `id` is the list's sid.
+  excludedLists(): Array<{ id: string; name: string | null; wellknown: string | null }> {
+    return this.#sql
+      .exec<{ id: string; name: string | null; wellknown: string | null }>(
+        `SELECT m.sid AS id, l.display_name AS name, l.wellknown
+           FROM lists l JOIN entity_map m ON m.kind = 'list' AND m.graph_id = l.list_id
+          WHERE l.sync = 'excluded'
+          ORDER BY l.display_name`,
+      )
+      .toArray();
+  }
+
   // Roster reads — the `lists` table is the authoritative roster.
   listLists(): ListRow[] {
     return this.#sql
@@ -1057,14 +1101,11 @@ export class IndexCore implements TokenProvider {
       return;
     }
 
-    // Which lists SHOULD have a subscription: the non-skipped roster.
+    // Which lists SHOULD have a subscription: todo lists. Reference lists sync
+    // on the timer only, and excluded lists aren't mirrored (section 1.2).
     const cfg = await loadListsConfig(this.#env);
     const rosterRows = this.listLists();
-    const wanted = new Set(
-      rosterRows
-        .filter((l) => !shouldSkipSync({ list_id: l.list_id, wellknown: l.wellknown }, cfg))
-        .map((l) => l.list_id),
-    );
+    const wanted = new Set(rosterRows.filter((l) => listSync(l, cfg) === "todo").map((l) => l.list_id));
 
     const graph = new GraphClient(this);
     let budget = maxSubscriptionOpsPerCycle(this.#env);
@@ -1195,11 +1236,7 @@ export class IndexCore implements TokenProvider {
     const enabled = taskSubscriptionsEnabled(this.#env);
     const url = webhookUrl(this.#env);
     const cfg = await loadListsConfig(this.#env);
-    const wanted = new Set(
-      this.listLists()
-        .filter((l) => !shouldSkipSync({ list_id: l.list_id, wellknown: l.wellknown }, cfg))
-        .map((l) => l.list_id),
-    );
+    const wanted = new Set(this.listLists().filter((l) => listSync(l, cfg) === "todo").map((l) => l.list_id));
     const records = this.getSubscriptions();
     const recByList = new Set(records.map((r) => r.list_id));
 
@@ -2011,10 +2048,8 @@ export class IndexCore implements TokenProvider {
       .toArray() as unknown as SyncStateRow[];
     const stateByResource = new Map(stateRows.map((s) => [s.resource, s]));
 
-    const listRows = this.#sql
-      .exec<{ list_id: string; wellknown: string | null }>("SELECT list_id, wellknown FROM lists")
-      .toArray();
-    const wellknownById = new Map(listRows.map((l) => [l.list_id, l.wellknown]));
+    const listRows = this.listLists();
+    const listById = new Map(listRows.map((l) => [l.list_id, l]));
     const countRows = this.#sql
       .exec<{ list_id: string; n: number }>(
         "SELECT list_id, COUNT(*) AS n FROM tasks GROUP BY list_id",
@@ -2027,7 +2062,7 @@ export class IndexCore implements TokenProvider {
       // don't sit at baseline_pending forever (which would break all_idle).
       if (resource.startsWith("tasks:")) {
         const listId = resource.slice("tasks:".length);
-        if (shouldSkipSync({ list_id: listId, wellknown: wellknownById.get(listId) ?? null }, cfg)) {
+        if (shouldSkipSync(listById.get(listId) ?? { list_id: listId, wellknown: null }, cfg)) {
           return {
             resource,
             status: "sync_disabled",
@@ -2471,11 +2506,11 @@ export class IndexCore implements TokenProvider {
     // existing network I/O). Drives both the skip set and self-heal purge below.
     const cfg = await loadListsConfig(this.#env);
     const rosterRows = this.listLists();
-    const skip = (listId: string): boolean =>
-      shouldSkipSync(
-        { list_id: listId, wellknown: rosterRows.find((l) => l.list_id === listId)?.wellknown ?? null },
-        cfg,
-      );
+    const settingOf = (listId: string): ListSync =>
+      listSync(rosterRows.find((l) => l.list_id === listId) ?? { list_id: listId, wellknown: null }, cfg);
+    const skip = (listId: string): boolean => settingOf(listId) === "excluded";
+    // Record each list's setting on its row, where the change feed reads it.
+    this.#storeListSync(rosterRows, cfg);
 
     // 2. Self-heal: purge any indexed rows / sync_state left behind for a list
     //    that is now skipped (added to no_sync, or flaggedEmails before this
@@ -2495,7 +2530,13 @@ export class IndexCore implements TokenProvider {
     let remaining = maxTaskPages;
     const hot = [...this.#hotLists];
     this.#hotLists.clear();
-    const order = this.#listIdsByPriority();
+    // Todo lists first, then reference lists (section 1.2): a reference list
+    // only gets what's left of the page budget.
+    const byPriority = this.#listIdsByPriority();
+    const order = [
+      ...byPriority.filter((id) => settingOf(id) !== "reference"),
+      ...byPriority.filter((id) => settingOf(id) === "reference"),
+    ];
     for (const listId of [...hot.filter((id) => order.includes(id)), ...order.filter((id) => !hot.includes(id))]) {
       if (skip(listId)) continue;
       if (remaining <= 0) break;
