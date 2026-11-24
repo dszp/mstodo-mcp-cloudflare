@@ -1310,6 +1310,24 @@ this deployment opts in (`sync_flagged_emails`), and on 2026-11-24 production he
 - **The iPhone's `active` scope** includes every open flagged email. How many are open
   is unmeasured; a `query_tasks` count on that list answers it before the app is built.
 
+### 18.7b Open question: what happens to flagged email (2026-11-24)
+The Flagged Emails list is To Do's view of Outlook message flags. Once Graph's To Do
+API is off, the mirrored copy goes stale, and only a mail integration can keep it
+current. Two options, undecided:
+1. **Drop it at the switch.** Keep at most a read-only snapshot; the app stops showing
+   flagged email.
+2. **A separate mail source.** Read flags from Graph mail (`message.flag`: status,
+   start, due, completed), keep them current with mail change notifications, and set or
+   clear a flag with `PATCH /me/messages/{id}`. Graph's mail API doesn't depend on To
+   Do, so this survives the retirement. Cost: it needs `Mail.Read` to read flags and
+   `Mail.ReadWrite` to change them — read and write access to the whole mailbox, since
+   Graph has no flag-only permission. It would also give the MCP tools email-flag
+   abilities none of the current connectors have.
+
+Until decided: keep mirroring through To Do, treat the list as `archive`, and don't
+backfill its sub-resources. Design the app's flagged-email area as one more source
+behind the same feed, so either option fits without app changes.
+
 ### 18.8 Later
 - Expose the `sid` in MCP outputs and accept either ID form now, so the after-Graph
   switch doesn't change MCP IDs a second time. Write the switch as a one-way procedure:
