@@ -1,6 +1,6 @@
 import { log } from "../log";
 import { ownerIndex } from "../owner-index";
-import { loadListsConfig, storeListsConfig } from "../config/loader";
+import { loadListsConfig } from "../config/loader";
 import { isSealed, seal, unseal } from "./crypto";
 import type { AppEnv } from "../ports";
 
@@ -452,9 +452,7 @@ export async function wipeIdentityScopedState(env: AppEnv): Promise<void> {
   // placed AFTER the critical deletes so it can't affect them.
   try {
     const cfg = await loadListsConfig(env);
-    if (Object.keys(cfg.aliases).length > 0) {
-      await storeListsConfig(env, { ...cfg, aliases: {} });
-    }
+    if (Object.keys(cfg.aliases).length > 0) await index.updateListsConfig({ clear_aliases: true });
   } catch (e) {
     log.warn("identity_wipe_alias_clear_failed", {
       error: e instanceof Error ? e.message : String(e),

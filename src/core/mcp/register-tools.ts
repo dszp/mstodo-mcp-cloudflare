@@ -46,9 +46,9 @@ import {
   type TodoTask,
   type TodoTaskList,
 } from "../graph/types";
-import { loadAttachmentConfig, loadLinkRules, loadListsConfig, storeAttachmentConfig, storeLinkRules, storeListsConfig } from "../config/loader";
+import { loadAttachmentConfig, loadLinkRules, loadListsConfig, storeAttachmentConfig, storeLinkRules } from "../config/loader";
 import { runLinkRules, type LinkRuleMatch } from "../config/link-rules-engine";
-import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema, ListsConfigSchema } from "../config/schemas";
+import { AttachmentConfigSchema, LinkRuleSchema, LinkRulesConfigSchema, ListPatternSchema, ListsConfigSchema, type ListsConfig } from "../config/schemas";
 import { classifyList, pinClassifications, stripEmoji } from "../config/classifier";
 import { resolveListId } from "../config/aliases";
 import { patternProblem } from "../config/regex-safety";
@@ -68,6 +68,21 @@ import { createLink, deleteLink, updateLink } from "../ops/links";
 import { addToMyDay, committedDatePart, removeFromMyDay, reorderMyDayTask, todayInTimeZone } from "../ops/my-day";
 
 const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
+
+// The first page of a list's tasks, read live (list_tasks' Graph paths).
+function graphTasksUrl(listId: string, top: number, status?: string): string {
+  const u = new URL(`${LISTS_URL}/${encodeURIComponent(listId)}/tasks`);
+  u.searchParams.set("$top", String(top));
+  if (status) u.searchParams.set("$filter", `status eq '${status}'`);
+  return u.toString();
+}
+const GraphTasksPageSchema = z
+  .object({
+    "@odata.context": z.string().optional(),
+    "@odata.nextLink": z.string().optional(),
+    value: z.array(TodoTaskSchema),
+  })
+  .passthrough();
 
 // My Day CommittedDay is a local calendar date (YYYY-MM-DD), not UTC. The Worker
 // runs UTC, so when the caller omits `date` we compute "today" in the Worker's
@@ -142,7 +157,45 @@ function positionArg(
 // future per-list conditional GETs.
 // Where a roster/list read was served from: the DO index (authoritative) or a
 // cold live-Graph enumerate while the index is still warming.
-type ListsSource = "index" | "graph_cold";
+type ListsSource = "index" | "graph_cold" | "graph";
+
+// Excluded lists (docs/SYNC-API.md section 1.2) among those a read is
+// filtered to. Their tasks aren't in the index, so a cached read leaves them
+// out; the response names them so the model doesn't take the gap for "no
+// tasks".
+type NotMirrored = Array<{ list_id: string; display_name: string | null }>;
+const NOT_MIRRORED_NOTE =
+  "These lists are excluded from the mirror, so their tasks are not in these results. " +
+  "Read one live with list_tasks, or switch it back on with set_list_config overrides.";
+function notMirroredFields(lists: NotMirrored, note = NOT_MIRRORED_NOTE): Record<string, unknown> {
+  return lists.length > 0 ? { not_mirrored: lists, not_mirrored_note: note } : {};
+}
+// list_my_day_tasks reads the index, so My Day tasks in an excluded list are
+// missing from it. Which excluded lists hold any is only known live, a
+// Substrate call per list, so every excluded list is named.
+const MY_DAY_NOT_MIRRORED_NOTE =
+  "Tasks in these lists aren't mirrored, so any of them on My Day are missing here.";
+
+// list_tasks pages an excluded list live from Graph. Its cursor carries
+// Graph's @odata.nextLink, prefixed so it can't be taken for an index keyset
+// cursor (those are bare base64url). On the way back in, the link must be a
+// Graph URL for the same list's tasks; anything else is refused.
+const GRAPH_CURSOR_PREFIX = "g.";
+function encodeGraphCursor(nextLink: string): string {
+  return GRAPH_CURSOR_PREFIX + btoa(nextLink).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function decodeGraphCursor(cursor: string, listId: string): string | null {
+  try {
+    const raw = atob(cursor.slice(GRAPH_CURSOR_PREFIX.length).replace(/-/g, "+").replace(/_/g, "/"));
+    const u = new URL(raw);
+    const path = decodeURIComponent(u.pathname);
+    return u.protocol === "https:" && u.host === "graph.microsoft.com" && path === `/v1.0/me/todo/lists/${listId}/tasks`
+      ? raw
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 // Strip @odata.* annotations from the public surface — the LLM only cares about
 // the user-facing fields. Shared by list_lists and get_list response builders.
@@ -201,6 +254,7 @@ function tasksResponse(args: {
   tasks: unknown[];
   next_cursor: string | undefined;
   source: ListsSource;
+  extra?: Record<string, unknown>;
 }): McpResponse {
   return {
     content: [
@@ -211,6 +265,7 @@ function tasksResponse(args: {
           list_id: args.list_id,
           source: args.source,
           count: args.tasks.length,
+          ...(args.extra ?? {}),
           // Present only when more pages exist; pass back as `cursor` to
           // list_tasks to resume. Absent on the cold (graph_cold) path.
           next_cursor: args.next_cursor,
@@ -340,7 +395,7 @@ function indexTasksResponse(args: {
 // count; `tasks` carries each task's matched items with epoch→ISO timestamps.
 function checklistItemsResponse(
   rows: ChecklistSearchRow[],
-  extra: { query?: string; pending_only: boolean },
+  extra: { query?: string; pending_only: boolean; not_mirrored?: unknown; not_mirrored_note?: unknown },
 ): McpResponse {
   const byTask = new Map<
     string,
@@ -388,6 +443,9 @@ function checklistItemsResponse(
           count: rows.length,
           pending_only: extra.pending_only,
           ...(extra.query !== undefined ? { query: extra.query } : {}),
+          ...(extra.not_mirrored !== undefined
+            ? { not_mirrored: extra.not_mirrored, not_mirrored_note: extra.not_mirrored_note }
+            : {}),
           tasks: [...byTask.values()],
         }),
       },
@@ -623,7 +681,8 @@ class ToDoTools implements TokenProvider {
       {
         description:
           "Return the owner's Microsoft To Do task lists (id, displayName, isOwner, isShared, wellknownListName, type). " +
-          "Each list includes a 'type' field (todo | reference | excluded | unclassified) when classification patterns are configured. " +
+          "Each list includes a 'type' field (todo | reference | excluded | unclassified), which is also its sync setting: " +
+          "excluded lists aren't mirrored, reference lists sync more slowly, unclassified syncs as todo. Change it with set_list_config overrides. " +
           "Pass 'type' to filter to a specific class. " +
           "Served from the TodoIndex roster (source: 'index'); falls back to a live Graph enumerate (source: 'graph_cold') while the index is warming.",
         inputSchema: {
@@ -631,38 +690,42 @@ class ToDoTools implements TokenProvider {
             .enum(["todo", "reference", "excluded", "unclassified"])
             .optional()
             .describe(
-              "When provided, return only lists matching this classification. " +
-              "Requires list classification patterns to be configured via set_list_config.",
+              "When provided, return only lists matching this classification.",
             ),
         },
       },
       async ({ type: typeFilter }): Promise<McpResponse> =>
         this.withGraph("list_lists", async (graph) => {
           const { lists, source } = await this.getRoster(graph);
-          let config = await loadListsConfig(this.ctx.env);
+          let config = await this.#listsConfig();
 
           // Pin current name-classifications to immutable list IDs so a later
           // rename can't change a list's class. One-time per list; once every
           // matched list is pinned this writes nothing (added === 0).
           if (config.patterns.length > 0) {
             const { overrides, added } = pinClassifications(
-              lists.map((l) => ({ list_id: l.id, display_name: l.displayName ?? null })),
+              lists.map((l) => ({ list_id: l.id, display_name: l.displayName ?? null, wellknown: l.wellknownListName ?? null })),
               config,
             );
             if (added > 0) {
-              config = { ...config, overrides };
-              await storeListsConfig(this.ctx.env, config).catch((e) =>
-                log.warn("list_pin_persist_failed", { error: String(e) }),
-              );
+              // `config` may be a stale KV read, so these pins are added only
+              // where the index's newest config has none: a pin made since
+              // (create_list's todo, say) is never replaced by a pattern's.
+              const pins = Object.fromEntries(Object.entries(overrides).filter(([id]) => !config.overrides[id]));
+              config = await this.#index()
+                .updateListsConfig({ pin_if_absent: pins })
+                .catch((e) => {
+                  log.warn("list_pin_persist_failed", { error: String(e) });
+                  return { ...config, overrides };
+                });
             }
           }
 
-          // Annotate when any classification exists (patterns OR manual pins).
-          const hasClass =
-            config.patterns.length > 0 || Object.keys(config.overrides).length > 0;
+          // Every list has a type: it is also the list's sync setting
+          // (todo | reference | excluded; unclassified syncs as todo).
           const annotated = lists.map((l) => ({
             ...summarizeList(l),
-            ...(hasClass ? { type: classifyList(l.displayName ?? "", config, l.id) } : {}),
+            type: classifyList(l.displayName ?? "", config, l.id, l.wellknownListName ?? null),
           }));
 
           const filtered = typeFilter
@@ -721,7 +784,7 @@ class ToDoTools implements TokenProvider {
       "list_tasks",
       {
         description:
-          "Return one page of tasks from a Microsoft To Do list, served from the TodoIndex (source: 'index'). Pagination uses an opaque keyset next_cursor — pass it back as `cursor` for the next page (absent on the last page). While the index is warming for a list (source: 'graph_cold'), a single live Graph page is returned without a cursor; retry shortly for full pagination. Returns count + next_cursor + tasks.",
+          "Return one page of tasks from a Microsoft To Do list, served from the TodoIndex (source: 'index'). Pagination uses an opaque keyset next_cursor — pass it back as `cursor` for the next page (absent on the last page). While the index is warming for a list (source: 'graph_cold'), a single live Graph page is returned without a cursor; retry shortly for full pagination. A list excluded from the mirror is read live from Graph (source: 'graph', with not_mirrored) and pages the same way through next_cursor. Returns count + next_cursor + tasks.",
         inputSchema: {
           list: z
             .string()
@@ -741,13 +804,38 @@ class ToDoTools implements TokenProvider {
           cursor: z
             .string()
             .optional()
-            .describe("Opaque keyset pagination token from a prior list_tasks response."),
+            .describe("Opaque pagination token from a prior list_tasks response."),
         },
       },
       async ({ list, status, top, cursor }): Promise<McpResponse> =>
         this.withGraph("list_tasks", async (graph) => {
           const list_id = await this.resolveList(list);
           const limit = top ?? 50;
+
+          // An excluded list has no rows in the index: page it live from Graph.
+          const notMirrored = await this.#notMirrored([list_id]);
+          if (notMirrored.length > 0 || cursor?.startsWith(GRAPH_CURSOR_PREFIX)) {
+            let url: string;
+            if (cursor) {
+              const link = cursor.startsWith(GRAPH_CURSOR_PREFIX) ? decodeGraphCursor(cursor, list_id) : null;
+              if (!link) {
+                return errResponse("invalid_cursor", { list_id, hint: "Call list_tasks again without `cursor`." });
+              }
+              url = link;
+            } else {
+              url = graphTasksUrl(list_id, limit, status);
+            }
+            const page = await this.#graphTasksPage(graph, url);
+            if ("error" in page) return errResponse(page.error, { list_id });
+            const next = page["@odata.nextLink"];
+            return tasksResponse({
+              list_id,
+              tasks: page.value.map(summarizeTask),
+              next_cursor: next ? encodeGraphCursor(next) : undefined,
+              source: "graph",
+              extra: notMirroredFields(notMirrored),
+            });
+          }
 
           // Serve from the DO when the list has an authoritative baseline, OR
           // whenever a cursor is supplied (a cursor only ever comes from a prior
@@ -775,38 +863,14 @@ class ToDoTools implements TokenProvider {
           await this.#index()
             .ensureSyncing()
             .catch((e) => log.warn("index_ensure_syncing_failed", { error: String(e) }));
-          const u = new URL(
-            `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks`,
-          );
-          u.searchParams.set("$top", String(limit));
-          if (status) u.searchParams.set("$filter", `status eq '${status}'`);
-          const PageSchema = z
-            .object({
-              "@odata.context": z.string().optional(),
-              "@odata.nextLink": z.string().optional(),
-              value: z.array(TodoTaskSchema),
-            })
-            .passthrough();
-          try {
-            const page = await graph.getJson(u.toString(), PageSchema);
-            return tasksResponse({
-              list_id,
-              tasks: page.value.map(summarizeTask),
-              next_cursor: undefined,
-              source: "graph_cold",
-            });
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("list_not_found", { list_id });
-              }
-            }
-            throw e;
-          }
+          const page = await this.#graphTasksPage(graph, graphTasksUrl(list_id, limit, status));
+          if ("error" in page) return errResponse(page.error, { list_id });
+          return tasksResponse({
+            list_id,
+            tasks: page.value.map(summarizeTask),
+            next_cursor: undefined,
+            source: "graph_cold",
+          });
         }),
     );
 
@@ -2095,7 +2159,7 @@ class ToDoTools implements TokenProvider {
       },
       async (): Promise<McpResponse> =>
         instrument("get_list_config", async () => {
-          const config = await loadListsConfig(this.ctx.env);
+          const config = await this.#listsConfig();
           let roster: ListRow[] = [];
           try {
             roster = await this.#index().listLists();
@@ -2142,15 +2206,16 @@ class ToDoTools implements TokenProvider {
       "set_list_config",
       {
         description:
-          "Update list config. Omitted fields are preserved (not reset). `patterns` replaces the " +
-          "classification pattern list (pass [] to clear; first match wins, emoji stripped, each must be " +
-          "valid JS RegExp). `overrides` replaces the ID-pinned classification map (Graph list ID → class), " +
-          "which wins over name patterns and survives renames; list_lists auto-pins newly name-matched lists, " +
-          "so use this to change a pin or drop a key to revert a list to pattern-based. `no_sync` excludes " +
-          'lists from delta sync, matched by wellknownListName (e.g. "flaggedEmails") or Graph list ID — the ' +
-          "list stays visible and on-demand-readable but is not indexed. `sync_flagged_emails` opts the large " +
-          "flaggedEmails well-known list back IN (it is skipped by default to conserve the daily write budget). " +
-          "Does not affect aliases — use set_list_alias.",
+          "Update list config. Omitted fields are preserved (not reset). A list's class is also its sync " +
+          "setting: todo = mirrored with live updates; reference = mirrored on a slower cadence, no live " +
+          "updates; excluded = not mirrored (still listed and readable live). Unclassified lists sync as todo. " +
+          "`overrides` sets ID pins (Graph list ID → class), merged key by key: listed keys are set, null " +
+          "removes a pin, unlisted pins stay. A pin wins over everything else and survives renames, so set a " +
+          "list's class here. `patterns` replaces the name-pattern list " +
+          "(pass [] to clear; first match wins, emoji stripped, each must be valid JS RegExp); list_lists " +
+          "auto-pins newly name-matched lists. `no_sync` (legacy) marks lists excluded by wellknownListName or " +
+          "Graph list ID, below pins. `sync_flagged_emails` makes the flaggedEmails list default to reference " +
+          "instead of excluded when it has no pin. Does not affect aliases — use set_list_alias.",
         inputSchema: {
           patterns: z
             .array(ListPatternSchema)
@@ -2160,24 +2225,27 @@ class ToDoTools implements TokenProvider {
               "(RegExp source), flags (default 'i'), type ('todo' | 'reference' | 'excluded').",
             ),
           overrides: z
-            .record(z.string().min(1), z.enum(["todo", "reference", "excluded"]))
+            .record(z.string().min(1), z.enum(["todo", "reference", "excluded"]).nullable())
             .optional()
             .describe(
-              "Full replacement map of Graph list ID → class (omit to leave unchanged; {} to clear all pins). " +
-              "Pinned classes win over name patterns and survive renames. Dropping a key reverts that list to " +
-              "pattern-based — it will re-pin from patterns on the next list_lists.",
+              "Pins to change, Graph list ID → class, merged into the existing pins: only the listed lists " +
+              "change. Pass null for a list to remove its pin, which reverts it to pattern-based (it re-pins " +
+              "from patterns on the next list_lists). Pinned classes win over name patterns and survive renames.",
             ),
           no_sync: z
             .array(z.string().min(1))
             .optional()
             .describe(
-              'Lists excluded from sync, by wellknownListName (e.g. "flaggedEmails") or Graph list ID. ' +
-              "Omit to leave unchanged. flaggedEmails is already skipped by default.",
+              'Legacy: lists treated as excluded, by wellknownListName (e.g. "flaggedEmails") or Graph list ID, ' +
+              "unless pinned in overrides. Omit to leave unchanged. Prefer overrides.",
             ),
           sync_flagged_emails: z
             .boolean()
             .optional()
-            .describe("Set true to index the large flaggedEmails list (off by default). Omit to leave unchanged."),
+            .describe(
+              "Set true to make the flaggedEmails list default to reference (mirrored) instead of excluded. " +
+              "A pin in overrides wins. Omit to leave unchanged.",
+            ),
         },
       },
       async ({ patterns, overrides, no_sync, sync_flagged_emails }): Promise<McpResponse> =>
@@ -2196,19 +2264,9 @@ class ToDoTools implements TokenProvider {
             }
           }
 
-          const existing = await loadListsConfig(this.ctx.env);
-          const config = ListsConfigSchema.parse({
-            patterns: patterns ?? existing.patterns,
-            aliases: existing.aliases,
-            overrides: overrides ?? existing.overrides,
-            no_sync: no_sync ?? existing.no_sync,
-            sync_flagged_emails: sync_flagged_emails ?? existing.sync_flagged_emails,
-          });
-          await storeListsConfig(this.ctx.env, config);
-          // Reconcile promptly (purge or re-enable) instead of waiting for cron.
-          await this.#index()
-            .ensureSyncing()
-            .catch((e) => log.warn("index_ensure_syncing_failed", { error: String(e) }));
+          // The index writes config:lists and applies the sync settings at once
+          // (purge an excluded list, re-baseline a re-included one).
+          const config = await this.#index().updateListsConfig({ patterns, overrides, no_sync, sync_flagged_emails });
           return {
             content: [
               {
@@ -2279,17 +2337,9 @@ class ToDoTools implements TokenProvider {
             });
           }
 
-          const existing = await loadListsConfig(this.ctx.env);
-          const updatedAliases = { ...existing.aliases, [alias]: match.list_id };
-          // Preserve no_sync / sync_flagged_emails — omitting them here would let
-          // Zod re-apply their defaults and silently wipe the user's sync policy.
-          const config = ListsConfigSchema.parse({
-            patterns: existing.patterns,
-            aliases: updatedAliases,
-            no_sync: existing.no_sync,
-            sync_flagged_emails: existing.sync_flagged_emails,
-          });
-          await storeListsConfig(this.ctx.env, config);
+          // Through the index's config write path, which changes only this
+          // alias and keeps every other field (pins included) as stored.
+          await this.#index().updateListsConfig({ aliases: { [alias]: match.list_id } });
           return {
             content: [
               {
@@ -2429,7 +2479,7 @@ class ToDoTools implements TokenProvider {
               : undefined;
           let listIds = explicitIds;
           if ((types && types.length > 0) || (exclude_types && exclude_types.length > 0)) {
-            const cfg = await loadListsConfig(this.ctx.env);
+            const cfg = await this.#listsConfig();
             let roster: ListRow[] = [];
             try {
               roster = await this.#index().listLists();
@@ -2437,7 +2487,7 @@ class ToDoTools implements TokenProvider {
               log.warn("index_roster_read_failed", { error: String(e) });
             }
             listIds = resolveListScope({
-              roster: roster.map((r) => ({ list_id: r.list_id, display_name: r.display_name })),
+              roster: roster.map((r) => ({ list_id: r.list_id, display_name: r.display_name, wellknown: r.wellknown })),
               config: cfg,
               lists: explicitIds,
               types,
@@ -2468,7 +2518,7 @@ class ToDoTools implements TokenProvider {
             cursor,
           });
           await this.#warmIfEmpty(rows.length);
-          return indexTasksResponse({ rows, next_cursor });
+          return indexTasksResponse({ rows, next_cursor, extra: notMirroredFields(await this.#notMirrored(listIds)) });
         }),
     );
 
@@ -2525,7 +2575,7 @@ class ToDoTools implements TokenProvider {
               : undefined;
           let listIds = explicitIds;
           if ((types && types.length > 0) || (exclude_types && exclude_types.length > 0)) {
-            const cfg = await loadListsConfig(this.ctx.env);
+            const cfg = await this.#listsConfig();
             let roster: ListRow[] = [];
             try {
               roster = await this.#index().listLists();
@@ -2533,7 +2583,7 @@ class ToDoTools implements TokenProvider {
               log.warn("index_roster_read_failed", { error: String(e) });
             }
             listIds = resolveListScope({
-              roster: roster.map((r) => ({ list_id: r.list_id, display_name: r.display_name })),
+              roster: roster.map((r) => ({ list_id: r.list_id, display_name: r.display_name, wellknown: r.wellknown })),
               config: cfg,
               lists: explicitIds,
               types,
@@ -2569,7 +2619,10 @@ class ToDoTools implements TokenProvider {
             });
           }
           await this.#warmIfEmpty(result.rows.length);
-          return indexTasksResponse({ rows: result.rows, extra: { query } });
+          return indexTasksResponse({
+            rows: result.rows,
+            extra: { query, ...notMirroredFields(await this.#notMirrored(listIds)) },
+          });
         }),
     );
 
@@ -2628,6 +2681,7 @@ class ToDoTools implements TokenProvider {
           return checklistItemsResponse(result.rows, {
             query,
             pending_only: pending_only ?? true,
+            ...notMirroredFields(await this.#notMirrored(listIds)),
           });
         }),
     );
@@ -2723,7 +2777,7 @@ class ToDoTools implements TokenProvider {
       },
       async ({ type = "todo", limit, cursor }): Promise<McpResponse> =>
         instrument("get_pending_across_lists", async () => {
-          const config = await loadListsConfig(this.ctx.env);
+          const config = await this.#listsConfig();
           if (config.patterns.length === 0) {
             return errResponse("no_list_patterns_configured", {
               hint: "Configure list classification via set_list_config, then retry.",
@@ -2736,7 +2790,7 @@ class ToDoTools implements TokenProvider {
             log.warn("index_roster_read_failed", { error: String(e) });
           }
           const listIds = roster
-            .filter((l) => classifyList(l.display_name ?? "", config, l.list_id) === type)
+            .filter((l) => classifyList(l.display_name ?? "", config, l.list_id, l.wellknown) === type)
             .map((l) => l.list_id);
           // No lists of this class → genuinely empty (NOT "all lists": an empty
           // `lists` filter would widen query() to every list).
@@ -2749,7 +2803,11 @@ class ToDoTools implements TokenProvider {
             limit,
             cursor,
           });
-          return indexTasksResponse({ rows, next_cursor, extra: { type } });
+          return indexTasksResponse({
+            rows,
+            next_cursor,
+            extra: { type, ...notMirroredFields(await this.#notMirrored(listIds)) },
+          });
         }),
     );
 
@@ -2776,7 +2834,7 @@ class ToDoTools implements TokenProvider {
           if (list !== undefined) {
             listIds = [await this.resolveList(list)];
           } else if (type !== undefined) {
-            const config = await loadListsConfig(this.ctx.env);
+            const config = await this.#listsConfig();
             if (config.patterns.length === 0) {
               return errResponse("no_list_patterns_configured", {
                 hint: "Configure list classification via set_list_config, then retry.",
@@ -2789,7 +2847,7 @@ class ToDoTools implements TokenProvider {
               log.warn("index_roster_read_failed", { error: String(e) });
             }
             listIds = roster
-              .filter((l) => classifyList(l.display_name ?? "", config, l.list_id) === type)
+              .filter((l) => classifyList(l.display_name ?? "", config, l.list_id, l.wellknown) === type)
               .map((l) => l.list_id);
             // type given but no lists match → empty (don't widen to all lists).
             if (listIds.length === 0) {
@@ -2810,7 +2868,10 @@ class ToDoTools implements TokenProvider {
           const sorted = [...rows].sort(
             (a, b) => (b.completed_at ?? 0) - (a.completed_at ?? 0),
           );
-          return indexTasksResponse({ rows: sorted, extra: { days, ...(type ? { type } : {}) } });
+          return indexTasksResponse({
+            rows: sorted,
+            extra: { days, ...(type ? { type } : {}), ...notMirroredFields(await this.#notMirrored(listIds)) },
+          });
         }),
     );
 
@@ -3072,6 +3133,12 @@ class ToDoTools implements TokenProvider {
                   cache_as_of: scan.last_scan_at_ms,
                   cache_status: scan.status,
                   stale,
+                  ...notMirroredFields(
+                    lists
+                      .filter((l) => l.sync === "excluded")
+                      .map((l) => ({ list_id: l.list_id, display_name: l.display_name })),
+                    MY_DAY_NOT_MIRRORED_NOTE,
+                  ),
                   tasks,
                 }),
               },
@@ -3316,12 +3383,48 @@ class ToDoTools implements TokenProvider {
     );
   }
 
+  // The excluded lists among `listIds`, by the setting stored in the index
+  // (what is actually mirrored). Empty when no filter was given: an unfiltered
+  // read never promised those lists.
+  async #notMirrored(listIds: string[] | undefined): Promise<NotMirrored> {
+    if (!listIds || listIds.length === 0) return [];
+    let roster: ListRow[] = [];
+    try {
+      roster = await this.#index().listLists();
+    } catch (e) {
+      log.warn("index_roster_read_failed", { error: String(e) });
+    }
+    const wanted = new Set(listIds);
+    return roster
+      .filter((l) => wanted.has(l.list_id) && l.sync === "excluded")
+      .map((l) => ({ list_id: l.list_id, display_name: l.display_name }));
+  }
+
+  // One live page of a list's tasks, with a missing list mapped to
+  // list_not_found.
+  async #graphTasksPage(
+    graph: GraphClient,
+    url: string,
+  ): Promise<{ value: TodoTask[]; "@odata.nextLink"?: string } | { error: "list_not_found" }> {
+    try {
+      return await graph.getJson(url, GraphTasksPageSchema);
+    } catch (e) {
+      if (e instanceof GraphError) {
+        const innerCode = getGraphInnerErrorCode(e.detail);
+        if (e.status === 404 || (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")) {
+          return { error: "list_not_found" };
+        }
+      }
+      throw e;
+    }
+  }
+
   // Resolve a caller-supplied list identifier (alias, display name, or raw Graph
   // list ID) to a canonical Graph list ID. Aliases (the primary path) resolve
   // from KV config with no roster; display-name resolution reads the DO roster
   // (best-effort — a cold/empty roster simply degrades to raw passthrough).
   private async resolveList(list: string): Promise<string> {
-    const config = await loadListsConfig(this.ctx.env);
+    const config = await this.#listsConfig();
     if (config.aliases[list] !== undefined) return config.aliases[list];
     let roster: ListRow[] = [];
     try {
@@ -3508,6 +3611,17 @@ class ToDoTools implements TokenProvider {
       substrate: sub ? async () => sub : () => this.#buildSubstrateClient(),
       accessToken: () => this.getAccessToken(),
     });
+  }
+
+  // config:lists as the index acts on it, which includes a change KV may not
+  // show yet. Falls back to KV if the index can't be reached.
+  async #listsConfig(): Promise<ListsConfig> {
+    try {
+      return ListsConfigSchema.parse(await this.#index().listsConfig());
+    } catch (e) {
+      log.warn("lists_config_index_read_failed", { error: String(e) });
+      return loadListsConfig(this.ctx.env);
+    }
   }
 
   // Singleton TodoIndex DO stub — the cross-list index + sole token refresher.

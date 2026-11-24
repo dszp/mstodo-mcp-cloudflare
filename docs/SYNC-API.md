@@ -56,11 +56,11 @@ gaps have to close before an app can be built on it. Each fix is in the build or
 | Data | Mirror today | App needs | Fix |
 |---|---|---|---|
 | Task body | `body_plain` only: HTML stripped (`taskToRow` → `stripHtml`) | The body as stored, with its content type | Add `body_content` and `body_type` to `TASK_COLUMNS`. Delta already carries `body`. |
-| Checklist items (steps) | Cache behind `ENABLE_CHECKLIST_CACHE` (default off; on in this deployment). **Open tasks only**, by design. Order not stored. | Every task's steps, including completed tasks, with order | Extend the scan to completed tasks and archive lists, and store `order_datetime` per step (section 1.1). |
+| Checklist items (steps) | Cache behind `ENABLE_CHECKLIST_CACHE` (default off; on in this deployment). **Open tasks only**, by design. Order not stored. | Every task's steps, including completed tasks, with order | Extend the scan to completed tasks and reference lists, and store `order_datetime` per step (section 1.1). |
 | Linked resources | Not stored | Stored | New `linked_resources` table, filled by the same per-task scan. |
 | Attachments | `has_attachments` flag only | Metadata (name, size, type) per attachment. Bytes are fetched on demand. | New `attachments` table, filled by the same scan when `has_attachments = 1`. |
 | My Day fields | Filled by a budgeted Substrate scan plus a targeted refresh on each webhook | Same | No change. |
-| Skipped lists (`no_sync` in `config:lists`, plus the built-in `flaggedEmails`) | Not mirrored at all | Kept, but shown only in an archive area of the app | New `archive` sync policy (section 1.2). |
+| Lists not in active use | Classified `reference` or `excluded` for the MCP tools; only `no_sync` and `flaggedEmails` changed sync | One per-list setting that the app shows and can change | The list's class is its sync setting (section 1.2). |
 | List groups, sidebar order | Not stored; Graph doesn't expose them | Stored | Section 10.4. |
 
 ### 1.1 One per-task sub-resource scan
@@ -80,7 +80,7 @@ The proposal generalizes that scan instead of adding two more:
   whose Graph checklist is non-empty. Order is null until a step is first dragged, so
   most of these calls return nulls; that is accepted for the app, because showing
   steps in the wrong order is visible.
-- Scope: every task in a mirrored list, open or completed, archive lists included.
+- Scope: every task in a mirrored list, open or completed, reference lists included.
   Open tasks drain first, newest change first; completed tasks follow. This reverses
   the checklist cache's current rule that completed tasks are deliberately excluded
   (CLAUDE.md). That rule fit a cache for follow-up queries; it doesn't fit a store
@@ -102,29 +102,96 @@ build adds a one-time backfill mode that raises the per-cycle budget until the
 
 The MCP tools keep working the whole time; they read the same tables.
 
-### 1.2 Archive lists
+### 1.2 One sync setting per list
 
-Lists that aren't mirrored today are mostly ones no longer in active use. Their tasks
-must not be lost, and they should be cleaned up over time from the app, but they
-shouldn't sit in the main sidebar.
+Decided 2026-11-24 (David): the list classification the MCP tools already use is also
+the list's sync setting. There is one setting per list, not a classification plus a
+separate sync policy.
 
-A third value joins the per-list sync policy in `config:lists`: `archive`, alongside
-the default (mirrored) and `no_sync`.
+| Setting | Sync behaviour |
+|---|---|
+| `todo` (default) | Mirrored at full speed, with a Graph subscription, so edits arrive by webhook and reach the app by push. |
+| `reference` | Mirrored after every `todo` list in each cycle, with no Graph subscription: changes arrive on the sync timer. The sub-resource scan (section 1.1) covers its open tasks only. For lookup and collection lists, not active to-dos. |
+| `excluded` | Not mirrored and never in the feed. The list stays in `list_lists` and its tasks stay readable live from Graph. |
 
-- **Mirrored like any other list,** on a slower cadence: archive lists sync after
-  every active list in each cycle, and get no Graph subscription (no webhook), so they
-  add no latency to active lists and spend none of the tenant's subscription budget.
-- **Flagged in the feed:** the list entity carries `"archived": true`. The app shows
-  archive lists in a separate, collapsed area and leaves their tasks out of My Day
-  suggestions and smart lists.
-- **Unchanged for the MCP tools:** cross-list queries (`query_tasks`,
-  `get_pending_across_lists`, `search_tasks`) skip archive lists unless a call names
-  one explicitly. That keeps MCP results the same as today, when these lists aren't in
-  the mirror at all.
-- **Moving a list to `archive`** is a config edit (`set_list_config`); moving the
-  existing `no_sync` lists over is a one-time edit after the migration ships.
-  `flaggedEmails` becomes `archive` by default, since its tasks come from flagged mail
-  that should stay findable.
+A list nothing classifies (`unclassified` in `list_lists`) syncs as `todo`. Nothing
+depends on `reference` existing: if it is dropped later, the setting is `todo` or
+`excluded`.
+
+**Where the setting comes from**, first hit wins (`classifyList`, `src/core/config/classifier.ts`):
+
+1. An ID pin in `config:lists.overrides`. `set_list_config` and the app's
+   `list.update` both write here, so a pin is the normal way to set a list. A list
+   made with `list.create` or `create_list` is pinned `todo`, so a name that matches
+   an `excluded` pattern can't drop it from the mirror.
+2. The legacy arrays, by Graph list ID or `wellknownListName`: `no_sync` means
+   `excluded`, `archive` means `reference`. Setting a list through `list.update` drops
+   its ID from both.
+3. `flaggedEmails` with no pin: `excluded`, or `reference` when `sync_flagged_emails`
+   is on.
+4. Name patterns, in order. `list_lists` pins pattern matches by ID, so a rename
+   doesn't change the setting; it doesn't pin a list that step 2 or 3 decides.
+
+**In the feed**, each list carries `"sync": "todo" | "reference"` (section 4.2). The
+server stores the setting on the list's row (migration v11), so a changed setting logs
+the list again and every client gets the new value. An excluded list is never sent:
+
+- On an incremental pull, a list that became `excluded` arrives as a deletion record,
+  and so does each of its tasks, because the server drops them from the mirror. The
+  app keeps nothing from an excluded list.
+- When a list is switched back on, it arrives again under the same `id`, and its tasks
+  return as the next sync cycles baseline the list, under their old `id`s.
+
+**Changing it from the app**: `list.update` with `{"sync": "excluded"}` (or `todo`,
+`reference`), alone or with `name` (section 5.2). The server applies it before the
+mutation returns, so the response cursor already covers the deletion records. A
+setting is not sent to Microsoft To Do. The `sync` field has a field clock like any
+other (section 6), stamped whenever the setting changes, whether from the app,
+`set_list_config` or an edit to `config:lists`. A queued `list.update` older than
+that change comes back with `sync` in `superseded_fields`.
+
+**Writing into an excluded list**: the sync API refuses `task.*`, `myday.*`,
+`step.*` and `link.*` mutations that touch an excluded list (the task's list, or
+`fields.list_id`) with `rejected` / `list_excluded`. List mutations on the excluded
+list itself still run, so the app can rename it, delete it or switch it back on.
+A `step.*` or `link.*` edit that names only the step or link, sent after the list
+was excluded, comes back `rejected` / `deleted` instead: the server no longer knows
+which task the step or link belonged to. Both errors mean the same to the app: drop
+the edit and pull.
+An MCP write tool can still create or move a task into an excluded list in Microsoft
+To Do; the server keeps no copy of it.
+
+**How a change is applied**: `config:lists` has one writer, the index
+(`IndexCore.updateListsConfig`). It applies the change to the newest config it knows,
+writes it to KV and applies it to the mirror at once. KV can serve the old value for
+up to 60 s after a write, so for 90 s the sync cycle uses the config the index last
+wrote instead of what it reads from KV. A list whose setting changes is synced first
+in a cycle that starts at once, so a list switched back on is baselined without
+waiting for the timer.
+
+**Listing excluded lists**, since the feed doesn't carry them:
+
+```
+GET /api/v1/lists/excluded
+→ { "lists": [ { "id": "0190…", "name": "GRAVEYARD", "wellknown": null } ] }
+```
+
+`id` is the list's sid, for `list.update`.
+
+**MCP tools.** `list_lists` reports `type` on every list, and `set_list_config` writes
+the same setting (`overrides`). `overrides` is merged key by key: the lists it names
+get the new setting, `null` removes a pin, and pins it doesn't name stay as they are.
+Cross-list queries (`query_tasks`, `get_pending_across_lists`, `search_tasks`) keep
+today's behaviour: they cover every mirrored list, `reference` included, and
+`exclude_types` filters by setting. An excluded list isn't mirrored, so the
+cache-backed queries don't see it. When a read's list filter (`lists`, `types`,
+`type` or `list`) names an excluded list, the result carries
+`not_mirrored: [{ "list_id", "display_name" }]` and a one-line note, so an empty
+result isn't mistaken for an empty list. `list_tasks` on an excluded list reads it
+live from Graph (`source: "graph"`) and pages it through `next_cursor` as usual.
+`list_my_day_tasks` names every excluded list the same way, since any of them can
+hold My Day tasks it can't show. `list_lists` adds pins only for lists that have none,
+so it never replaces a pin set since its own read of the config.
 
 ---
 
@@ -312,7 +379,8 @@ Authorization: Bearer <access token>
   "has_more": true,
   "changes": [
     { "kind": "list", "id": "0190…", "seq": 18001, "deleted": false,
-      "data": { "name": "🧾INVOICING", "wellknown": null, "group_id": null, "sort_key": null } },
+      "data": { "name": "🧾INVOICING", "sync": "todo", "wellknown": null, "is_owner": true,
+                "is_shared": false, "group_id": null, "sort_key": null } },
     { "kind": "task", "id": "0190…", "seq": 18002, "deleted": false,
       "data": {
         "list_id": "0190…", "title": "…", "status": "notStarted",
@@ -388,7 +456,7 @@ sent as `scope` on every pull:
 | `active` | Open tasks, plus tasks completed in the last 30 days | iPhone |
 | `all` | Every task | Mac |
 
-Archive lists (section 1.2) follow the same rule: under `active` only their open
+Reference lists (section 1.2) follow the same rule: under `active` only their open
 tasks arrive. Steps, links and attachment metadata follow their task.
 
 How the filter stays correct:
@@ -456,8 +524,8 @@ Content-Type: application/json
 
 | `op` | Fields | Write-through (today's code path) |
 |---|---|---|
-| `list.create` | `name` | Graph `POST /lists` |
-| `list.update` | `name` | Graph `PATCH` |
+| `list.create` | `name` | Graph `POST /lists`, then the new list is pinned `todo` (section 1.2) |
+| `list.update` | `name`, `sync` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. Allowed on an excluded list. |
 | `list.delete` | — | Graph `DELETE` |
 | `task.create` | `list_id`, any task field | Graph `POST`, then any Substrate fields |
 | `task.update` | any subset of: `title`, `body`, `status`, `completed_at`, `importance`, `due`, `start`, `reminder`, `categories`, `recurrence` | Graph `PATCH` with only those fields |
@@ -501,7 +569,7 @@ per-mutation results are what the app acts on.
 |---|---|---|
 | `applied` | Written to Graph and the mirror. `superseded_fields` lists fields skipped because a newer edit already set them (section 6). | Drop from the queue. |
 | `duplicate` | This `id` was already applied. The stored result is returned. | Drop from the queue. |
-| `rejected` | Will never succeed: validation error, unknown `sid`, entity deleted. `error` names the reason. | Drop, and revert the local change by pulling. |
+| `rejected` | Will never succeed: validation error, unknown `sid`, entity deleted, or `list_excluded` (it touches an excluded list, section 1.2). `error` names the reason. | Drop, and revert the local change by pulling. |
 | `failed` | Not applied. `retry: true` for throttling or Graph outages; `false` otherwise. | Retry later if `retry`, else treat as rejected. |
 | `skipped` | An earlier mutation in this batch for the same entity failed, so this one wasn't tried. | Retry with the batch. |
 
@@ -881,8 +949,8 @@ for Node). Nothing ships until this document is approved.
    `field_clock`, mark-and-sweep for `resync`/410, and `Props.principal` on new grants
    (section 15.2). No API yet; tests assert log rows for every writer.
 4. **Mirror completeness:** body columns, `linked_resources`, `attachments`, step
-   order, the generalized sub-resource scan with backfill mode, the `archive` list
-   policy.
+   order, the generalized sub-resource scan with backfill mode, the per-list sync
+   setting (section 1.2; was the `archive` list policy).
 5. **`ops/` extraction** from `register-tools.ts`, plus the single mutation queue in
    `IndexCore` (section 18.4). MCP behavior unchanged.
 6. **Router and auth:** `/api/v1` mount on both hosts, role-based resources (section
@@ -900,7 +968,8 @@ for Node). Nothing ships until this document is approved.
 
 Answered 2026-11-23:
 
-1. **Unmirrored lists** are kept, shown only in an archive area of the app (section 1.2).
+1. **Unmirrored lists** are kept, shown only in an archive area of the app. Superseded
+   2026-11-24 by the per-list sync setting (section 1.2).
 2. **History on devices** is a per-device preference: the Mac keeps everything by
    default, the iPhone keeps open and recently completed tasks (section 4.5). The server
    still backfills every task's steps, links and attachment metadata, open tasks first,
@@ -1167,6 +1236,9 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-24: section 1.2 replaced. The `archive` sync policy and the separate list
+  classification became one per-list setting (`todo` / `reference` / `excluded`), with
+  `sync` on feed lists, `list.update { sync }` and `GET /api/v1/lists/excluded`.
 - 2026-11-23: sections 15 to 17 added after review (sign-in providers, hosts other
   than Cloudflare, sharing). Items built now: `Props.principal`, `sync_log.list_sid`,
   `applied_mutations.principal`.
@@ -1320,7 +1392,7 @@ this deployment opts in (`sync_flagged_emails`), and on 2026-11-24 production he
 13,296 tasks, 10,247 of them in Flagged Emails. Two consequences:
 - **The sub-resource backfill is about five times the section 1.1 estimate** if it
   covers flagged email. Flagged-email tasks carry a linked resource (the message link)
-  and rarely steps. Proposal: when the list is `archive`, backfill only its open tasks,
+  and rarely steps. Proposal: when the list is `reference`, backfill only its open tasks,
   and fetch a completed one's sub-resources on demand (`GET /api/v1/tasks/{sid}`).
 - **The iPhone's `active` scope** includes every open flagged email. How many are open
   is unmeasured; a `query_tasks` count on that list answers it before the app is built.
@@ -1343,7 +1415,7 @@ If built, it may live in a **separate Worker** with its own Entra app registrati
 (David, 2026-11-24). That keeps the mailbox-wide token out of the task server and out of
 its MCP connectors; the task server would consume it as one more source.
 
-Until decided: keep mirroring through To Do, treat the list as `archive`, and don't
+Until decided: keep mirroring through To Do, set the list to `reference`, and don't
 backfill its sub-resources. Design the app's flagged-email area as one more source
 behind the same feed, so either option fits without app changes.
 

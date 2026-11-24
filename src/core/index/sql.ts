@@ -146,6 +146,9 @@ export interface ListRow {
   wellknown: string | null;
   is_owner: number | null;
   is_shared: number | null;
+  // The list's sync setting (migration v11): todo | reference | excluded, or
+  // NULL until the sync cycle first records it.
+  sync?: string | null;
 }
 
 // One row per checklist item (migration v3). Joinable to `tasks` by task_id so

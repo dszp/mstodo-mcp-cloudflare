@@ -31,7 +31,7 @@ export function resolveStatusFilter(
 // preserving today's "all lists" behavior. When a filter IS supplied but
 // matches nothing, returns an empty array (empty results, not an error).
 export function resolveListScope(input: {
-  roster: { list_id: string; display_name: string | null }[];
+  roster: { list_id: string; display_name: string | null; wellknown?: string | null }[];
   config: ListsConfig;
   lists?: string[];
   types?: Classification[];
@@ -49,7 +49,7 @@ export function resolveListScope(input: {
   if (!lists && !types && !exclude_types) return undefined;
 
   const classOf = new Map<string, Classification>(
-    roster.map((l) => [l.list_id, classifyList(l.display_name ?? "", config, l.list_id)]),
+    roster.map((l) => [l.list_id, classifyList(l.display_name ?? "", config, l.list_id, l.wellknown)]),
   );
   // Ids in an explicit `lists` but absent from the roster (passthrough Graph
   // ids) classify as "unclassified".

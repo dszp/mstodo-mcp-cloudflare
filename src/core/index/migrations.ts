@@ -507,6 +507,32 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 11,
+    apply: (sql) => {
+      // docs/SYNC-API.md section 1.2: each list's sync setting (todo |
+      // reference | excluded), copied from config:lists by the sync cycle and
+      // by refreshListSync, so the change feed reads it from SQL. NULL until
+      // the first cycle after this migration, and served as todo.
+      const cols = sql.exec<{ name: string }>("PRAGMA table_info(lists)").toArray().map((c) => c.name);
+      if (!cols.includes("sync")) sql.exec("ALTER TABLE lists ADD COLUMN sync TEXT");
+      // v5's list update trigger, plus the new column: a changed setting logs
+      // the list again, so clients get the new value, or drop an excluded list.
+      // Same statement shape as v5.
+      const NOW = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+      const sid = "(SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id = new.list_id)";
+      const SYNCED = ["display_name", "wellknown", "is_owner", "is_shared", "sync"];
+      sql.exec("DROP TRIGGER IF EXISTS lists_sync_au");
+      sql.exec(`
+        CREATE TRIGGER lists_sync_au AFTER UPDATE ON lists
+          WHEN ${SYNCED.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ")} BEGIN
+          DELETE FROM sync_log WHERE kind = 'list' AND sid = ${sid};
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            SELECT 'list', ${sid}, 0, ${sid}, ${NOW} WHERE ${sid} IS NOT NULL;
+        END
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

@@ -1,41 +1,86 @@
+import { classifyList } from "./classifier";
 import type { ListsConfig } from "./schemas";
 
-// Well-known lists skipped from delta sync out of the box, independent of the
-// user's no_sync setting. flaggedEmails is typically enormous (often the
-// majority of a corpus) and not used as a task list, so indexing it wastes the
-// free-tier daily rows-written budget and pollutes full-text search. Re-enabled
-// ONLY by the explicit sync_flagged_emails opt-in — never by clearing no_sync.
-export const BUILTIN_NO_SYNC_WELLKNOWN = ["flaggedEmails"] as const;
+// A list's sync setting (docs/SYNC-API.md section 1.2). It is the list's
+// classification (classifier.ts), with "unclassified" syncing as todo, so the
+// MCP tools, the mirror and the app all read one setting.
+export type ListSync = "todo" | "reference" | "excluded";
+export const LIST_SYNC_VALUES = ["todo", "reference", "excluded"] as const;
 
-// Archive lists (section 1.2): kept and synced, shown apart in the app, and
-// scanned for steps/links/attachments on open tasks only. flaggedEmails is
-// always archive when it is synced.
-export function isArchiveList(
-  list: { list_id: string; wellknown: string | null },
-  cfg: ListsConfig,
-): boolean {
-  if (list.wellknown === "flaggedEmails") return true;
-  if (list.wellknown !== null && cfg.archive.includes(list.wellknown)) return true;
-  return cfg.archive.includes(list.list_id);
+export type PolicyList = { list_id: string; wellknown: string | null; display_name?: string | null };
+
+export function listSync(list: PolicyList, cfg: ListsConfig): ListSync {
+  const c = classifyList(list.display_name ?? "", cfg, list.list_id, list.wellknown);
+  return c === "unclassified" ? "todo" : c;
 }
 
-// Single source of truth for "should this list be excluded from delta sync?".
-// Matched by wellknownListName OR Graph list id (never display name — too
-// fragile). The built-in flaggedEmails skip is checked independently of no_sync
-// so customizing no_sync for other lists can never accidentally re-enable
-// flagged-email sync.
-export function shouldSkipSync(
-  list: { list_id: string; wellknown: string | null },
-  cfg: ListsConfig,
-): boolean {
-  if (
-    list.wellknown !== null &&
-    (BUILTIN_NO_SYNC_WELLKNOWN as readonly string[]).includes(list.wellknown) &&
-    !cfg.sync_flagged_emails
-  ) {
-    return true;
+// Reference lists: mirrored after every todo list in each cycle, with no Graph
+// subscription, and scanned for steps/links/attachments on open tasks only.
+// (Flagged email gets no such scan at all; see #runChecklistScanBatch.)
+export function isArchiveList(list: PolicyList, cfg: ListsConfig): boolean {
+  return listSync(list, cfg) === "reference";
+}
+
+// Single source of truth for "should this list be left out of the mirror?".
+// An excluded list keeps its roster row (list_lists still shows it and its
+// tasks stay readable live from Graph), but its tasks aren't mirrored and the
+// sync feed never carries it.
+export function shouldSkipSync(list: PolicyList, cfg: ListsConfig): boolean {
+  return listSync(list, cfg) === "excluded";
+}
+
+// Set one list's setting: pin it by Graph list ID and drop the ID from the
+// legacy arrays, so the pin is the only thing deciding it. Pure.
+export function withListSync(cfg: ListsConfig, listId: string, sync: ListSync): ListsConfig {
+  return {
+    ...cfg,
+    overrides: { ...cfg.overrides, [listId]: sync },
+    no_sync: cfg.no_sync.filter((x) => x !== listId),
+    archive: cfg.archive.filter((x) => x !== listId),
+  };
+}
+
+// One change to config:lists, as data so it can cross Durable Object RPC: the
+// index applies it to the newest config it knows (IndexCore.updateListsConfig).
+// `patterns` and `no_sync` replace; `overrides` and `aliases` merge per key,
+// with null removing that key, so a caller holding an old copy of the map
+// changes only the keys it names.
+export interface ListsConfigChange {
+  patterns?: ListsConfig["patterns"];
+  overrides?: Record<string, ListSync | null>;
+  // Pins to add only where the list has none in the config the change is
+  // applied to. For list_lists auto-pinning, which works out its pins from a
+  // copy of the config that may be stale and must never replace a pin made
+  // since (create_list's todo, a set_list_config change).
+  pin_if_absent?: Record<string, ListSync>;
+  no_sync?: string[];
+  sync_flagged_emails?: boolean;
+  aliases?: Record<string, string | null>;
+  clear_aliases?: boolean;
+}
+
+// Pure. A pin also drops its list ID from the legacy arrays (withListSync), so
+// removing the pin later leaves the list to patterns rather than to a stale
+// legacy entry. Applied after `no_sync`, so a pin in the same change wins.
+export function applyListsConfigChange(cfg: ListsConfig, change: ListsConfigChange): ListsConfig {
+  let next: ListsConfig = {
+    ...cfg,
+    patterns: change.patterns ?? cfg.patterns,
+    no_sync: change.no_sync ?? cfg.no_sync,
+    sync_flagged_emails: change.sync_flagged_emails ?? cfg.sync_flagged_emails,
+    aliases: change.clear_aliases ? {} : { ...cfg.aliases },
+    overrides: { ...cfg.overrides },
+  };
+  for (const [alias, id] of Object.entries(change.aliases ?? {})) {
+    if (id === null) delete next.aliases[alias];
+    else next.aliases[alias] = id;
   }
-  if (list.wellknown !== null && cfg.no_sync.includes(list.wellknown)) return true;
-  if (cfg.no_sync.includes(list.list_id)) return true;
-  return false;
+  for (const [listId, sync] of Object.entries(change.overrides ?? {})) {
+    if (sync === null) delete next.overrides[listId];
+    else next = withListSync(next, listId, sync);
+  }
+  for (const [listId, sync] of Object.entries(change.pin_if_absent ?? {})) {
+    if (!next.overrides[listId]) next = withListSync(next, listId, sync);
+  }
+  return next;
 }

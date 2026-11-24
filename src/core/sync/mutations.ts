@@ -44,7 +44,9 @@ export type MutationResult =
 // stamps every field it sets.
 export const UPDATABLE: Record<string, readonly string[]> = {
   "task.update": ["title", "body", "status", "completed_at", "importance", "due", "start", "reminder", "categories", "recurrence"],
-  "list.update": ["name"],
+  // `sync` is the list's sync setting (section 1.2), kept by this server
+  // rather than in Microsoft To Do.
+  "list.update": ["name", "sync"],
   "step.update": ["title", "checked"],
   "link.update": ["url", "title"],
 };
@@ -91,6 +93,8 @@ export interface Resolved {
   // The entity's row exists in the mirror now. A sid can be known (it was
   // issued) and not live (the entity was deleted): "delete wins".
   live: boolean;
+  // The entity is an excluded list or belongs to one (section 1.2).
+  excluded?: boolean;
 }
 
 // The server-side half, run inside the index (one SQLite each call). On
@@ -278,6 +282,12 @@ async function applyOne(
   const refs = refsOf(m);
   const resolved = await store.resolveSids(refs);
   const self = resolved[key({ kind, sid: m.sid })] ?? { graph_id: null, live: false };
+  // An excluded list isn't mirrored, so nothing may be written into it from
+  // here: the change would never reach the feed. The list itself can still be
+  // renamed, deleted, or switched back on (list.update { sync }).
+  if (kind !== "list" && refs.some((r) => resolved[key(r)]?.excluded)) {
+    return finish({ id: m.id, status: "rejected", error: "list_excluded" });
+  }
   const ids: Record<string, string> = {};
   for (const r of refs.slice(1)) {
     const x = resolved[key(r)];

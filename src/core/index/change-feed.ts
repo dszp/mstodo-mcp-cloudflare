@@ -65,6 +65,8 @@ export interface FeedTask {
 }
 export interface FeedList {
   name: string | null;
+  // The list's sync setting (section 1.2). Excluded lists never appear.
+  sync: "todo" | "reference";
   wellknown: string | null;
   is_owner: boolean | null;
   is_shared: boolean | null;
@@ -296,8 +298,13 @@ function buildLists(sql: SqlDb, listIds: string[]): Map<string, FeedList> {
     const chunk = listIds.slice(i, i + 200);
     const rows = sql.exec(`SELECT * FROM lists WHERE list_id IN (${inPlaceholders(chunk.length)})`, ...chunk).toArray();
     for (const l of rows) {
+      // An excluded list is never in the feed (section 1.2): with no data it
+      // goes out as a deletion record on an incremental pull, and is skipped
+      // on a full sync.
+      if (l.sync === "excluded") continue;
       out.set(l.list_id as string, {
         name: (l.display_name as string | null) ?? null,
+        sync: l.sync === "reference" ? "reference" : "todo",
         wellknown: (l.wellknown as string | null) ?? null,
         is_owner: l.is_owner == null ? null : l.is_owner === 1,
         is_shared: l.is_shared == null ? null : l.is_shared === 1,
@@ -309,13 +316,16 @@ function buildLists(sql: SqlDb, listIds: string[]): Map<string, FeedList> {
   return out;
 }
 
-// Tasks still waiting for the sub-resource scan. Flagged email is never
-// scanned (sync-policy), so it isn't counted as outstanding.
+// Tasks still waiting for the sub-resource scan, counted with the scan's own
+// filter (IndexCore #runChecklistScanBatch) so this can reach zero: flagged
+// email is never scanned, and a reference list's completed tasks aren't
+// either (section 1.2).
 export function backfillRemaining(sql: SqlDb): number {
   return sql
     .exec<{ n: number }>(
       `SELECT count(*) n FROM tasks t JOIN lists l ON l.list_id = t.list_id
-       WHERE t.checklist_synced_at IS NULL AND (l.wellknown IS NULL OR l.wellknown <> 'flaggedEmails')`,
+       WHERE t.checklist_synced_at IS NULL AND (l.wellknown IS NULL OR l.wellknown <> 'flaggedEmails')
+         AND NOT (l.sync IS 'reference' AND t.status = 'completed')`,
     )
     .one().n;
 }

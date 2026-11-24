@@ -69,6 +69,7 @@ function matchRoute(path: string): Route | null {
   if (path === "/sync/changes") return syncChanges;
   if (path === "/sync/info") return syncInfo;
   if (path === "/search") return search;
+  if (path === "/lists/excluded") return excludedLists;
   const task = /^\/tasks\/([^/]+)$/.exec(path);
   if (task) return (_url, env) => taskBySid(task[1], env);
   return null;
@@ -88,6 +89,13 @@ async function syncChanges(url: URL, env: AppEnv): Promise<Response> {
   // 410: the client discards its cursor and runs a full sync (section 4.3).
   const status = result.error === "cursor_reset" || result.error === "cursor_expired" ? 410 : 400;
   return error(result.error, status);
+}
+
+// GET /api/v1/lists/excluded — lists whose sync setting is excluded. The feed
+// never carries them, so the app lists them here and can switch one back on
+// with list.update { sync } (section 1.2).
+async function excludedLists(_url: URL, env: AppEnv): Promise<Response> {
+  return json({ lists: await ownerIndex(env).excludedLists() });
 }
 
 // GET /api/v1/tasks/{sid} — one task, for a search hit or an out-of-scope link.

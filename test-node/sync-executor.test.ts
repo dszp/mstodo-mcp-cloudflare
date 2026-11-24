@@ -178,3 +178,42 @@ describe("completion", () => {
     expect(completion({ completed_date: null }, "2026-11-24")).toEqual({ completed_date: null });
   });
 });
+
+describe("list.update sync (docs/SYNC-API.md section 1.2)", () => {
+  function syncCtx() {
+    const patchJson = vi.fn(async () => ({ id: "L1", displayName: "renamed" }));
+    const updateListsConfig = vi.fn(async () => ({}));
+    const ctx = {
+      env: { TIMEZONE: "UTC" },
+      graph: { patchJson },
+      index: { updateListsConfig, upsertList: async () => {} },
+      writes: { run: (fn: () => Promise<unknown>) => fn() },
+    } as unknown as OpsContext;
+    return { ctx, patchJson, updateListsConfig };
+  }
+  const update = (fields: Record<string, unknown>): ExecInput => ({ ...listUpdate, fields });
+
+  it("pins the setting through the index's config write path and skips Graph", async () => {
+    const h = syncCtx();
+    expect(await syncExecutor(h.ctx)(update({ sync: "excluded" }))).toEqual({ ok: true, graphId: "L1" });
+    expect(h.updateListsConfig).toHaveBeenCalledExactlyOnceWith({ overrides: { L1: "excluded" } });
+    expect(h.patchJson).not.toHaveBeenCalled();
+  });
+
+  it("renames and sets the setting in one mutation", async () => {
+    const h = syncCtx();
+    expect(await syncExecutor(h.ctx)(update({ name: "renamed", sync: "reference" }))).toEqual({ ok: true, graphId: "L1" });
+    expect(h.patchJson).toHaveBeenCalledOnce();
+    expect(h.updateListsConfig).toHaveBeenCalledExactlyOnceWith({ overrides: { L1: "reference" } });
+  });
+
+  it.each([
+    ["an unknown setting", { sync: "archive" }, "invalid_field:sync"],
+    ["neither field", {}, "invalid_field:name"],
+    ["an empty name", { name: "", sync: "todo" }, "invalid_field:name"],
+  ])("rejects %s", async (_label, fields, error) => {
+    const h = syncCtx();
+    expect(await syncExecutor(h.ctx)(update(fields))).toEqual({ ok: false, error, retry: false, rejected: true });
+    expect(h.updateListsConfig).not.toHaveBeenCalled();
+  });
+});
