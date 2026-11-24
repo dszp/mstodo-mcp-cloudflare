@@ -268,6 +268,9 @@ export class IndexCore implements TokenProvider {
   #pendingListsConfig: { cfg: ListsConfig; at: number } | null | undefined = undefined;
   // Serializes updateListsConfig.
   #configChain: Promise<void> = Promise.resolve();
+  // Per list, how many times #purgeSkippedList has emptied it. #syncResource
+  // compares it across its Graph fetch (see there).
+  #purges = new Map<string, number>();
 
   constructor(deps: {
     sql: SqlDb;
@@ -2719,6 +2722,7 @@ export class IndexCore implements TokenProvider {
     const hasState =
       !!this.#getSyncState(`tasks:${listId}`) || !!this.#getSyncState(`myday:${listId}`);
     if (!hasRows && !hasState) return;
+    this.#purges.set(listId, (this.#purges.get(listId) ?? 0) + 1);
     this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
     for (const table of ["checklist_items", "linked_resources", "attachments"]) {
       this.#sql.exec(`DELETE FROM ${table} WHERE list_id = ?`, listId);
@@ -2741,10 +2745,17 @@ export class IndexCore implements TokenProvider {
     const isBaseline = !st?.next_link && !st?.delta_link;
     const graph = new GraphClient(this);
 
-    // A list excluded while its pages were in flight (refreshListSync purged
-    // it): drop what came back and leave no sync state, or the rows and a
-    // fresh cursor would bring the list back into the mirror.
-    const excludedNow = () => resource.startsWith("tasks:") && this.#isExcluded(resource.slice("tasks:".length));
+    // A list purged while its pages were in flight (refreshListSync excluded
+    // it): drop what came back and leave no sync state. If it is still
+    // excluded, the rows and a fresh cursor would bring it back into the
+    // mirror. If it was switched back on meanwhile, the result continues a
+    // cursor that no longer matches the emptied list: storing its delta link
+    // would leave the list empty but idle. With no state, the list's next
+    // sync (it is hot, so at once) is a fresh baseline.
+    const listId = resource.startsWith("tasks:") ? resource.slice("tasks:".length) : null;
+    const purgesBefore = listId === null ? 0 : (this.#purges.get(listId) ?? 0);
+    const excludedNow = () =>
+      listId !== null && (this.#isExcluded(listId) || (this.#purges.get(listId) ?? 0) !== purgesBefore);
     try {
       const res = await followToTerminal(graph, startUrl, Math.max(1, maxPages));
       if (excludedNow()) return { pagesFetched: res.pagesFetched, midCycle: false };

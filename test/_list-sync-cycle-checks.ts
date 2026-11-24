@@ -18,7 +18,14 @@ const page = (value: unknown[], deltaLink: string) =>
 // Graph as a roster plus each list's tasks. `onTasks` runs when a list's task
 // delta is requested, before the response: the place to land a concurrent
 // change. Delta links point back at the same handlers.
-function stubGraph(roster: string[], tasks: Record<string, string[]>, onTasks: (listId: string) => Promise<void> = async () => {}) {
+// `incremental` overrides what a list's delta link (as opposed to its
+// baseline) returns.
+function stubGraph(
+  roster: string[],
+  tasks: Record<string, string[]>,
+  onTasks: (listId: string) => Promise<void> = async () => {},
+  incremental: Record<string, string[]> = {},
+) {
   const fetched: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -31,7 +38,8 @@ function stubGraph(roster: string[], tasks: Record<string, string[]>, onTasks: (
         if (url === tasksDelta(id) || url === `${tasksDelta(id)}/next`) {
           fetched.push(id);
           await onTasks(id);
-          return page(tasks[id].map(task), `${tasksDelta(id)}/next`);
+          const ids = url.endsWith("/next") && incremental[id] ? incremental[id] : tasks[id];
+          return page(ids.map(task), `${tasksDelta(id)}/next`);
         }
       }
       return new Response("unscripted", { status: 404 });
@@ -58,7 +66,24 @@ export async function runListSyncCycleChecks(c: IndexCore, env: AppEnv, getAlarm
     });
     await c.runSyncCycle();
 
-    // 3. KV still serves the old value (excluded) after a change to todo was
+    // 3. Excluded and switched back on while an incremental fetch is in
+    //    flight: its (empty) result continues the purged cursor and is
+    //    dropped, and the next cycle baselines the list.
+    stubGraph(["FLIP"], { FLIP: ["T-FLIP"] });
+    await c.runSyncCycle();
+    let flipped = false;
+    stubGraph(["FLIP"], { FLIP: ["T-FLIP"] }, async (id) => {
+      if (id !== "FLIP" || flipped) return;
+      flipped = true;
+      await c.updateListsConfig({ overrides: { FLIP: "excluded" } });
+      await c.updateListsConfig({ overrides: { FLIP: "todo" } });
+    }, { FLIP: [] });
+    await c.runSyncCycle();
+    const flipAfterRace = { rows: rows("FLIP"), synced: c.isListSynced("FLIP") };
+    await c.runSyncCycle();
+    const flip = { racedRows: flipAfterRace.rows, racedSynced: flipAfterRace.synced, rows: rows("FLIP") };
+
+    // 4. KV still serves the old value (excluded) after a change to todo was
     //    handed to the index: the next cycle keeps todo and baselines the list.
     await c.updateListsConfig({ overrides: { STALE: "excluded" } });
     const staleKv = ListsConfigSchema.parse({ overrides: { RACE: "excluded", STALE: "excluded" } });
@@ -73,6 +98,8 @@ export async function runListSyncCycleChecks(c: IndexCore, env: AppEnv, getAlarm
       "a list excluded mid-cycle keeps no sync state": raced.synced === false,
       "a list excluded mid-cycle is not fetched later in it": fetched.length === 1,
       "a setting changed mid-cycle re-arms the alarm at once": raced.alarm !== null && raced.alarm - Date.now() < 1_000,
+      "a list purged and re-included mid-fetch isn't marked synced while empty": flip.racedRows.length > 0 || !flip.racedSynced,
+      "the next cycle baselines it and its tasks come back": flip.rows.join() === "T-FLIP",
       "a stale KV read doesn't flip a newer setting back": stale.sync === "todo",
       "the re-included list is baselined in that cycle": stale.rows.join() === "T-STALE",
     };
