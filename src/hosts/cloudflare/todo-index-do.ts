@@ -57,6 +57,8 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   recreateSubscriptions(...a: Parameters<IndexCore["recreateSubscriptions"]>) { return this.#core.recreateSubscriptions(...a); }
   refreshToken(...a: Parameters<IndexCore["refreshToken"]>) { return this.#core.refreshToken(...a); }
   renewSubscriptions(...a: Parameters<IndexCore["renewSubscriptions"]>) { return this.#core.renewSubscriptions(...a); }
+  replaceAttachments(...a: Parameters<IndexCore["replaceAttachments"]>) { return this.#core.replaceAttachments(...a); }
+  replaceLinkedResources(...a: Parameters<IndexCore["replaceLinkedResources"]>) { return this.#core.replaceLinkedResources(...a); }
   replaceChecklistItems(...a: Parameters<IndexCore["replaceChecklistItems"]>) { return this.#core.replaceChecklistItems(...a); }
   reportClaimsChallenge(...a: Parameters<IndexCore["reportClaimsChallenge"]>) { return this.#core.reportClaimsChallenge(...a); }
   resetIdentity(...a: Parameters<IndexCore["resetIdentity"]>) { return this.#core.resetIdentity(...a); }

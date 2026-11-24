@@ -1,6 +1,8 @@
 import {
   TodoTaskListSchema,
+  type Attachment,
   type ChecklistItem,
+  type LinkedResource,
   type TodoTask,
   type TodoTaskList,
 } from "../graph/types";
@@ -51,7 +53,7 @@ import {
   maxSubscriptionOpsPerCycle,
 } from "../subscriptions/gate";
 import { checklistCacheEnabled, checklistScanMaxTasksPerCycle } from "../checklist/gate";
-import { listChecklistItems } from "../graph/todo-resources";
+import { getTaskWithSubresources, listAttachments } from "../graph/todo-resources";
 import {
   createSubscription,
   renewSubscription,
@@ -501,6 +503,8 @@ export class IndexCore implements TokenProvider {
     // Cascade: no FK, so drop the task's checklist rows explicitly (FTS follows
     // via the AFTER DELETE trigger). Cheap no-op when the cache is unused.
     this.#sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
+    this.#sql.exec("DELETE FROM linked_resources WHERE task_id = ?", taskId);
+    this.#sql.exec("DELETE FROM attachments WHERE task_id = ?", taskId);
   }
 
   // A task moved to another list, as one transaction. Replaces the old
@@ -541,12 +545,9 @@ export class IndexCore implements TokenProvider {
         this.#sql.exec("UPDATE tasks SET task_id = ?, list_id = ? WHERE task_id = ?", to, toListId, taskId);
       }
       this.#stampTask(to);
-      this.#sql.exec(
-        "UPDATE checklist_items SET task_id = ?, list_id = ? WHERE task_id = ?",
-        to,
-        toListId,
-        taskId,
-      );
+      for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+        this.#sql.exec(`UPDATE ${table} SET task_id = ?, list_id = ? WHERE task_id = ?`, to, toListId, taskId);
+      }
     });
   }
 
@@ -619,12 +620,17 @@ export class IndexCore implements TokenProvider {
   // row isn't indexed yet — the items still land and the next delta creates the
   // task row. Synchronous (atomic) like the other write-throughs.
   replaceChecklistItems(taskId: string, listId: string, items: ChecklistItem[]): void {
-    this.#sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
+    // Diff, not delete-and-reinsert: an unchanged step writes nothing, so the
+    // change log isn't bumped on every scan (section 18.6).
+    this.#deleteMissing("checklist_items", "item_id", taskId, items.map((i) => i.id));
     for (const item of items) {
       const row = checklistItemToRow(item, taskId, listId);
       this.#sql.exec(
         `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
-           VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})`,
+           VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})
+         ON CONFLICT(item_id) DO UPDATE SET
+           task_id=excluded.task_id, list_id=excluded.list_id, display_name=excluded.display_name,
+           is_checked=excluded.is_checked, created_at=excluded.created_at, checked_at=excluded.checked_at`,
         ...CHECKLIST_COLUMNS.map((c) => row[c]),
       );
     }
@@ -634,6 +640,50 @@ export class IndexCore implements TokenProvider {
       items.length > 0 ? 1 : 0,
       taskId,
     );
+  }
+
+  // Delete a task's rows in `table` whose key isn't in `keep`.
+  #deleteMissing(table: string, key: string, taskId: string, keep: string[]): void {
+    const have = this.#sql
+      .exec<{ k: string }>(`SELECT ${key} k FROM ${table} WHERE task_id = ?`, taskId)
+      .toArray()
+      .map((r) => r.k);
+    const keepSet = new Set(keep);
+    for (const k of have) if (!keepSet.has(k)) this.#sql.exec(`DELETE FROM ${table} WHERE ${key} = ?`, k);
+  }
+
+  // Authoritative replace of a task's linked resources from a fresh Graph
+  // fetch (the sub-resource scan), as a diff.
+  replaceLinkedResources(taskId: string, listId: string, links: LinkedResource[]): void {
+    this.#deleteMissing("linked_resources", "link_id", taskId, links.map((l) => l.id));
+    for (const l of links) {
+      this.#sql.exec(
+        `INSERT INTO linked_resources (link_id, task_id, list_id, web_url, display_name, application_name, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(link_id) DO UPDATE SET task_id=excluded.task_id, list_id=excluded.list_id,
+           web_url=excluded.web_url, display_name=excluded.display_name,
+           application_name=excluded.application_name, external_id=excluded.external_id`,
+        l.id, taskId, listId, l.webUrl ?? null, l.displayName ?? null, l.applicationName ?? null, l.externalId ?? null,
+      );
+    }
+  }
+
+  // Authoritative replace of a task's attachment metadata (no bytes), as a diff.
+  replaceAttachments(taskId: string, listId: string, atts: Attachment[]): void {
+    this.#deleteMissing("attachments", "attachment_id", taskId, atts.map((a) => a.id));
+    for (const a of atts) {
+      const modified = a.lastModifiedDateTime ? Date.parse(a.lastModifiedDateTime) : NaN;
+      this.#sql.exec(
+        `INSERT INTO attachments (attachment_id, task_id, list_id, name, size, content_type, kind, modified_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(attachment_id) DO UPDATE SET task_id=excluded.task_id, list_id=excluded.list_id,
+           name=excluded.name, size=excluded.size, content_type=excluded.content_type,
+           kind=excluded.kind, modified_at=excluded.modified_at`,
+        a.id, taskId, listId, a.name ?? null, a.size ?? null, a.contentType ?? null,
+        a["@odata.type"] === "#microsoft.graph.taskReferenceAttachment" ? "reference" : "file",
+        Number.isNaN(modified) ? null : modified,
+      );
+    }
   }
 
   // Mark a task's checklist stale so the next budgeted scan re-fetches it. The
@@ -791,7 +841,9 @@ export class IndexCore implements TokenProvider {
     // Drop the list and its tasks (FTS rows cascade via the AFTER DELETE
     // trigger as each task row is removed).
     this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
-    this.#sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
+    for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+      this.#sql.exec(`DELETE FROM ${table} WHERE list_id = ?`, listId);
+    }
     this.#sql.exec("DELETE FROM lists WHERE list_id = ?", listId);
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
@@ -1848,12 +1900,14 @@ export class IndexCore implements TokenProvider {
         for (const l of stale) this.deleteList(l.list_id);
       } else {
         const listId = resource.slice("tasks:".length);
-        this.#sql.exec(
-          `DELETE FROM checklist_items WHERE task_id IN (
-             SELECT task_id FROM tasks WHERE list_id = ? AND (baseline_gen IS NULL OR baseline_gen <> ?))`,
-          listId,
-          gen,
-        );
+        for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+          this.#sql.exec(
+            `DELETE FROM ${table} WHERE task_id IN (
+               SELECT task_id FROM tasks WHERE list_id = ? AND (baseline_gen IS NULL OR baseline_gen <> ?))`,
+            listId,
+            gen,
+          );
+        }
         this.#sql.exec(
           "DELETE FROM tasks WHERE list_id = ? AND (baseline_gen IS NULL OR baseline_gen <> ?)",
           listId,
@@ -1903,8 +1957,9 @@ export class IndexCore implements TokenProvider {
     // A different owner: no client may continue from a cursor into the old
     // owner's data. Drop the change log and stable IDs (the deletes above
     // logged tombstones) and replace the epoch.
-    this.#sql.exec("DELETE FROM sync_log");
-    this.#sql.exec("DELETE FROM entity_map");
+    for (const table of ["checklist_items", "linked_resources", "attachments", "sync_log", "entity_map"]) {
+      this.#sql.exec(`DELETE FROM ${table}`);
+    }
     this.#sql.exec("UPDATE sync_meta SET epoch = lower(hex(randomblob(8))) WHERE id = 1");
     await this.#alarms.deleteAlarm();
   }
@@ -2034,7 +2089,9 @@ export class IndexCore implements TokenProvider {
       !!this.#getSyncState(`tasks:${listId}`) || !!this.#getSyncState(`myday:${listId}`);
     if (!hasRows && !hasState) return;
     this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
-    this.#sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
+    for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+      this.#sql.exec(`DELETE FROM ${table} WHERE list_id = ?`, listId);
+    }
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
   }
@@ -2359,8 +2416,16 @@ export class IndexCore implements TokenProvider {
     let errored = 0;
     for (const { task_id, list_id } of due) {
       try {
-        const items = await listChecklistItems(graph, list_id, task_id);
-        this.replaceChecklistItems(task_id, list_id, items);
+        // One GET returns the steps and linked resources; attachments need
+        // their own call, made only when the task has any (section 1.1).
+        const t = await getTaskWithSubresources(graph, list_id, task_id);
+        const atts = t.hasAttachments ? await listAttachments(graph, list_id, task_id) : [];
+        this.#transact(() => {
+          this.replaceLinkedResources(task_id, list_id, t.linkedResources ?? []);
+          this.replaceAttachments(task_id, list_id, atts);
+          // Last: it clears the "needs fetch" marker.
+          this.replaceChecklistItems(task_id, list_id, t.checklistItems ?? []);
+        });
         scanned += 1;
       } catch (e) {
         errored += 1;
