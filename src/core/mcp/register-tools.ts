@@ -69,6 +69,21 @@ import { addToMyDay, committedDatePart, removeFromMyDay, reorderMyDayTask, today
 
 const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
 
+// The first page of a list's tasks, read live (list_tasks' Graph paths).
+function graphTasksUrl(listId: string, top: number, status?: string): string {
+  const u = new URL(`${LISTS_URL}/${encodeURIComponent(listId)}/tasks`);
+  u.searchParams.set("$top", String(top));
+  if (status) u.searchParams.set("$filter", `status eq '${status}'`);
+  return u.toString();
+}
+const GraphTasksPageSchema = z
+  .object({
+    "@odata.context": z.string().optional(),
+    "@odata.nextLink": z.string().optional(),
+    value: z.array(TodoTaskSchema),
+  })
+  .passthrough();
+
 // My Day CommittedDay is a local calendar date (YYYY-MM-DD), not UTC. The Worker
 // runs UTC, so when the caller omits `date` we compute "today" in the Worker's
 // configured TIMEZONE (an IANA name). en-CA formats as YYYY-MM-DD.
@@ -142,7 +157,40 @@ function positionArg(
 // future per-list conditional GETs.
 // Where a roster/list read was served from: the DO index (authoritative) or a
 // cold live-Graph enumerate while the index is still warming.
-type ListsSource = "index" | "graph_cold";
+type ListsSource = "index" | "graph_cold" | "graph";
+
+// Excluded lists (docs/SYNC-API.md section 1.2) among those a read is
+// filtered to. Their tasks aren't in the index, so a cached read leaves them
+// out; the response names them so the model doesn't take the gap for "no
+// tasks".
+type NotMirrored = Array<{ list_id: string; display_name: string | null }>;
+const NOT_MIRRORED_NOTE =
+  "These lists are excluded from the mirror, so their tasks are not in these results. " +
+  "Read one live with list_tasks, or switch it back on with set_list_config overrides.";
+function notMirroredFields(lists: NotMirrored): Record<string, unknown> {
+  return lists.length > 0 ? { not_mirrored: lists, not_mirrored_note: NOT_MIRRORED_NOTE } : {};
+}
+
+// list_tasks pages an excluded list live from Graph. Its cursor carries
+// Graph's @odata.nextLink, prefixed so it can't be taken for an index keyset
+// cursor (those are bare base64url). On the way back in, the link must be a
+// Graph URL for the same list's tasks; anything else is refused.
+const GRAPH_CURSOR_PREFIX = "g.";
+function encodeGraphCursor(nextLink: string): string {
+  return GRAPH_CURSOR_PREFIX + btoa(nextLink).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function decodeGraphCursor(cursor: string, listId: string): string | null {
+  try {
+    const raw = atob(cursor.slice(GRAPH_CURSOR_PREFIX.length).replace(/-/g, "+").replace(/_/g, "/"));
+    const u = new URL(raw);
+    const path = decodeURIComponent(u.pathname);
+    return u.protocol === "https:" && u.host === "graph.microsoft.com" && path === `/v1.0/me/todo/lists/${listId}/tasks`
+      ? raw
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 // Strip @odata.* annotations from the public surface — the LLM only cares about
 // the user-facing fields. Shared by list_lists and get_list response builders.
@@ -201,6 +249,7 @@ function tasksResponse(args: {
   tasks: unknown[];
   next_cursor: string | undefined;
   source: ListsSource;
+  extra?: Record<string, unknown>;
 }): McpResponse {
   return {
     content: [
@@ -211,6 +260,7 @@ function tasksResponse(args: {
           list_id: args.list_id,
           source: args.source,
           count: args.tasks.length,
+          ...(args.extra ?? {}),
           // Present only when more pages exist; pass back as `cursor` to
           // list_tasks to resume. Absent on the cold (graph_cold) path.
           next_cursor: args.next_cursor,
@@ -340,7 +390,7 @@ function indexTasksResponse(args: {
 // count; `tasks` carries each task's matched items with epoch→ISO timestamps.
 function checklistItemsResponse(
   rows: ChecklistSearchRow[],
-  extra: { query?: string; pending_only: boolean },
+  extra: { query?: string; pending_only: boolean; not_mirrored?: unknown; not_mirrored_note?: unknown },
 ): McpResponse {
   const byTask = new Map<
     string,
@@ -388,6 +438,9 @@ function checklistItemsResponse(
           count: rows.length,
           pending_only: extra.pending_only,
           ...(extra.query !== undefined ? { query: extra.query } : {}),
+          ...(extra.not_mirrored !== undefined
+            ? { not_mirrored: extra.not_mirrored, not_mirrored_note: extra.not_mirrored_note }
+            : {}),
           tasks: [...byTask.values()],
         }),
       },
@@ -725,7 +778,7 @@ class ToDoTools implements TokenProvider {
       "list_tasks",
       {
         description:
-          "Return one page of tasks from a Microsoft To Do list, served from the TodoIndex (source: 'index'). Pagination uses an opaque keyset next_cursor — pass it back as `cursor` for the next page (absent on the last page). While the index is warming for a list (source: 'graph_cold'), a single live Graph page is returned without a cursor; retry shortly for full pagination. Returns count + next_cursor + tasks.",
+          "Return one page of tasks from a Microsoft To Do list, served from the TodoIndex (source: 'index'). Pagination uses an opaque keyset next_cursor — pass it back as `cursor` for the next page (absent on the last page). While the index is warming for a list (source: 'graph_cold'), a single live Graph page is returned without a cursor; retry shortly for full pagination. A list excluded from the mirror is read live from Graph (source: 'graph', with not_mirrored) and pages the same way through next_cursor. Returns count + next_cursor + tasks.",
         inputSchema: {
           list: z
             .string()
@@ -745,13 +798,38 @@ class ToDoTools implements TokenProvider {
           cursor: z
             .string()
             .optional()
-            .describe("Opaque keyset pagination token from a prior list_tasks response."),
+            .describe("Opaque pagination token from a prior list_tasks response."),
         },
       },
       async ({ list, status, top, cursor }): Promise<McpResponse> =>
         this.withGraph("list_tasks", async (graph) => {
           const list_id = await this.resolveList(list);
           const limit = top ?? 50;
+
+          // An excluded list has no rows in the index: page it live from Graph.
+          const notMirrored = await this.#notMirrored([list_id]);
+          if (notMirrored.length > 0 || cursor?.startsWith(GRAPH_CURSOR_PREFIX)) {
+            let url: string;
+            if (cursor) {
+              const link = cursor.startsWith(GRAPH_CURSOR_PREFIX) ? decodeGraphCursor(cursor, list_id) : null;
+              if (!link) {
+                return errResponse("invalid_cursor", { list_id, hint: "Call list_tasks again without `cursor`." });
+              }
+              url = link;
+            } else {
+              url = graphTasksUrl(list_id, limit, status);
+            }
+            const page = await this.#graphTasksPage(graph, url);
+            if ("error" in page) return errResponse(page.error, { list_id });
+            const next = page["@odata.nextLink"];
+            return tasksResponse({
+              list_id,
+              tasks: page.value.map(summarizeTask),
+              next_cursor: next ? encodeGraphCursor(next) : undefined,
+              source: "graph",
+              extra: notMirroredFields(notMirrored),
+            });
+          }
 
           // Serve from the DO when the list has an authoritative baseline, OR
           // whenever a cursor is supplied (a cursor only ever comes from a prior
@@ -779,38 +857,14 @@ class ToDoTools implements TokenProvider {
           await this.#index()
             .ensureSyncing()
             .catch((e) => log.warn("index_ensure_syncing_failed", { error: String(e) }));
-          const u = new URL(
-            `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks`,
-          );
-          u.searchParams.set("$top", String(limit));
-          if (status) u.searchParams.set("$filter", `status eq '${status}'`);
-          const PageSchema = z
-            .object({
-              "@odata.context": z.string().optional(),
-              "@odata.nextLink": z.string().optional(),
-              value: z.array(TodoTaskSchema),
-            })
-            .passthrough();
-          try {
-            const page = await graph.getJson(u.toString(), PageSchema);
-            return tasksResponse({
-              list_id,
-              tasks: page.value.map(summarizeTask),
-              next_cursor: undefined,
-              source: "graph_cold",
-            });
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("list_not_found", { list_id });
-              }
-            }
-            throw e;
-          }
+          const page = await this.#graphTasksPage(graph, graphTasksUrl(list_id, limit, status));
+          if ("error" in page) return errResponse(page.error, { list_id });
+          return tasksResponse({
+            list_id,
+            tasks: page.value.map(summarizeTask),
+            next_cursor: undefined,
+            source: "graph_cold",
+          });
         }),
     );
 
@@ -2458,7 +2512,7 @@ class ToDoTools implements TokenProvider {
             cursor,
           });
           await this.#warmIfEmpty(rows.length);
-          return indexTasksResponse({ rows, next_cursor });
+          return indexTasksResponse({ rows, next_cursor, extra: notMirroredFields(await this.#notMirrored(listIds)) });
         }),
     );
 
@@ -2559,7 +2613,10 @@ class ToDoTools implements TokenProvider {
             });
           }
           await this.#warmIfEmpty(result.rows.length);
-          return indexTasksResponse({ rows: result.rows, extra: { query } });
+          return indexTasksResponse({
+            rows: result.rows,
+            extra: { query, ...notMirroredFields(await this.#notMirrored(listIds)) },
+          });
         }),
     );
 
@@ -2618,6 +2675,7 @@ class ToDoTools implements TokenProvider {
           return checklistItemsResponse(result.rows, {
             query,
             pending_only: pending_only ?? true,
+            ...notMirroredFields(await this.#notMirrored(listIds)),
           });
         }),
     );
@@ -2739,7 +2797,11 @@ class ToDoTools implements TokenProvider {
             limit,
             cursor,
           });
-          return indexTasksResponse({ rows, next_cursor, extra: { type } });
+          return indexTasksResponse({
+            rows,
+            next_cursor,
+            extra: { type, ...notMirroredFields(await this.#notMirrored(listIds)) },
+          });
         }),
     );
 
@@ -2800,7 +2862,10 @@ class ToDoTools implements TokenProvider {
           const sorted = [...rows].sort(
             (a, b) => (b.completed_at ?? 0) - (a.completed_at ?? 0),
           );
-          return indexTasksResponse({ rows: sorted, extra: { days, ...(type ? { type } : {}) } });
+          return indexTasksResponse({
+            rows: sorted,
+            extra: { days, ...(type ? { type } : {}), ...notMirroredFields(await this.#notMirrored(listIds)) },
+          });
         }),
     );
 
@@ -3304,6 +3369,42 @@ class ToDoTools implements TokenProvider {
           );
         }),
     );
+  }
+
+  // The excluded lists among `listIds`, by the setting stored in the index
+  // (what is actually mirrored). Empty when no filter was given: an unfiltered
+  // read never promised those lists.
+  async #notMirrored(listIds: string[] | undefined): Promise<NotMirrored> {
+    if (!listIds || listIds.length === 0) return [];
+    let roster: ListRow[] = [];
+    try {
+      roster = await this.#index().listLists();
+    } catch (e) {
+      log.warn("index_roster_read_failed", { error: String(e) });
+    }
+    const wanted = new Set(listIds);
+    return roster
+      .filter((l) => wanted.has(l.list_id) && l.sync === "excluded")
+      .map((l) => ({ list_id: l.list_id, display_name: l.display_name }));
+  }
+
+  // One live page of a list's tasks, with a missing list mapped to
+  // list_not_found.
+  async #graphTasksPage(
+    graph: GraphClient,
+    url: string,
+  ): Promise<{ value: TodoTask[]; "@odata.nextLink"?: string } | { error: "list_not_found" }> {
+    try {
+      return await graph.getJson(url, GraphTasksPageSchema);
+    } catch (e) {
+      if (e instanceof GraphError) {
+        const innerCode = getGraphInnerErrorCode(e.detail);
+        if (e.status === 404 || (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")) {
+          return { error: "list_not_found" };
+        }
+      }
+      throw e;
+    }
   }
 
   // Resolve a caller-supplied list identifier (alias, display name, or raw Graph

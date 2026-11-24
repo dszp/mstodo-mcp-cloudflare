@@ -141,3 +141,73 @@ describe("create_list", () => {
     expect(h.syncOf("LNEW")).toBe("todo");
   });
 });
+
+describe("reads filtered to an excluded list", () => {
+  async function withLists(routes: Route[] = []) {
+    const h = await harness(routes);
+    h.core.upsertList({ id: "LT", displayName: "Todo" } as never);
+    h.core.upsertList({ id: "LX", displayName: "Excluded" } as never);
+    await h.core.updateListsConfig({ overrides: { LX: "excluded" } });
+    h.core.upsertTask(task("T1") as never, "LT");
+    return h;
+  }
+  const marker = { not_mirrored: [{ list_id: "LX", display_name: "Excluded" }], not_mirrored_note: expect.any(String) };
+
+  it("name the excluded list in query_tasks, search_tasks and search_checklist_items", async () => {
+    const h = await withLists();
+    expect(await h.call("query_tasks", { lists: ["LX"] })).toMatchObject({ ok: true, count: 0, ...marker });
+    expect(await h.call("query_tasks", { types: ["excluded"] })).toMatchObject({ ok: true, count: 0, ...marker });
+    expect(await h.call("search_tasks", { query: "title", lists: ["LT", "LX"] })).toMatchObject({ ok: true, count: 1, ...marker });
+    expect(await h.call("search_checklist_items", { lists: ["LX"] })).toMatchObject({ ok: true, ...marker });
+  });
+
+  it("name it in get_recently_completed and get_pending_across_lists", async () => {
+    const h = await withLists();
+    expect(await h.call("get_recently_completed", { list: "LX" })).toMatchObject({ ok: true, ...marker });
+    await h.core.updateListsConfig({ patterns: [{ pattern: "^Todo", flags: "i", type: "todo" }] });
+    expect(await h.call("get_pending_across_lists", { type: "excluded" })).toMatchObject({ ok: true, count: 0, ...marker });
+    expect(await h.call("get_pending_across_lists", {})).not.toHaveProperty("not_mirrored");
+  });
+
+  it("leave a todo-only read unchanged", async () => {
+    const h = await withLists();
+    const r = await h.call("query_tasks", { lists: ["LT"] });
+    expect(r).toMatchObject({ ok: true, count: 1 });
+    expect(r).not.toHaveProperty("not_mirrored");
+  });
+
+  it("list_tasks pages an excluded list live from Graph", async () => {
+    const first = `${G}/LX/tasks?%24top=1`;
+    const second = `${G}/LX/tasks?%24top=1&%24skip=1`;
+    const h = await withLists([
+      on("GET", first, () => json({ value: [task("X1")], "@odata.nextLink": second })),
+      on("GET", second, () => json({ value: [task("X2")] })),
+    ]);
+    const p1 = await h.call("list_tasks", { list: "LX", top: 1 });
+    expect(p1).toMatchObject({ ok: true, source: "graph", count: 1, ...marker });
+    expect(p1.next_cursor).toEqual(expect.any(String));
+    const p2 = await h.call("list_tasks", { list: "LX", cursor: p1.next_cursor });
+    expect(p2).toMatchObject({ ok: true, source: "graph", count: 1, tasks: [{ id: "X2" }] });
+    expect(p2).not.toHaveProperty("next_cursor");
+    expect(h.calls.map((c) => c.url)).toEqual([first, second]);
+  });
+
+  it("list_tasks refuses a cursor that points anywhere but that list's tasks", async () => {
+    const h = await withLists();
+    const forge = (url: string) => "g." + btoa(url).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    for (const url of [`${G}/LT/tasks?%24skip=1`, "https://evil.example/v1.0/me/todo/lists/LX/tasks"]) {
+      expect(await h.call("list_tasks", { list: "LX", cursor: forge(url) })).toMatchObject({ ok: false, reason: "invalid_cursor" });
+    }
+    expect(h.calls).toEqual([]);
+  });
+
+  it("list_tasks on a todo list keeps its one-page cold read", async () => {
+    const h = await withLists([
+      on("GET", `${G}/LT/tasks?%24top=50`, () => json({ value: [task("T1")], "@odata.nextLink": `${G}/LT/tasks?%24skip=50` })),
+    ]);
+    const r = await h.call("list_tasks", { list: "LT" });
+    expect(r).toMatchObject({ ok: true, source: "graph_cold", count: 1 });
+    expect(r).not.toHaveProperty("next_cursor");
+    expect(r).not.toHaveProperty("not_mirrored");
+  });
+});
