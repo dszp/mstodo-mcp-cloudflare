@@ -1592,7 +1592,7 @@ export class IndexCore implements TokenProvider {
     const ids = rows.slice(0, limit).map((r) => r.task_id);
     const sids = taskSids(this.#sql, ids);
     return ids.flatMap((id) => {
-      const t = sids[id] ? taskBySid(this.#sql, sids[id]) : null;
+      const t = sids[id] ? taskBySid(this.#sql, sids[id], this.#env.TIMEZONE) : null;
       return t ? [t] : [];
     });
   }

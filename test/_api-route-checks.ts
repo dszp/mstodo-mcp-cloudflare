@@ -94,7 +94,7 @@ export async function runApiRouteChecks(env: AppEnv, fetchFn: (req: Request) => 
   };
   expect(found.results.map((r) => [r.kind, r.id])).toEqual([["task", t1!.id]]);
   // "NOT" and "OR" are words to find, not operators, so those match nothing.
-  for (const [q, hits] of [['"pay', 1], ["invo", 1], ["pay NOT", 0], ["bank OR invoice", 0]] as const) {
+  for (const [q, hits] of [['"pay', 1], ["invo", 1], ["pay NOT", 0], ["bank OR invoice", 0], ["pay\u0000ment", 0], ["pay\u0000", 1]] as const) {
     const res = await check(`search ${q}`, await get(`/api/v1/search?q=${encodeURIComponent(q)}`, token), 200);
     const ids = ((await res.json()) as { results: Array<{ id: string }> }).results.map((r) => r.id);
     expect([q, ids]).toEqual([q, hits ? [t1!.id] : []]);
