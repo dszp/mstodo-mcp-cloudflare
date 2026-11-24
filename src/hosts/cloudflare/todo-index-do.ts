@@ -33,6 +33,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
     ctx.blockConcurrencyWhile(async () => this.#core.bootstrap());
   }
 
+  acquireWriteLease(...a: Parameters<IndexCore["acquireWriteLease"]>) { return this.#core.acquireWriteLease(...a); }
   // Push socket upgrade (docs/SYNC-API.md section 7.2). Reached only through
   // this object's stub: the Worker authenticates the request against the
   // /api/v1 resource first and passes what it verified in x-sync-* headers.
@@ -124,6 +125,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   replaceAttachments(...a: Parameters<IndexCore["replaceAttachments"]>) { return this.#core.replaceAttachments(...a); }
   replaceLinkedResources(...a: Parameters<IndexCore["replaceLinkedResources"]>) { return this.#core.replaceLinkedResources(...a); }
   replaceChecklistItems(...a: Parameters<IndexCore["replaceChecklistItems"]>) { return this.#core.replaceChecklistItems(...a); }
+  releaseWriteLease(...a: Parameters<IndexCore["releaseWriteLease"]>) { return this.#core.releaseWriteLease(...a); }
   reportClaimsChallenge(...a: Parameters<IndexCore["reportClaimsChallenge"]>) { return this.#core.reportClaimsChallenge(...a); }
   resetIdentity(...a: Parameters<IndexCore["resetIdentity"]>) { return this.#core.resetIdentity(...a); }
   resync(...a: Parameters<IndexCore["resync"]>) { return this.#core.resync(...a); }

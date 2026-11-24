@@ -4,7 +4,7 @@ import {
   buildMoveCopyBody,
   isReparentConfirmed,
   decideAfterReparentFailure,
-} from "../src/core/mcp/move-task";
+} from "../src/core/ops/move-task";
 
 describe("buildMoveCopyBody (fallback create-in-destination body)", () => {
   it("copies only the writable scalar fields that are present", () => {

@@ -298,7 +298,7 @@ covers user-touched tasks).
 > **Status: shipped in 0.12.0.** Checklist items have a user-controllable drag order, backed by
 > the Substrate-only subtask `OrderDateTime` — the same manual-order mechanism `reorder_task` uses
 > for tasks (Graph exposes no checklist order at all). `reorder_checklist_item` moves a step by
-> `top`/`bottom`/`before`/`after`/`index`/`set` (reusing the `src/core/mcp/reorder.ts` math) and returns
+> `top`/`bottom`/`before`/`after`/`index`/`set` (reusing the `src/core/ops/reorder.ts` math) and returns
 > `ordered_items`; `list_checklist_items` enriches order best-effort (adds `ordered` + per-item
 > `orderDateTime`); `get_task` gains opt-in `include_checklist_order`. Opt-in (`ENABLE_MY_DAY` + EXO).
 >

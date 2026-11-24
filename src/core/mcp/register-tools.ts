@@ -24,7 +24,7 @@ import {
 } from "../index/sql";
 import { ownerIndex } from "../owner-index";
 import { mapPool } from "../graph/concurrency";
-import { parseDateInput, toGraphDate, toGraphDateTime } from "../util/dates";
+import { parseDateInput } from "../util/dates";
 import {
   createDownloadCapability,
   createUploadCapability,
@@ -43,8 +43,6 @@ import {
   TaskFileAttachmentSchema,
   TodoTaskListSchema,
   TodoTaskSchema,
-  type Attachment,
-  type ChecklistItem,
   type TodoTask,
   type TodoTaskList,
 } from "../graph/types";
@@ -55,18 +53,19 @@ import { classifyList, pinClassifications, stripEmoji } from "../config/classifi
 import { resolveListId } from "../config/aliases";
 import { patternProblem } from "../config/regex-safety";
 import { resolveListScope, resolveStatusFilter } from "../config/query-scope";
-import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
-import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
-import { computeReorder, msToOrder, orderToMs, type ReorderSpec } from "./reorder";
-import { collectMyDayNeighborOrders, findMyDayRowById } from "./my-day-order";
 import type { SubstrateTask } from "../graph/substrate-client";
-import {
-  createChecklistItem,
-  createLinkedResource,
-  getFileAttachment,
-  listAttachments,
-} from "../graph/todo-resources";
+import { listAttachments } from "../graph/todo-resources";
 import { checklistCacheEnabled } from "../checklist/gate";
+import { getGraphInnerErrorCode, opsContext, type OpsContext } from "../ops/context";
+import { err, ok, type ToolErr, type ToolResult } from "../ops/result";
+import { orderToMs } from "../ops/reorder";
+import type { ReorderPosition } from "../ops/position";
+import { WriteBusyError } from "../ops/write-lease";
+import { createTask, deleteTask, moveTask, reorderTask, updateTask } from "../ops/tasks";
+import { createList, deleteList, updateList } from "../ops/lists";
+import { createStep, deleteStep, reorderStep, updateStep } from "../ops/steps";
+import { createLink, deleteLink, updateLink } from "../ops/links";
+import { addToMyDay, committedDatePart, removeFromMyDay, reorderMyDayTask, todayInTimeZone } from "../ops/my-day";
 
 const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
 
@@ -74,42 +73,10 @@ const LISTS_URL = "https://graph.microsoft.com/v1.0/me/todo/lists";
 // runs UTC, so when the caller omits `date` we compute "today" in the Worker's
 // configured TIMEZONE (an IANA name). en-CA formats as YYYY-MM-DD.
 const MY_DAY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// Graph dateTimeTimeZone fields for the task date params. undefined = not
-// supplied (omitted), null = clear (sent as null). Graph keeps only the date of
-// due/start but the full time of reminder, so they convert differently — see
-// util/dates.ts.
-const GRAPH_DATE_KEYS = {
-  due: { key: "dueDateTime", convert: toGraphDate },
-  reminder: { key: "reminderDateTime", convert: toGraphDateTime },
-  start: { key: "startDateTime", convert: toGraphDate },
-} as const;
 
-function graphDateFields(
-  timeZone: string,
-  input: Partial<Record<keyof typeof GRAPH_DATE_KEYS, string | null | undefined>>,
-): { ok: true; fields: Record<string, unknown> } | { ok: false; response: McpResponse } {
-  const fields: Record<string, unknown> = {};
-  for (const [param, { key, convert }] of Object.entries(GRAPH_DATE_KEYS)) {
-    const value = input[param as keyof typeof GRAPH_DATE_KEYS];
-    if (value === undefined) continue;
-    if (value === null) {
-      fields[key] = null;
-      continue;
-    }
-    const converted = convert(value, timeZone);
-    if (!converted) {
-      return {
-        ok: false,
-        response: errResponse("invalid_date", {
-          field: param,
-          value,
-          hint: "Use ISO 8601: a date (2026-10-20), a local date/time (2026-10-20T09:00), or one with an offset (2026-10-20T09:00:00-04:00).",
-        }),
-      };
-    }
-    fields[key] = converted;
-  }
-  return { ok: true, fields };
+// Another write held the write lease past the wait (src/core/ops/write-lease.ts).
+function writeBusyResponse(): McpResponse {
+  return errResponse("write_busy", { hint: "Another change to To Do is in progress. Retry in a few seconds." });
 }
 
 function reauthResponse(): McpResponse {
@@ -118,27 +85,54 @@ function reauthResponse(): McpResponse {
   });
 }
 
-function todayInTimeZone(timeZone: string): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
-
-// Date portion (YYYY-MM-DD) of a CommittedDay value the Substrate API returns —
-// it echoes a full ISO datetime (e.g. "2026-05-25T00:00:00Z"), so membership
-// checks compare on the date, not the raw string.
-function committedDatePart(committed: string | null | undefined): string | null {
-  return committed ? committed.slice(0, 10) : null;
-}
-
-// Wrap a plain JSON result object in the MCP text-content envelope. The codebase
-// builds this inline in most handlers; move_task has several return points, so
-// it shares one helper.
+// Wrap a plain JSON result object in the MCP text-content envelope.
 function jsonResult(result: Record<string, unknown>): McpResponse {
   return { content: [{ type: "text", text: JSON.stringify(result) }] };
+}
+
+// An op's error as the MCP error envelope ({ ok: false, reason, ...extra },
+// isError) — the same payload the handlers built before the ops extraction.
+function errFrom({ ok: _ok, reason, ...extra }: ToolErr): McpResponse {
+  return errResponse(reason, extra);
+}
+
+function opResponse<T>(r: ToolResult<T>, format: (value: T) => McpResponse): McpResponse {
+  return r.ok ? format(r.value) : errFrom(r);
+}
+
+function listRequired(task_id: string): McpResponse {
+  return errResponse("list_required", {
+    task_id,
+    hint: "Task not found in the index; pass `list` explicitly.",
+  });
+}
+
+// The reorder tools' flat position arguments as an op's ReorderPosition. The
+// argument names differ per tool, so the error hints name the tool's own.
+function positionArg(
+  args: { position: "top" | "bottom" | "before" | "after" | "index" | "set"; reference?: string; index?: number; order?: string },
+  names: { reference: string; order: "order_datetime" | "committed_order" },
+): ToolResult<ReorderPosition> {
+  const { position, reference, index, order } = args;
+  switch (position) {
+    case "set":
+      if (!order) return err(`${names.order}_required`, { hint: `Pass ${names.order} for position 'set'.` });
+      if (orderToMs(order) === null) {
+        return err(`invalid_${names.order}`, { [names.order]: order, hint: "Use an ISO 8601 timestamp." });
+      }
+      return ok({ kind: "set", order });
+    case "index":
+      if (index === undefined) return err("index_required", { hint: "Pass index (1-based) for position 'index'." });
+      return ok({ kind: "index", index });
+    case "before":
+    case "after":
+      if (!reference) {
+        return err("reference_required", { position, hint: `Pass ${names.reference} for position 'before'/'after'.` });
+      }
+      return ok({ kind: position, reference_id: reference });
+    default:
+      return ok({ kind: position });
+  }
 }
 
 // `etag_304` was removed in Phase 2 step 10 — step 9 smoke confirmed
@@ -405,23 +399,6 @@ function checklistItemsResponse(
 // confirmed in Phase 0.5b smoke: Graph rejected above 3072 KiB. Phase 15 config
 // (config:attachments) will make this configurable; this constant is the hard floor.
 const MAX_INLINE_ATTACHMENT_BYTES = 3072 * 1024;
-
-// Parse a GraphError.detail body for the inner error code. Graph emits
-// { error: { code, message, innerError: { code, ... } } } on 4xx; the
-// innerError code is the precise reason ("ErrorInvalidIdMalformed",
-// "ErrorItemNotFound", etc.). Returns undefined if the detail is missing,
-// not JSON, or doesn't carry an innerError.code — GraphClient truncates the
-// body at 500 chars, so partial JSON is possible on very long responses.
-function getGraphInnerErrorCode(detail: string | undefined): string | undefined {
-  if (!detail) return undefined;
-  try {
-    const obj = JSON.parse(detail) as { error?: { innerError?: { code?: unknown } } };
-    const code = obj.error?.innerError?.code;
-    return typeof code === "string" ? code : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 // Central MCP ToolAnnotations for every registered tool, applied via #tool().
 // Clients use these hints to group/style tools and gate confirmations.
@@ -974,58 +951,11 @@ class ToDoTools implements TokenProvider {
           ),
         },
       },
-      async ({
-        list,
-        title,
-        body,
-        due,
-        reminder,
-        start,
-        importance,
-        status,
-        isReminderOn,
-        categories,
-        recurrence,
-      }): Promise<McpResponse> =>
+      async ({ list, ...fields }): Promise<McpResponse> =>
         this.withGraph("create_task", async (graph) => {
           const list_id = await this.resolveList(list);
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks`;
-
-          // Build Graph request body — only include fields explicitly provided.
-          const dates = graphDateFields(this.ctx.env.TIMEZONE, { due, reminder, start });
-          if (!dates.ok) return dates.response;
-          const graphBody: Record<string, unknown> = { title, ...dates.fields };
-          if (body !== undefined) graphBody.body = { content: body, contentType: "text" };
-          if (importance !== undefined) graphBody.importance = importance;
-          if (status !== undefined) graphBody.status = status;
-          if (isReminderOn !== undefined) graphBody.isReminderOn = isReminderOn;
-          if (categories !== undefined) graphBody.categories = categories;
-          if (recurrence !== undefined) graphBody.recurrence = recurrence;
-
-          try {
-            const task = await graph.postJson(url, graphBody, TodoTaskSchema);
-            await this.#indexUpsertTask(task, list_id);
-            const link_rules = await this.applyLinkRules(graph, list_id, task);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify({ ok: true, list_id, task: detailedTask(task), link_rules }),
-                },
-              ],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("list_not_found", { list_id });
-              }
-            }
-            throw e;
-          }
+          const r = await createTask(this.#ops(graph), { list_id, ...fields });
+          return opResponse(r, ({ task, link_rules }) => jsonResult({ ok: true, list_id, task: detailedTask(task), link_rules }));
         }),
     );
 
@@ -1097,132 +1027,13 @@ class ToDoTools implements TokenProvider {
             ),
         },
       },
-      async ({
-        list,
-        task_id,
-        title,
-        body,
-        due,
-        reminder,
-        start,
-        completed_date,
-        importance,
-        status,
-        isReminderOn,
-        categories,
-        recurrence,
-        if_match,
-      }): Promise<McpResponse> =>
+      async ({ list, ...fields }): Promise<McpResponse> =>
         this.withGraph("update_task", async (graph) => {
           const list_id = await this.resolveList(list);
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}`;
-
-          // Only include fields the caller explicitly supplied. Null datetimes
-          // are passed through as-is so Graph clears the field server-side.
-          const dates = graphDateFields(this.ctx.env.TIMEZONE, { due, reminder, start });
-          if (!dates.ok) return dates.response;
-          const graphBody: Record<string, unknown> = { ...dates.fields };
-          if (title !== undefined) graphBody.title = title;
-          if (body !== undefined) graphBody.body = { content: body, contentType: "text" };
-          // completed_date stays a UTC date: To Do keeps completion at date
-          // granularity, and converting local midnight to UTC would move the
-          // date back a day for any zone east of UTC.
-          if (completed_date !== undefined) {
-            graphBody.completedDateTime =
-              completed_date !== null ? { dateTime: completed_date, timeZone: "UTC" } : null;
-            // Graph only retains completedDateTime while status is 'completed'
-            // (per the todoTask update docs). Imply it for a backdate so the
-            // date sticks, unless the caller set status explicitly.
-            if (completed_date !== null && status === undefined) graphBody.status = "completed";
-          }
-          if (importance !== undefined) graphBody.importance = importance;
-          if (status !== undefined) graphBody.status = status;
-          if (isReminderOn !== undefined) graphBody.isReminderOn = isReminderOn;
-          if (categories !== undefined) graphBody.categories = categories;
-          if (recurrence !== undefined) graphBody.recurrence = recurrence;
-
-          // Backdating a completion needs a real notStarted->completed
-          // transition: Graph ignores completedDateTime on a re-PATCH of an
-          // already-completed task, and a recurring task can't hold one at all
-          // (completing advances it to the next occurrence). So when a concrete
-          // completed_date is given we look the task up first, refuse recurring,
-          // and reset an already-completed task to notStarted so the PATCH below
-          // transitions it afresh and the date sticks.
-          let mainIfMatch = if_match;
-          if (completed_date !== undefined && completed_date !== null) {
-            let current;
-            try {
-              current = await graph.getJson(url, TodoTaskSchema);
-            } catch (e) {
-              if (
-                e instanceof GraphError &&
-                (e.status === 404 ||
-                  (e.status === 400 && getGraphInnerErrorCode(e.detail) === "ErrorInvalidIdMalformed"))
-              ) {
-                return errResponse("task_not_found", { list_id, task_id });
-              }
-              throw e;
-            }
-            if (current.recurrence != null) {
-              return errResponse("recurring_completion_unsupported", {
-                list_id,
-                task_id,
-                hint: "Completing a recurring task advances it to the next occurrence, so To Do can't keep a fixed completion date. Remove the recurrence first, or complete it without completed_date.",
-              });
-            }
-            if ((current.status ?? "") === "completed") {
-              // Already completed: reset to notStarted so the PATCH below is a
-              // genuine transition (otherwise completedDateTime is ignored).
-              await graph.patchJson(url, { status: "notStarted" }, TodoTaskSchema, {
-                ifMatch: if_match,
-              });
-              // The reset consumed the caller's ETag; don't reuse a stale one.
-              mainIfMatch = undefined;
-            }
-          }
-
-          try {
-            const task = await graph.patchJson(url, graphBody, TodoTaskSchema, {
-              ifMatch: mainIfMatch,
-            });
-            await this.#indexUpsertTask(task, list_id);
-            const response: Record<string, unknown> = {
-              ok: true,
-              list_id,
-              task: detailedTask(task),
-            };
-            // Only re-run link rules when the matched fields changed.
-            if (title !== undefined || body !== undefined) {
-              // PATCH response doesn't include linkedResources, so re-fetch
-              // with $expand=linkedResources before applyLinkRules so the
-              // existingUrls seed is populated and duplicates are prevented.
-              const expandUrl = new URL(url);
-              expandUrl.searchParams.set("$expand", "linkedResources");
-              const taskWithLinks = await graph.getJson(expandUrl.toString(), TodoTaskSchema);
-              response.link_rules = await this.applyLinkRules(graph, list_id, taskWithLinks);
-            }
-            return {
-              content: [{ type: "text", text: JSON.stringify(response) }],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("task_not_found", { list_id, task_id });
-              }
-              if (e.status === 412) {
-                return errResponse("precondition_failed", {
-                  list_id,
-                  task_id,
-                  hint: "ETag mismatch — task was modified since last read. Re-fetch and retry.",
-                });
-              }
-            }
-            throw e;
-          }
+          const r = await updateTask(this.#ops(graph), { list_id, ...fields });
+          return opResponse(r, ({ task, link_rules }) =>
+            jsonResult({ ok: true, list_id, task: detailedTask(task), ...(link_rules ? { link_rules } : {}) }),
+          );
         }),
     );
 
@@ -1242,25 +1053,8 @@ class ToDoTools implements TokenProvider {
       async ({ list, task_id }): Promise<McpResponse> =>
         this.withGraph("delete_task", async (graph) => {
           const list_id = await this.resolveList(list);
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}`;
-          try {
-            await graph.deleteResource(url);
-            await this.#indexDeleteTask(task_id);
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: true, task_id, list_id }) }],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("task_not_found", { list_id, task_id });
-              }
-            }
-            throw e;
-          }
+          const r = await deleteTask(this.#ops(graph), { list_id, task_id });
+          return opResponse(r, () => jsonResult({ ok: true, task_id, list_id }));
         }),
     );
 
@@ -1277,312 +1071,10 @@ class ToDoTools implements TokenProvider {
       },
       async ({ task_id, from_list, to_list }): Promise<McpResponse> =>
         this.withGraph("move_task", async (graph) => {
-          const [from_list_id, to_list_id] = await Promise.all([
-            this.resolveList(from_list),
-            this.resolveList(to_list),
-          ]);
-          // Fetch the source with all sub-resources expanded — required for the
-          // copy/delete fallback and for not-found handling. ($expand carries
-          // checklist/linked-resource/attachment metadata but NOT attachment
-          // bytes; those are fetched per-attachment in the fallback.)
-          const srcUrl = new URL(
-            `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(from_list_id)}/tasks/${encodeURIComponent(task_id)}`,
-          );
-          srcUrl.searchParams.set("$expand", "checklistItems,linkedResources,attachments");
-
-          let srcTask: TodoTask;
-          try {
-            srcTask = await graph.getJson(srcUrl.toString(), TodoTaskSchema);
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("task_not_found", { list_id: from_list_id, task_id });
-              }
-            }
-            throw e;
-          }
-
-          // ---- PRIMARY: lossless Substrate in-place re-parent ----
-          // When My Day/EXO is enabled, move the SAME underlying item in one
-          // PATCH so checklist items, attachments, the linked resource, and My
-          // Day ride along. The id changes (new id encodes the destination), so
-          // we surface previous_task_id and re-key the cache. Runtime EXO
-          // consent is only known when the call is made; unavailable Substrate
-          // or an unconfirmed move cleanly degrades to the fallback below.
-          if (myDayEnabled(this.ctx.env)) {
-            const r = await this.#reparentViaSubstrate(to_list_id, task_id);
-            if (r.ok) {
-              // Immutable IDs survive a re-parent. Substrate's response carries
-              // the new default REST ID, which must not become the key.
-              const newId = task_id;
-              // Best-effort cache re-key. Reuse srcTask's expansions so the
-              // has_checklist/has_attachments flags carry to the new id; delta
-              // sync (source removal + dest add) self-heals any gap next cycle.
-              // One transaction keeps the task's steps and My Day fields; the
-              // upsert then refreshes its Graph columns from srcTask.
-              await this.#indexMoveTask(task_id, to_list_id);
-              await this.#indexUpsertTask({ ...srcTask, id: newId }, to_list_id);
-              return jsonResult({
-                ok: true,
-                method: "substrate_reparent",
-                task_id: newId,
-                previous_task_id: task_id,
-                from_list_id,
-                to_list_id,
-              });
-            }
-            if (r.attempted) {
-              // A re-parent was attempted but didn't confirm — it may have
-              // committed at EWS while dropping its response, so blindly
-              // creating a copy would duplicate. Re-check the source before any
-              // fallback create (the duplicate-creation guard).
-              const recheck = await this.#recheckSource(graph, from_list_id, task_id);
-              if (decideAfterReparentFailure(recheck) === "treat_as_moved") {
-                await this.#indexDeleteTask(task_id);
-                const newId = r.task ? task_id : undefined;
-                return jsonResult({
-                  ok: true,
-                  method: "substrate_reparent",
-                  task_id: newId ?? task_id,
-                  previous_task_id: task_id,
-                  from_list_id,
-                  to_list_id,
-                  note: newId
-                    ? "Re-parent response was not fully confirmed; treated as moved (delta sync will reconcile)."
-                    : "Source no longer present after an ambiguous re-parent; treated as moved. The task id may have changed — delta sync will reconcile.",
-                });
-              }
-              // Source confirmed still present → safe to fall through to copy.
-            }
-            // r.attempted === false (Substrate unavailable, no PATCH sent) →
-            // fall straight through to the copy/delete fallback.
-          }
-
-          // ---- FALLBACK: copy everything to destination, then delete source ----
-          // Lossy path made as lossless as Graph allows. Copy-before-delete: a
-          // required-copy failure aborts with the source fully intact.
-          const postBody = buildMoveCopyBody(srcTask);
-          const dstTasksUrl = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(to_list_id)}/tasks`;
-          let newTask: TodoTask;
-          try {
-            newTask = await graph.postJson(dstTasksUrl, postBody, TodoTaskSchema);
-            await this.#indexUpsertTask(newTask, to_list_id);
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("list_not_found", { list_id: to_list_id });
-              }
-            }
-            throw e;
-          }
-          const newId = newTask.id;
-
-          // Abort with best-effort cleanup of the just-created destination task.
-          // The source is never touched during the copy phase, so it remains the
-          // valid, complete task (task_id below is the still-live source id).
-          const abort = async (
-            error: string,
-            extra: Record<string, unknown> = {},
-          ): Promise<McpResponse> => {
-            let cleanup_succeeded = true;
-            try {
-              await graph.deleteResource(
-                `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(to_list_id)}/tasks/${encodeURIComponent(newId)}`,
-              );
-              await this.#indexDeleteTask(newId);
-            } catch (e) {
-              cleanup_succeeded = false;
-              log.warn("move_fallback_cleanup_failed", { newId, error: String(e) });
-            }
-            const result: Record<string, unknown> = {
-              ok: false,
-              method: "copy_delete",
-              error,
-              from_list_id,
-              to_list_id,
-              task_id, // source id — still valid, source untouched
-              cleanup_succeeded,
-              ...extra,
-            };
-            if (!cleanup_succeeded) result.orphan_task_id = newId;
-            return jsonResult(result);
-          };
-
-          // Copy checklist items in createdDateTime order.
-          let checklist_copied = 0;
-          const items = (srcTask.checklistItems ?? [])
-            .slice()
-            .sort((a, b) => (a.createdDateTime ?? "").localeCompare(b.createdDateTime ?? ""));
-          for (const it of items) {
-            try {
-              await createChecklistItem(graph, to_list_id, newId, {
-                displayName: it.displayName ?? "",
-                isChecked: it.isChecked,
-              });
-              checklist_copied += 1;
-            } catch (e) {
-              return abort("checklist_copy_failed", { detail: String(e), checklist_copied });
-            }
-          }
-
-          // Copy the linked resource (Graph allows at most one per task).
-          let linked_resources_copied = 0;
-          const lr = (srcTask.linkedResources ?? [])[0];
-          if (lr) {
-            try {
-              await createLinkedResource(graph, to_list_id, newId, {
-                applicationName: lr.applicationName ?? "Linked resource",
-                displayName: lr.displayName,
-                externalId: lr.externalId ?? undefined,
-                webUrl: lr.webUrl ?? undefined,
-              });
-              linked_resources_copied += 1;
-            } catch (e) {
-              return abort("linked_resource_copy_failed", {
-                detail: String(e),
-                checklist_copied,
-              });
-            }
-          }
-
-          // Copy attachments — bytes round-trip through the Worker (Graph has no
-          // server-side copy). Enumerate via the attachments COLLECTION:
-          // `$expand=attachments` is silently ignored on a todoTask (it returns
-          // no `attachments` array), so reading srcTask.attachments would drop
-          // every attachment and then delete the source. List the collection.
-          let attachments_copied = 0;
-          if (srcTask.hasAttachments) {
-            const cfg = await loadAttachmentConfig(this.ctx.env);
-            const accessToken = await this.getAccessToken();
-            let srcAttachments: Attachment[];
-            try {
-              srcAttachments = await listAttachments(graph, from_list_id, task_id);
-            } catch (e) {
-              return abort("attachment_list_failed", {
-                detail: String(e),
-                checklist_copied,
-                linked_resources_copied,
-              });
-            }
-            if (srcAttachments.length === 0) {
-              // hasAttachments was true but none enumerated — refuse to delete
-              // the source on an inconsistent read rather than silently lose data.
-              return abort("attachment_enumeration_empty", {
-                checklist_copied,
-                linked_resources_copied,
-              });
-            }
-            for (const meta of srcAttachments) {
-              const counts = { checklist_copied, linked_resources_copied, attachments_copied };
-              if (meta["@odata.type"] !== "#microsoft.graph.taskFileAttachment") {
-                // Reference attachments carry no bytes to re-upload — abort
-                // rather than silently drop (the lossy behavior we're replacing).
-                return abort("reference_attachment_not_copyable", {
-                  attachment_id: meta.id,
-                  ...counts,
-                });
-              }
-              let full;
-              try {
-                full = await getFileAttachment(graph, from_list_id, task_id, meta.id);
-              } catch (e) {
-                return abort("attachment_read_failed", {
-                  attachment_id: meta.id,
-                  detail: String(e),
-                  ...counts,
-                });
-              }
-              if (!full.contentBytes) {
-                return abort("attachment_missing_bytes", { attachment_id: meta.id, ...counts });
-              }
-              const bytes = bytesFromBase64(full.contentBytes);
-              if (bytes.byteLength > PER_FILE_MAX_BYTES) {
-                return abort("attachment_too_large", {
-                  attachment_id: meta.id,
-                  size: bytes.byteLength,
-                  max: PER_FILE_MAX_BYTES,
-                  ...counts,
-                });
-              }
-              try {
-                await attachFile(graph, accessToken, {
-                  listId: to_list_id,
-                  taskId: newId,
-                  name: full.name ?? "attachment",
-                  bytes,
-                  contentType: full.contentType ?? "application/octet-stream",
-                  maxInlineBytes: cfg.max_inline_bytes,
-                });
-                attachments_copied += 1;
-              } catch (e) {
-                return abort("attachment_upload_failed", {
-                  attachment_id: meta.id,
-                  detail: String(e),
-                  ...counts,
-                });
-              }
-            }
-          }
-
-          // Carry My Day (best-effort, only if enabled). Reads the source's
-          // CommittedDay via Substrate BEFORE the source delete, then applies it
-          // to the destination copy. Never aborts. (Mostly relevant when the
-          // primary re-parent failed and fell through here; when My Day is
-          // enabled the primary path normally handles the move whole.)
-          let my_day_carried = false;
-          let my_day_skipped_reason: string | undefined;
-          if (myDayEnabled(this.ctx.env)) {
-            const carry = await this.#carryMyDay(from_list_id, to_list_id, task_id, newId);
-            my_day_carried = carry.carried;
-            if (!carry.carried) my_day_skipped_reason = carry.reason;
-          } else {
-            my_day_skipped_reason = "my_day_disabled";
-          }
-
-          // Delete the source — non-fatal on failure (return ok:true + warning
-          // so the caller can retry delete_task rather than lose the new id).
-          let warning: string | undefined;
-          try {
-            await graph.deleteResource(
-              `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(from_list_id)}/tasks/${encodeURIComponent(task_id)}`,
-            );
-            await this.#indexDeleteTask(task_id);
-          } catch (e) {
-            const detail = e instanceof GraphError ? e.detail : String(e);
-            warning = `Copied to destination (task_id: ${newId}) but source delete failed: ${detail ?? "unknown"}. Retry: delete_task({ list_id: "${from_list_id}", task_id: "${task_id}" }).`;
-            log.warn("move_task_delete_failed", { from_list_id, task_id, detail });
-          }
-
-          // Fix destination cache flags — the bare POST response lacked
-          // sub-resource state, so set them from what we copied.
-          await this.#indexSetFlags(newId, {
-            has_checklist: checklist_copied > 0,
-            has_attachments: attachments_copied > 0,
-          });
-
-          const result: Record<string, unknown> = {
-            ok: true,
-            method: "copy_delete",
-            task_id: newId,
-            previous_task_id: task_id,
-            from_list_id,
-            to_list_id,
-            checklist_copied,
-            linked_resources_copied,
-            attachments_copied,
-            my_day_carried,
-          };
-          if (my_day_skipped_reason) result.my_day_skipped_reason = my_day_skipped_reason;
-          if (warning) result.warning = warning;
-          return jsonResult(result);
+          const [from_list_id, to_list_id] = await Promise.all([this.resolveList(from_list), this.resolveList(to_list)]);
+          const r = await moveTask(this.#ops(graph), { task_id, from_list_id, to_list_id });
+          // An aborted copy is reported as ok:false in a normal (non-error) result.
+          return opResponse(r, ({ status, ...rest }) => jsonResult({ ok: status === "moved", ...rest }));
         }),
     );
 
@@ -1597,17 +1089,8 @@ class ToDoTools implements TokenProvider {
       },
       async ({ display_name }): Promise<McpResponse> =>
         this.withGraph("create_list", async (graph) => {
-          const list = await graph.postJson(
-            "https://graph.microsoft.com/v1.0/me/todo/lists",
-            { displayName: display_name },
-            TodoTaskListSchema,
-          );
-          await this.#indexUpsertList(list);
-          return {
-            content: [
-              { type: "text", text: JSON.stringify({ ok: true, list: summarizeList(list) }) },
-            ],
-          };
+          const r = await createList(this.#ops(graph), { display_name });
+          return opResponse(r, ({ list }) => jsonResult({ ok: true, list: summarizeList(list) }));
         }),
     );
 
@@ -1627,31 +1110,8 @@ class ToDoTools implements TokenProvider {
       async ({ list, display_name }): Promise<McpResponse> =>
         this.withGraph("update_list", async (graph) => {
           const list_id = await this.resolveList(list);
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}`;
-          try {
-            const list = await graph.patchJson(
-              url,
-              { displayName: display_name },
-              TodoTaskListSchema,
-            );
-            await this.#indexUpsertList(list);
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: true, list: summarizeList(list) }) },
-              ],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("list_not_found", { list_id });
-              }
-            }
-            throw e;
-          }
+          const r = await updateList(this.#ops(graph), { list_id, display_name });
+          return opResponse(r, ({ list }) => jsonResult({ ok: true, list: summarizeList(list) }));
         }),
     );
 
@@ -1672,31 +1132,8 @@ class ToDoTools implements TokenProvider {
       async ({ list }): Promise<McpResponse> =>
         this.withGraph("delete_list", async (graph) => {
           const list_id = await this.resolveList(list);
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}`;
-          try {
-            await graph.deleteResource(url);
-            await this.#indexDeleteList(list_id);
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: true, list_id }) }],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("list_not_found", { list_id });
-              }
-              if (e.status === 405) {
-                return errResponse("method_not_allowed", {
-                  list_id,
-                  hint: "The default list (wellknownListName: 'defaultList') cannot be deleted.",
-                });
-              }
-            }
-            throw e;
-          }
+          const r = await deleteList(this.#ops(graph), { list_id });
+          return opResponse(r, () => jsonResult({ ok: true, list_id }));
         }),
     );
 
@@ -1783,36 +1220,9 @@ class ToDoTools implements TokenProvider {
       async ({ list, task_id, display_name, is_checked }): Promise<McpResponse> =>
         this.withGraph("create_checklist_item", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
-              task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
-            });
-          }
-          try {
-            const item = await createChecklistItem(graph, list_id, task_id, {
-              displayName: display_name,
-              isChecked: is_checked,
-            });
-            await this.#indexSetFlags(task_id, { has_checklist: true });
-            await this.#indexUpsertChecklistItem(task_id, list_id, item);
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: true, list_id, task_id, item }) },
-              ],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("task_not_found", { list_id, task_id });
-              }
-            }
-            throw e;
-          }
+          if (!list_id) return listRequired(task_id);
+          const r = await createStep(this.#ops(graph), { list_id, task_id, display_name, is_checked });
+          return opResponse(r, ({ item }) => jsonResult({ ok: true, list_id, task_id, item }));
         }),
     );
 
@@ -1832,39 +1242,9 @@ class ToDoTools implements TokenProvider {
       async ({ list, task_id, item_id, display_name, is_checked }): Promise<McpResponse> =>
         this.withGraph("update_checklist_item", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
-              task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
-            });
-          }
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/checklistItems/${encodeURIComponent(item_id)}`;
-          const body: Record<string, unknown> = {};
-          if (display_name !== undefined) body.displayName = display_name;
-          if (is_checked !== undefined) body.isChecked = is_checked;
-          try {
-            const item = await graph.patchJson(url, body, ChecklistItemSchema);
-            // Write-through to the checklist cache (when enabled): update the
-            // cached item's text/checked state immediately. has_checklist is
-            // unaffected by an update. No-op when the cache is off.
-            await this.#indexUpsertChecklistItem(task_id, list_id, item);
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: true, list_id, task_id, item }) },
-              ],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("checklist_item_not_found", { list_id, task_id, item_id });
-              }
-            }
-            throw e;
-          }
+          if (!list_id) return listRequired(task_id);
+          const r = await updateStep(this.#ops(graph), { list_id, task_id, item_id, display_name, is_checked });
+          return opResponse(r, ({ item }) => jsonResult({ ok: true, list_id, task_id, item }));
         }),
     );
 
@@ -1885,39 +1265,9 @@ class ToDoTools implements TokenProvider {
       async ({ list, task_id, item_id }): Promise<McpResponse> =>
         this.withGraph("delete_checklist_item", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
-              task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
-            });
-          }
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/checklistItems/${encodeURIComponent(item_id)}`;
-          try {
-            await graph.deleteResource(url);
-            // Write-through to the checklist cache (when enabled): drop the cached
-            // item row. has_checklist is left as-is (can't tell if it was the last
-            // item without a re-list); the next delta-driven re-fetch reconciles.
-            await this.#indexDeleteChecklistItem(task_id, item_id);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify({ ok: true, list_id, task_id, item_id }),
-                },
-              ],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("checklist_item_not_found", { list_id, task_id, item_id });
-              }
-            }
-            throw e;
-          }
+          if (!list_id) return listRequired(task_id);
+          const r = await deleteStep(this.#ops(graph), { list_id, task_id, item_id });
+          return opResponse(r, () => jsonResult({ ok: true, list_id, task_id, item_id }));
         }),
     );
 
@@ -2048,51 +1398,12 @@ class ToDoTools implements TokenProvider {
           web_url: z.string().optional().describe("URL to open the linked resource."),
         },
       },
-      async ({
-        list,
-        task_id,
-        application_name,
-        display_name,
-        external_id,
-        web_url,
-      }): Promise<McpResponse> =>
+      async ({ list, task_id, ...fields }): Promise<McpResponse> =>
         this.withGraph("create_linked_resource", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
-              task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
-            });
-          }
-          try {
-            const resource = await createLinkedResource(graph, list_id, task_id, {
-              applicationName: application_name,
-              displayName: display_name,
-              externalId: external_id,
-              webUrl: web_url,
-            });
-            // No DO write: linked resources aren't an indexed field; the task
-            // already exists in the index and the next delta sync reconciles.
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify({ ok: true, list_id, task_id, linked_resource: resource }),
-                },
-              ],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("task_not_found", { list_id, task_id });
-              }
-            }
-            throw e;
-          }
+          if (!list_id) return listRequired(task_id);
+          const r = await createLink(this.#ops(graph), { list_id, task_id, ...fields });
+          return opResponse(r, ({ linked_resource }) => jsonResult({ ok: true, list_id, task_id, linked_resource }));
         }),
     );
 
@@ -2114,56 +1425,12 @@ class ToDoTools implements TokenProvider {
           web_url: z.string().nullable().optional().describe("New URL. Pass null to clear."),
         },
       },
-      async ({
-        list,
-        task_id,
-        resource_id,
-        application_name,
-        display_name,
-        external_id,
-        web_url,
-      }): Promise<McpResponse> =>
+      async ({ list, task_id, ...fields }): Promise<McpResponse> =>
         this.withGraph("update_linked_resource", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
-              task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
-            });
-          }
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/linkedResources/${encodeURIComponent(resource_id)}`;
-          const body: Record<string, unknown> = {};
-          if (application_name !== undefined) body.applicationName = application_name;
-          if (display_name !== undefined) body.displayName = display_name;
-          if (external_id !== undefined) body.externalId = external_id;
-          if (web_url !== undefined) body.webUrl = web_url;
-          try {
-            const resource = await graph.patchJson(url, body, LinkedResourceSchema);
-            // No DO write: linked resources aren't an indexed field.
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify({ ok: true, list_id, task_id, linked_resource: resource }),
-                },
-              ],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("linked_resource_not_found", {
-                  list_id,
-                  task_id,
-                  resource_id,
-                });
-              }
-            }
-            throw e;
-          }
+          if (!list_id) return listRequired(task_id);
+          const r = await updateLink(this.#ops(graph), { list_id, task_id, ...fields });
+          return opResponse(r, ({ linked_resource }) => jsonResult({ ok: true, list_id, task_id, linked_resource }));
         }),
     );
 
@@ -2184,40 +1451,9 @@ class ToDoTools implements TokenProvider {
       async ({ list, task_id, resource_id }): Promise<McpResponse> =>
         this.withGraph("delete_linked_resource", async (graph) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
-              task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
-            });
-          }
-          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/linkedResources/${encodeURIComponent(resource_id)}`;
-          try {
-            await graph.deleteResource(url);
-            // No DO write: linked resources aren't an indexed field.
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify({ ok: true, list_id, task_id, resource_id }),
-                },
-              ],
-            };
-          } catch (e) {
-            if (e instanceof GraphError) {
-              const innerCode = getGraphInnerErrorCode(e.detail);
-              if (
-                e.status === 404 ||
-                (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")
-              ) {
-                return errResponse("linked_resource_not_found", {
-                  list_id,
-                  task_id,
-                  resource_id,
-                });
-              }
-            }
-            throw e;
-          }
+          if (!list_id) return listRequired(task_id);
+          const r = await deleteLink(this.#ops(graph), { list_id, task_id, resource_id });
+          return opResponse(r, () => jsonResult({ ok: true, list_id, task_id, resource_id }));
         }),
     );
 
@@ -3703,63 +2939,22 @@ class ToDoTools implements TokenProvider {
       async ({ task_id, list, date }): Promise<McpResponse> =>
         this.withSubstrate("add_to_my_day", async (sub) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
+          if (!list_id) return listRequired(task_id);
+          const r = await addToMyDay(this.#ops(new GraphClient(this), sub), { list_id, task_id, date });
+          return opResponse(r, ({ day, task }) => {
+            const committed_day = committedDatePart(task.CommittedDay);
+            return jsonResult({
+              ok: true,
+              list_id,
               task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
+              title: task.Subject ?? null,
+              committed_day,
+              committed_day_raw: task.CommittedDay ?? null,
+              postponed_day_raw: task.PostponedDay ?? null,
+              in_my_day: committed_day === day,
+              ...projectSubstrateTaskDetails(task),
             });
-          }
-          const day = date ?? todayInTimeZone(this.ctx.env.TIMEZONE);
-          if (!MY_DAY_DATE_RE.test(day)) {
-            return errResponse("invalid_date", { date: day, hint: "Use YYYY-MM-DD." });
-          }
-          // Seed the My Day manual-order position (CommittedOrder = now) so the
-          // freshly-added task lands at the TOP of My Day (highest CommittedOrder)
-          // and is immediately reorderable — mirroring how a new task gets an
-          // OrderDateTime, and how the To Do app surfaces newly-added My Day items
-          // at the top. now() (UTC ISO, ms) is strictly greater than existing past
-          // CommittedOrder values, so a re-add also bumps the task to the top.
-          const committedOrder = new Date().toISOString();
-          // Set CommittedDay AND clear PostponedDay. A task previously removed
-          // from My Day carries PostponedDay=that-day; while PostponedDay==today
-          // the client suppresses the task from My Day even with CommittedDay set,
-          // so adding it back must clear the postpone (what the official client
-          // does). CommittedDay is a bare date in the Worker's timezone — the
-          // server stores it at UTC midnight and the client renders it correctly.
-          const task = await sub.patchTask(list_id, task_id, {
-            CommittedDay: day,
-            PostponedDay: null,
-            CommittedOrder: committedOrder,
           });
-          // Write-through into the cache so list_my_day_tasks reflects this add
-          // immediately, without waiting for the next background scan. Mirror
-          // whatever Substrate echoed back, falling back to the values we sent
-          // (Substrate occasionally omits an echoed field).
-          await this.#index().updateMyDayFields(task_id, {
-            committed_day: task.CommittedDay ? task.CommittedDay.slice(0, 10) : day,
-            postponed_day: task.PostponedDay ? task.PostponedDay.slice(0, 10) : null,
-            order_datetime: task.OrderDateTime ?? null,
-            committed_order: task.CommittedOrder ?? committedOrder,
-          });
-          const committed_day = committedDatePart(task.CommittedDay);
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  list_id,
-                  task_id,
-                  title: task.Subject ?? null,
-                  committed_day,
-                  committed_day_raw: task.CommittedDay ?? null,
-                  postponed_day_raw: task.PostponedDay ?? null,
-                  in_my_day: committed_day === day,
-                  ...projectSubstrateTaskDetails(task),
-                }),
-              },
-            ],
-          };
         }),
     );
 
@@ -3782,40 +2977,21 @@ class ToDoTools implements TokenProvider {
       async ({ task_id, list }): Promise<McpResponse> =>
         this.withSubstrate("remove_from_my_day", async (sub) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
+          if (!list_id) return listRequired(task_id);
+          const r = await removeFromMyDay(this.#ops(new GraphClient(this), sub), { list_id, task_id });
+          return opResponse(r, ({ task }) => {
+            const committed_day = committedDatePart(task.CommittedDay);
+            return jsonResult({
+              ok: true,
+              list_id,
               task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
+              title: task.Subject ?? null,
+              committed_day,
+              committed_day_raw: task.CommittedDay ?? null,
+              in_my_day: committed_day !== null,
+              ...projectSubstrateTaskDetails(task),
             });
-          }
-          const task = await sub.patchTask(list_id, task_id, { CommittedDay: null });
-          // Write-through: drop My Day membership from the cache immediately.
-          // order_datetime stays (source-list manual order is independent of My
-          // Day). Honor whatever PostponedDay Substrate echoed (the app sets
-          // PostponedDay=today on removal; mirror it if present, else null).
-          await this.#index().updateMyDayFields(task_id, {
-            committed_day: null,
-            committed_order: null,
-            postponed_day: task.PostponedDay ? task.PostponedDay.slice(0, 10) : null,
           });
-          const committed_day = committedDatePart(task.CommittedDay);
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  list_id,
-                  task_id,
-                  title: task.Subject ?? null,
-                  committed_day,
-                  committed_day_raw: task.CommittedDay ?? null,
-                  in_my_day: committed_day !== null,
-                  ...projectSubstrateTaskDetails(task),
-                }),
-              },
-            ],
-          };
         }),
     );
 
@@ -4012,100 +3188,25 @@ class ToDoTools implements TokenProvider {
       async ({ task_id, list, position, reference_task_id, index, order_datetime }): Promise<McpResponse> =>
         this.withSubstrate("reorder_task", async (sub) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
+          if (!list_id) return listRequired(task_id);
+          const pos = positionArg(
+            { position, reference: reference_task_id, index, order: order_datetime },
+            { reference: "reference_task_id", order: "order_datetime" },
+          );
+          if (!pos.ok) return errFrom(pos);
+          const r = await reorderTask(this.#ops(new GraphClient(this), sub), { list_id, task_id, position: pos.value });
+          return opResponse(r, ({ task, order_datetime: newOrder }) =>
+            jsonResult({
+              ok: true,
+              list_id,
               task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
-            });
-          }
-
-          // Resolve the new OrderDateTime string for the PATCH.
-          let newOrder: string;
-          if (position === "set") {
-            if (!order_datetime) {
-              return errResponse("order_datetime_required", { hint: "Pass order_datetime for position 'set'." });
-            }
-            if (orderToMs(order_datetime) === null) {
-              return errResponse("invalid_order_datetime", { order_datetime, hint: "Use an ISO 8601 timestamp." });
-            }
-            newOrder = order_datetime;
-          } else {
-            // Compute relative to the OTHER tasks' OrderDateTime values. Exclude
-            // the moving task (by id) so position math isn't off by one, and drop
-            // null/unparseable orders (no comparable position). Caveat: the
-            // listing's Substrate `.Id` may differ from the Graph `task_id` for a
-            // task that was reparented (moved between lists); in that rare case the
-            // moving task isn't excluded and 'index' math can be off by one. The
-            // edge ops (top/bottom) and value-based before/after are unaffected.
-            const folderTasks = await sub.listFolderTasks(list_id);
-            const ids = await new GraphClient(this).translateToImmutable(folderTasks.map((t) => t.Id ?? "").filter(Boolean));
-            const orders = folderTasks
-              .filter((t) => t.Id !== task_id && ids.get(t.Id ?? "") !== task_id)
-              .map((t) => orderToMs(t.OrderDateTime ?? null))
-              .filter((ms): ms is number => ms !== null);
-
-            let spec: ReorderSpec;
-            if (position === "top" || position === "bottom") {
-              spec = { kind: position };
-            } else if (position === "index") {
-              if (index === undefined) {
-                return errResponse("index_required", { hint: "Pass index (1-based) for position 'index'." });
-              }
-              spec = { kind: "index", index };
-            } else {
-              // before / after
-              if (!reference_task_id) {
-                return errResponse("reference_required", {
-                  position,
-                  hint: "Pass reference_task_id for position 'before'/'after'.",
-                });
-              }
-              let ref: SubstrateTask;
-              try {
-                ref = await sub.getTask(list_id, reference_task_id);
-              } catch (e) {
-                if (e instanceof SubstrateError && e.status === 404) {
-                  return errResponse("reference_not_in_list", { list_id, reference_task_id });
-                }
-                throw e;
-              }
-              const referenceMs = orderToMs(ref.OrderDateTime ?? null);
-              if (referenceMs === null) {
-                return errResponse("reference_has_no_order", {
-                  reference_task_id,
-                  hint: "The reference task has no manual-order value; move it first (e.g. position 'top').",
-                });
-              }
-              spec = { kind: position, referenceMs };
-            }
-
-            const computed = computeReorder(spec, orders);
-            if (!computed.ok) {
-              return errResponse(computed.reason, {
-                hint: "No room between neighbors at millisecond precision; use position 'top'/'bottom' to reset.",
-              });
-            }
-            newOrder = msToOrder(computed.ms);
-          }
-
-          const task = await sub.patchTask(list_id, task_id, { OrderDateTime: newOrder });
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  list_id,
-                  task_id,
-                  position,
-                  title: task.Subject ?? null,
-                  ...projectSubstrateTaskDetails(task),
-                  // Echo the value we PATCHed if the response omits it.
-                  order_datetime: task.OrderDateTime ?? newOrder,
-                }),
-              },
-            ],
-          };
+              position,
+              title: task.Subject ?? null,
+              ...projectSubstrateTaskDetails(task),
+              // Echo the value we PATCHed if the response omits it.
+              order_datetime: task.OrderDateTime ?? newOrder,
+            }),
+          );
         }),
     );
 
@@ -4145,106 +3246,17 @@ class ToDoTools implements TokenProvider {
       },
       async ({ task_id, item_id, list, position, reference_item_id, index, order_datetime }): Promise<McpResponse> =>
         this.withSubstrate("reorder_checklist_item", async (sub) => {
-          // The neighbor read is the folder-scoped task GET (steps ride inline as
-          // `Subtasks`; there is no standalone subtasks collection), so the folder
-          // is REQUIRED — unlike the write PATCH, which is folder-free.
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
-              task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
-            });
-          }
-
-          // Read the task's subtasks once: yields BOTH the neighbor orders AND
-          // the reference's order, and lets us return ordered_items for every
-          // position (including 'set'). Full 429 budget — this is a write op.
-          const subtasks = await sub.listSubtasks(list_id, task_id);
-
-          let newOrder: string;
-          if (position === "set") {
-            if (!order_datetime) {
-              return errResponse("order_datetime_required", { hint: "Pass order_datetime for position 'set'." });
-            }
-            if (orderToMs(order_datetime) === null) {
-              return errResponse("invalid_order_datetime", { order_datetime, hint: "Use an ISO 8601 timestamp." });
-            }
-            newOrder = order_datetime;
-          } else {
-            const orders = subtasks
-              .filter((s) => s.Id !== item_id)
-              .map((s) => orderToMs(s.OrderDateTime ?? null))
-              .filter((ms): ms is number => ms !== null);
-
-            let spec: ReorderSpec;
-            if (position === "top" || position === "bottom") {
-              spec = { kind: position };
-            } else if (position === "index") {
-              if (index === undefined) {
-                return errResponse("index_required", { hint: "Pass index (1-based) for position 'index'." });
-              }
-              spec = { kind: "index", index };
-            } else {
-              // before / after
-              if (!reference_item_id) {
-                return errResponse("reference_required", {
-                  position,
-                  hint: "Pass reference_item_id for position 'before'/'after'.",
-                });
-              }
-              const ref = subtasks.find((s) => s.Id === reference_item_id);
-              if (!ref) {
-                return errResponse("reference_not_found", { task_id, reference_item_id });
-              }
-              const referenceMs = orderToMs(ref.OrderDateTime ?? null);
-              if (referenceMs === null) {
-                return errResponse("reference_has_no_order", {
-                  reference_item_id,
-                  hint: "The reference item has no manual-order value; move it first (e.g. position 'top').",
-                });
-              }
-              spec = { kind: position, referenceMs };
-            }
-
-            const computed = computeReorder(spec, orders);
-            if (!computed.ok) {
-              return errResponse(computed.reason, {
-                hint: "No room between neighbors at millisecond precision; use position 'top'/'bottom' to reset.",
-              });
-            }
-            newOrder = msToOrder(computed.ms);
-          }
-
-          await sub.patchSubtask(task_id, item_id, { OrderDateTime: newOrder });
-
-          // Project the steps in their NEW order (apply newOrder to the moved
-          // item locally — no second round-trip). Descending OrderDateTime,
-          // nulls last (shared comparator).
-          const ordered_items = subtasks
-            .map((s) => ({
-              item_id: s.Id ?? null,
-              display_name: s.Subject ?? null,
-              order_datetime: s.Id === item_id ? newOrder : (s.OrderDateTime ?? null),
-              is_checked: s.IsCompleted ?? null,
-            }))
-            .sort((a, b) => compareOrderDateTimeDesc(a.order_datetime, b.order_datetime));
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  list_id,
-                  task_id,
-                  item_id,
-                  position,
-                  order_datetime: newOrder,
-                  ordered_items,
-                }),
-              },
-            ],
-          };
+          if (!list_id) return listRequired(task_id);
+          const pos = positionArg(
+            { position, reference: reference_item_id, index, order: order_datetime },
+            { reference: "reference_item_id", order: "order_datetime" },
+          );
+          if (!pos.ok) return errFrom(pos);
+          const r = await reorderStep(this.#ops(new GraphClient(this), sub), { list_id, task_id, item_id, position: pos.value });
+          return opResponse(r, ({ order_datetime: newOrder, ordered_items }) =>
+            jsonResult({ ok: true, list_id, task_id, item_id, position, order_datetime: newOrder, ordered_items }),
+          );
         }),
     );
 
@@ -4290,92 +3302,16 @@ class ToDoTools implements TokenProvider {
       async ({ task_id, list, position, reference_task_id, index, committed_order, date }): Promise<McpResponse> =>
         this.withSubstrate("reorder_my_day_task", async (sub) => {
           const list_id = await this.resolveListForTask(list, task_id);
-          if (!list_id) {
-            return errResponse("list_required", {
-              task_id,
-              hint: "Task not found in the index; pass `list` explicitly.",
-            });
-          }
-          const day = date ?? todayInTimeZone(this.ctx.env.TIMEZONE);
-          if (!MY_DAY_DATE_RE.test(day)) {
-            return errResponse("invalid_date", { date: day, hint: "Use YYYY-MM-DD." });
-          }
-
-          // 'set' is the debug escape hatch: write the raw value, no neighbor
-          // gathering and no membership check (mirrors reorder_task's 'set').
-          if (position === "set") {
-            if (!committed_order) {
-              return errResponse("committed_order_required", { hint: "Pass committed_order for position 'set'." });
-            }
-            if (orderToMs(committed_order) === null) {
-              return errResponse("invalid_committed_order", { committed_order, hint: "Use an ISO 8601 timestamp." });
-            }
-            const set = await sub.patchTask(list_id, task_id, { CommittedOrder: committed_order });
-            await this.#index().updateMyDayFields(task_id, { committed_order });
-            return reorderMyDayResponse({ list_id, task_id, date: day, position, task: set, newOrder: committed_order });
-          }
-
-          // My Day is a cross-list aggregation. Read the day's set straight from
-          // the SQLite cache (queryMyDayForDate already filters to the day and
-          // drops postponed tasks) — the SAME source list_my_day_tasks shows, so
-          // the reorder is consistent with what the user sees, with zero Substrate
-          // reads for neighbor-gathering. The only Substrate round-trip is the
-          // PATCH below.
-          const { rows } = await this.#index().queryMyDayForDate(day);
-          // Membership probe: the mover must be in the day's cached set.
-          if (!findMyDayRowById(rows, task_id)) {
-            return errResponse("task_not_on_my_day", {
-              task_id,
-              date: day,
-              hint: "Add the task to My Day for this date first (add_to_my_day), pass the correct `date`, or wait for the My Day cache to warm.",
-            });
-          }
-          const neighbors = collectMyDayNeighborOrders(rows, task_id);
-
-          let spec: ReorderSpec;
-          if (position === "top" || position === "bottom") {
-            spec = { kind: position };
-          } else if (position === "index") {
-            if (index === undefined) {
-              return errResponse("index_required", { hint: "Pass index (1-based) for position 'index'." });
-            }
-            spec = { kind: "index", index };
-          } else {
-            // before / after — the reference must also be on My Day for `day`.
-            // Read its CommittedOrder from the cached set (it may live in a
-            // different list than the moving task).
-            if (!reference_task_id) {
-              return errResponse("reference_required", {
-                position,
-                hint: "Pass reference_task_id for position 'before'/'after'.",
-              });
-            }
-            const ref = findMyDayRowById(rows, reference_task_id);
-            if (!ref) {
-              return errResponse("reference_not_on_my_day", { reference_task_id, date: day });
-            }
-            const referenceMs = orderToMs(ref.committed_order);
-            if (referenceMs === null) {
-              return errResponse("reference_has_no_committed_order", {
-                reference_task_id,
-                hint: "The reference task has no My Day order; move it first (e.g. position 'top').",
-              });
-            }
-            spec = { kind: position, referenceMs };
-          }
-
-          const computed = computeReorder(spec, neighbors);
-          if (!computed.ok) {
-            return errResponse(computed.reason, {
-              hint: "No room between neighbors at millisecond precision; use position 'top'/'bottom' to reset.",
-            });
-          }
-          const newOrder = msToOrder(computed.ms);
-          const task = await sub.patchTask(list_id, task_id, { CommittedOrder: newOrder });
-          // Write-through so list_my_day_tasks reflects the new order immediately,
-          // without waiting for the next background scan.
-          await this.#index().updateMyDayFields(task_id, { committed_order: newOrder });
-          return reorderMyDayResponse({ list_id, task_id, date: day, position, task, newOrder });
+          if (!list_id) return listRequired(task_id);
+          const pos = positionArg(
+            { position, reference: reference_task_id, index, order: committed_order },
+            { reference: "reference_task_id", order: "committed_order" },
+          );
+          if (!pos.ok) return errFrom(pos);
+          const r = await reorderMyDayTask(this.#ops(new GraphClient(this), sub), { list_id, task_id, date, position: pos.value });
+          return opResponse(r, ({ day, task, committed_order: newOrder }) =>
+            reorderMyDayResponse({ list_id, task_id, date: day, position, task, newOrder }),
+          );
         }),
     );
   }
@@ -4460,6 +3396,7 @@ class ToDoTools implements TokenProvider {
         return await fn(new GraphClient(this));
       } catch (e) {
         if (isReauthRequired(e)) return reauthResponse();
+        if (e instanceof WriteBusyError) return writeBusyResponse();
         if (e instanceof GraphError) {
           return errResponse(`graph_${e.status}`, { detail: e.detail ?? "" });
         }
@@ -4490,6 +3427,7 @@ class ToDoTools implements TokenProvider {
         return await fn(sub);
       } catch (e) {
         if (isReauthRequired(e)) return reauthResponse();
+        if (e instanceof WriteBusyError) return writeBusyResponse();
         // The DO throws a plain Error("my_day_unavailable") across RPC when the
         // EXO scope isn't consented (AADSTS65001). RPC flattens it to a message.
         if (e instanceof Error && e.message.includes("my_day_unavailable")) {
@@ -4559,100 +3497,17 @@ class ToDoTools implements TokenProvider {
     }
   }
 
-  // move_task PRIMARY path: attempt the lossless in-place re-parent. Returns a
-  // discriminated result so the handler can branch without exceptions:
-  //   { ok: true, task }                         — confirmed moved (re-key cache)
-  //   { ok: false, attempted: false, reason }    — no PATCH sent (Substrate
-  //                                                 unavailable) → straight to
-  //                                                 fallback, no dup risk
-  //   { ok: false, attempted: true, reason, task? } — a PATCH WAS sent but the
-  //                                                 move isn't confirmed → run
-  //                                                 the duplicate-creation guard
-  async #reparentViaSubstrate(
-    toListId: string,
-    taskId: string,
-  ): Promise<
-    | { ok: true; task: SubstrateTask }
-    | { ok: false; attempted: boolean; reason: string; task?: SubstrateTask }
-  > {
-    try {
-      const sub = await this.#buildSubstrateClient();
-      const task = await sub.reparentTask(toListId, taskId);
-      if (isReparentConfirmed(task, toListId)) return { ok: true, task };
-      // 200 that ignored ParentFolderId — a silent no-op. The item likely
-      // didn't move, but treat as attempted so the guard re-checks the source.
-      log.warn("move_reparent_unconfirmed", {
-        taskId,
-        toListId,
-        parent: task.ParentFolderId ?? null,
-      });
-      return { ok: false, attempted: true, reason: "reparent_not_confirmed", task };
-    } catch (e) {
-      // Token mint failed (EXO scope not consented). No PATCH was sent, so no
-      // EWS commit could have happened — safe to go straight to the fallback.
-      if (e instanceof Error && e.message.includes("my_day_unavailable")) {
-        return { ok: false, attempted: false, reason: "my_day_unavailable" };
-      }
-      // The server saw a write attempt (even a 4xx) — the move MAY have
-      // committed, so the guard must run before any fallback create.
-      if (e instanceof SubstrateError) {
-        log.warn("move_reparent_substrate_error", { status: e.status, detail: e.detail });
-        return { ok: false, attempted: true, reason: `substrate_${e.status}` };
-      }
-      // Network / timeout / dropped response — ambiguous; guard.
-      log.warn("move_reparent_failed", { error: String(e) });
-      return { ok: false, attempted: true, reason: "reparent_error" };
-    }
-  }
-
-  // move_task duplicate-creation guard input: is the source task still there?
-  // 200 → present; 404 (or the malformed-id 400 the rest of the handler treats
-  // as gone) → absent; anything else (5xx / network) → unknown (the helper
-  // decideAfterReparentFailure treats unknown conservatively as already-moved).
-  async #recheckSource(
-    graph: GraphClient,
-    fromListId: string,
-    taskId: string,
-  ): Promise<{ sourcePresent: boolean | "unknown" }> {
-    try {
-      await graph.getJson(
-        `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(fromListId)}/tasks/${encodeURIComponent(taskId)}`,
-        TodoTaskSchema,
-      );
-      return { sourcePresent: true };
-    } catch (e) {
-      if (e instanceof GraphError) {
-        const innerCode = getGraphInnerErrorCode(e.detail);
-        if (e.status === 404 || (e.status === 400 && innerCode === "ErrorInvalidIdMalformed")) {
-          return { sourcePresent: false };
-        }
-      }
-      log.warn("move_recheck_source_failed", { fromListId, taskId, error: String(e) });
-      return { sourcePresent: "unknown" };
-    }
-  }
-
-  // move_task FALLBACK My-Day carry: read the source's CommittedDay via
-  // Substrate (Graph doesn't expose it) BEFORE the source is deleted, then apply
-  // it to the destination copy. Best-effort — every failure is swallowed into a
-  // reason and never aborts the move.
-  async #carryMyDay(
-    fromListId: string,
-    toListId: string,
-    oldTaskId: string,
-    newTaskId: string,
-  ): Promise<{ carried: boolean; reason?: string }> {
-    try {
-      const sub = await this.#buildSubstrateClient();
-      const src = await sub.getTask(fromListId, oldTaskId);
-      const day = committedDatePart(src.CommittedDay);
-      if (!day) return { carried: false, reason: "source_not_in_my_day" };
-      await sub.patchTask(toListId, newTaskId, { CommittedDay: day, PostponedDay: null });
-      return { carried: true };
-    } catch (e) {
-      log.warn("move_carry_my_day_failed", { error: String(e) });
-      return { carried: false, reason: e instanceof Error ? e.message : String(e) };
-    }
+  // The ops context for one write tool call: its own WriteLease (one writer),
+  // the call's GraphClient, and the Substrate client withSubstrate built (or
+  // one built on demand — move_task's re-parent).
+  #ops(graph: GraphClient, sub?: SubstrateClient): OpsContext {
+    return opsContext({
+      env: this.ctx.env,
+      graph,
+      index: this.#index(),
+      substrate: sub ? async () => sub : () => this.#buildSubstrateClient(),
+      accessToken: () => this.getAccessToken(),
+    });
   }
 
   // Singleton TodoIndex DO stub — the cross-list index + sole token refresher.
@@ -4674,80 +3529,6 @@ class ToDoTools implements TokenProvider {
       if (status.totals.lists === 0) await this.#index().ensureSyncing();
     } catch (e) {
       log.warn("index_warm_failed", { error: String(e) });
-    }
-  }
-
-  // Best-effort DO index propagation for mutations. The DO is the source of
-  // truth for DO-served reads (list_tasks/query_tasks/search_tasks), so writes
-  // push synchronously — but a propagation failure must NOT fail the tool: the
-  // Graph mutation already succeeded and the next delta sync reconciles.
-  async #indexUpsertTask(task: TodoTask, listId: string): Promise<void> {
-    try {
-      await this.#index().upsertTask(task, listId);
-    } catch (e) {
-      log.warn("index_upsert_task_failed", { task_id: task.id, error: String(e) });
-    }
-  }
-  async #indexMoveTask(taskId: string, toListId: string, newTaskId?: string): Promise<void> {
-    try {
-      await this.#index().moveTask(taskId, toListId, newTaskId);
-    } catch (e) {
-      log.warn("index_move_task_failed", { task_id: taskId, error: String(e) });
-    }
-  }
-  async #indexDeleteTask(taskId: string): Promise<void> {
-    try {
-      await this.#index().deleteTask(taskId);
-    } catch (e) {
-      log.warn("index_delete_task_failed", { task_id: taskId, error: String(e) });
-    }
-  }
-  async #indexSetFlags(
-    taskId: string,
-    patch: { has_checklist?: boolean; has_attachments?: boolean },
-  ): Promise<void> {
-    try {
-      await this.#index().setTaskFlags(taskId, patch);
-    } catch (e) {
-      log.warn("index_set_flags_failed", { task_id: taskId, error: String(e) });
-    }
-  }
-
-  // Checklist cache write-throughs (latency optimization — the self-induced edit
-  // also rides delta → re-fetch). Gated: when the cache is off we never write
-  // checklist rows (no scan would maintain them). Best-effort like the others.
-  async #indexUpsertChecklistItem(
-    taskId: string,
-    listId: string,
-    item: ChecklistItem,
-  ): Promise<void> {
-    if (!checklistCacheEnabled(this.ctx.env)) return;
-    try {
-      await this.#index().upsertChecklistItem(taskId, listId, item);
-    } catch (e) {
-      log.warn("index_upsert_checklist_item_failed", { task_id: taskId, error: String(e) });
-    }
-  }
-  async #indexDeleteChecklistItem(taskId: string, itemId: string): Promise<void> {
-    if (!checklistCacheEnabled(this.ctx.env)) return;
-    try {
-      await this.#index().deleteChecklistItem(taskId, itemId);
-    } catch (e) {
-      log.warn("index_delete_checklist_item_failed", { task_id: taskId, error: String(e) });
-    }
-  }
-  async #indexUpsertList(list: TodoTaskList): Promise<void> {
-    try {
-      await this.#index().upsertList(list);
-    } catch (e) {
-      log.warn("index_upsert_list_failed", { list_id: list.id, error: String(e) });
-    }
-  }
-  async #indexDeleteList(listId: string): Promise<void> {
-    try {
-      await this.#index().deleteList(listId);
-    } catch (e) {
-      log.warn("index_delete_list_failed", { list_id: listId, error: String(e) });
     }
   }
 
@@ -4777,77 +3558,4 @@ class ToDoTools implements TokenProvider {
     await this.#index().markReauthRequired("claims_challenge", claims);
   }
 
-  // Run link rules against a task and POST the single match (if any) as a
-  // linked resource. Microsoft To Do allows exactly one linked resource per
-  // task, so this creates at most one and skips (never clobbers) if the task
-  // already carries one. Pass a task fetched with $expand=linkedResources so
-  // the existing-link check is accurate; for a freshly created task
-  // linkedResources is undefined, which correctly counts as zero.
-  // Non-fatal: creation failures are logged and returned in `failed`.
-  private async applyLinkRules(
-    graph: GraphClient,
-    list_id: string,
-    task: TodoTask,
-  ): Promise<{
-    created: LinkRuleMatch[];
-    skipped: Array<{ match: LinkRuleMatch; reason: string }>;
-    failed: Array<{ match: LinkRuleMatch; error: string }>;
-  }> {
-    const config = await loadLinkRules(this.ctx.env);
-    if (config.rules.filter((r) => r.enabled).length === 0)
-      return { created: [], skipped: [], failed: [] };
-
-    const matches = runLinkRules(config, task);
-    if (matches.length === 0) return { created: [], skipped: [], failed: [] };
-
-    let hasLink = (task.linkedResources ?? []).length > 0;
-
-    const created: LinkRuleMatch[] = [];
-    const skipped: Array<{ match: LinkRuleMatch; reason: string }> = [];
-    const failed: Array<{ match: LinkRuleMatch; error: string }> = [];
-    const baseUrl = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task.id)}/linkedResources`;
-
-    for (const match of matches) {
-      if (hasLink) {
-        skipped.push({ match, reason: "todo_one_linked_resource_per_task" });
-        continue;
-      }
-      try {
-        await graph.postJson(
-          baseUrl,
-          {
-            applicationName: match.applicationName,
-            displayName: match.displayName,
-            externalId: match.externalId,
-            webUrl: match.url,
-          },
-          LinkedResourceSchema,
-        );
-        created.push(match);
-        hasLink = true;
-      } catch (e) {
-        // Defense-in-depth: Graph signals the per-task limit with innerError
-        // `LinkedResourceSizeExceeded` — treat as skip, not fail.
-        if (
-          e instanceof GraphError &&
-          getGraphInnerErrorCode(e.detail) === "LinkedResourceSizeExceeded"
-        ) {
-          skipped.push({ match, reason: "todo_one_linked_resource_per_task" });
-          continue;
-        }
-        const error =
-          e instanceof GraphError
-            ? e.detail
-              ? `${e.message}: ${e.detail}`
-              : e.message
-            : e instanceof Error
-              ? e.message
-              : String(e);
-        failed.push({ match, error });
-        log.warn("link_rules_create_failed", { rule_id: match.rule_id, url: match.url, error });
-      }
-    }
-
-    return { created, skipped, failed };
-  }
 }
