@@ -7,6 +7,7 @@
 import { expect } from "vitest";
 import { GraphClient } from "../src/core/graph/client";
 import { opsContext } from "../src/core/ops/context";
+import { WriteLease } from "../src/core/ops/write-lease";
 import { createList } from "../src/core/ops/lists";
 import { ownerIndex } from "../src/core/owner-index";
 import type { AppEnv } from "../src/core/ports";
@@ -271,24 +272,32 @@ export async function runSyncMutationRouteChecks(
     { id: "m-held", at: at(500), op: "task.update", sid: TASK, fields: { importance: "low" } },
   ]);
   await atHold;
+  // The MCP writer's lease port reports when it asks for the lease, so the
+  // check below runs once the writer is waiting on it, not after a sleep.
+  let asked!: () => void;
+  const askedForLease = new Promise<void>((r) => (asked = r));
+  const writes = new WriteLease({
+    acquireWriteLease: (...a) => (asked(), index.acquireWriteLease(...a)),
+    releaseWriteLease: (...a) => index.releaseWriteLease(...a),
+  });
   const graph = new GraphClient({ getAccessToken: () => index.getAccessToken(), forceRefresh: () => index.refreshToken() });
   const mcpWrite = createList(
-    opsContext({ env, graph, index, substrate: async () => Promise.reject(new Error("unused")), accessToken: async () => "" }),
+    opsContext({ env, graph, index, substrate: async () => Promise.reject(new Error("unused")), accessToken: async () => "", writes }),
     { display_name: "From MCP" },
   );
-  await new Promise((r) => setTimeout(r, 300));
+  await askedForLease;
   expect(["MCP write while the batch holds the lease", graphCalls.some((c) => c.url === G)]).toEqual([
     "MCP write while the batch holds the lease",
     false,
   ]);
+  const releasedAt = graphCalls.length;
   release();
   hold = null;
   const [heldResult] = await held;
   expect(["held batch", heldResult.status]).toEqual(["held batch", "applied"]);
   expect(["MCP write after the batch", (await mcpWrite).ok]).toEqual(["MCP write after the batch", true]);
-  const order = graphCalls.map((c) => `${c.method} ${c.url}`);
-  expect(["MCP write ran after the batch's PATCH", order.lastIndexOf(`PATCH ${G}/L1/tasks/GT1`) < order.indexOf(`POST ${G}`)]).toEqual([
-    "MCP write ran after the batch's PATCH",
+  expect(["MCP write ran after the batch released", graphCalls.findIndex((c) => c.method === "POST" && c.url === G) >= releasedAt]).toEqual([
+    "MCP write ran after the batch released",
     true,
   ]);
 
