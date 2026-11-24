@@ -8,6 +8,8 @@ import { ORIGIN, oauthClient, stubMicrosoft } from "./_oauth-client";
 
 afterEach(() => vi.unstubAllGlobals());
 
+const bearer = (token: string) => new Headers({ authorization: `Bearer ${token}` });
+
 describe("push socket authorization (node host)", () => {
   it("accepts an /api/v1 token and refuses an /mcp token, a bad one, or none", async () => {
     stubMicrosoft("test-owner@example.com");
@@ -22,14 +24,14 @@ describe("push socket authorization (node host)", () => {
     const api = await client.connect(`${ORIGIN}/api/v1`);
     const mcp = await client.connect(`${ORIGIN}/mcp`);
 
-    const ok = await handler.authorizeSocket(`Bearer ${api.access_token}`);
+    const ok = await handler.authorizeSocket(bearer(api.access_token));
     expect(ok?.exp).toBeGreaterThan(Date.now());
-    expect(await handler.authorizeSocket(`Bearer ${mcp.access_token}`)).toBeNull();
-    expect(await handler.authorizeSocket("Bearer u:g:bogus")).toBeNull();
-    expect(await handler.authorizeSocket(undefined)).toBeNull();
+    expect(await handler.authorizeSocket(bearer(mcp.access_token))).toBeNull();
+    expect(await handler.authorizeSocket(bearer("u:g:bogus"))).toBeNull();
+    expect(await handler.authorizeSocket(new Headers())).toBeNull();
     // Revoking every grant refuses the next upgrade.
     await env.ownerIndex().revokeAllGrants();
-    expect(await handler.authorizeSocket(`Bearer ${api.access_token}`)).toBeNull();
+    expect(await handler.authorizeSocket(bearer(api.access_token))).toBeNull();
     await handler.drain();
   });
 });

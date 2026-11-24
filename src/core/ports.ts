@@ -80,6 +80,15 @@ export interface AppEnv {
   // Optional: the owner's Microsoft account object ID (/me.id). Required when
   // MS_TENANT_ID is `common` or `organizations`; see isOwner().
   OWNER_OBJECT_ID?: string;
+  // Optional: Cloudflare Access in front of the app's paths (docs/SYNC-API.md
+  // section 8.1). Both set turns the server-side check on; neither leaves it
+  // off; one alone is refused as a misconfiguration. See core/auth/access.ts.
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  // Optional: serve /.well-known/apple-app-site-association for the app's
+  // https sign-in callback (section 8). Both set turns it on.
+  APPLE_TEAM_ID?: string;
+  APPLE_BUNDLE_IDS?: string;
   TODO_CACHE: KeyValueStore;
   OAUTH_KV: KeyValueStore;
   // Host hook: how core reaches the singleton index (see core/owner-index.ts).

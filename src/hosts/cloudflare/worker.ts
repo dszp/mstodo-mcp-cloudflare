@@ -7,6 +7,7 @@ import { handleUpload } from "../../core/upload/handler";
 import { handleDownload } from "../../core/upload/download-handler";
 import { handleWebhook } from "../../core/subscriptions/webhook-handler";
 import { VERSION } from "../../core/version";
+import { handleAppleAssociation } from "../../core/auth/apple-association";
 
 export { MSToDoMCP, TodoIndex };
 
@@ -21,6 +22,11 @@ export default {
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
+
+    // The app's Associated Domains file (docs/SYNC-API.md section 8); null
+    // unless APPLE_TEAM_ID and APPLE_BUNDLE_IDS are set.
+    const association = handleAppleAssociation(req, app);
+    if (association) return association;
 
     // Public (non-OAuth) web upload endpoint. Returns null for any other path so
     // OAuth/MCP routing below is unaffected. Lives before the OAuth front so

@@ -11,8 +11,19 @@ import { refuseApiRequest } from "../../core/auth/grant";
 import type { AppEnv } from "../../core/ports";
 import type { Props } from "../../core/types";
 import { authHandler, isAuthUiPath, type ProviderEnv } from "./auth-handler";
+import { accessRefusalResponse, checkAccess } from "../../core/auth/access";
+import {
+  APP_SIGNIN_PATH,
+  HANDOFF_PROP,
+  HANDOFF_SLOT,
+  handleAppSignin,
+  redeemAccessHandoff,
+  withAccessToken,
+  type HandoffSlot,
+} from "./app-signin";
 
 export const MCP_PATH = "/mcp";
+const TOKEN_PATH = "/token";
 export const SOCKET_PATH = `${API_PATH}/sync/socket`;
 
 // A socket lives until its access token expires (seconds since the epoch); a
@@ -70,12 +81,22 @@ export function authorizationServerOptions<E>(opts: {
     defaultResource: mcpResource,
     legacyGrantResource: mcpResource,
     authorizeEndpoint: "/authorize",
-    tokenEndpoint: "/token",
+    tokenEndpoint: TOKEN_PATH,
     clientRegistrationEndpoint: "/register",
     accessTokenTTL: ACCESS_TOKEN_TTL_SEC,
     refreshTokenTTL: REFRESH_TOKEN_TTL_SEC,
     refreshTokenIdleTTL: REFRESH_TOKEN_IDLE_TTL_SEC,
     tokenExchangeCallback: async ({ grantType, props, env }) => {
+      // A grant from /app/signin carries the handle of a stored Cloudflare
+      // Access token (app-signin.ts). At code redemption it moves out of the
+      // grant into this request's slot, and the front adds the token to the
+      // response; the grant keeps no trace of it.
+      if (grantType === "authorization_code" && props && typeof props[HANDOFF_PROP] === "string") {
+        const { [HANDOFF_PROP]: handle, ...rest } = props as Record<string, unknown>;
+        const slot = (env as { [HANDOFF_SLOT]?: HandoffSlot })[HANDOFF_SLOT];
+        if (slot) slot.handle = handle as string;
+        return { newProps: rest };
+      }
       if (grantType !== "refresh_token") return;
       const refusal = await grantRefusal(toAppEnv(env), props as Partial<Props>);
       if (refusal) {
@@ -172,8 +193,12 @@ export function oauthFront<E>(opts: {
   return {
     // The Node host's upgrade check: the same audience-checked validation and
     // grant gate as any /api/v1 request (section 18.7). Null refuses.
-    async authorizeSocket(authorization: string | undefined, env: E): Promise<{ exp: number } | null> {
-      const m = /^Bearer\s+(\S+)$/i.exec(authorization ?? "");
+    // With Cloudflare Access configured, the upgrade must also carry a valid
+    // Access token, as every /api/v1 request must.
+    async authorizeSocket(headers: Headers, env: E): Promise<{ exp: number } | null> {
+      const access = await checkAccess(headers, toAppEnv(env), { cookie: false, path: SOCKET_PATH });
+      if (access.state === "refused") return null;
+      const m = /^Bearer\s+(\S+)$/i.exec(headers.get("authorization") ?? "");
       if (!m) return null;
       const valid = await validateToken(env)(`${origin}${API_PATH}`, m[1]);
       if (!valid) return null;
@@ -189,8 +214,29 @@ export function oauthFront<E>(opts: {
       if (under(path, MCP_PATH) || path === resourceMetadataPath(MCP_PATH)) {
         return mcp.fetch(req, env, ctx);
       }
+      if (path === APP_SIGNIN_PATH) {
+        const res = await handleAppSignin(req, toAppEnv(env), origin);
+        if (res) return res;
+      }
+      // Cloudflare Access, when configured, gates every /api/v1 path before
+      // anything else runs: the anonymous info probe, every route (including
+      // ones added later) and the socket upgrade. Access at the edge already
+      // checked; this check makes a gap in the edge configuration fail closed.
+      // The resource metadata document stays outside, like the other OAuth
+      // discovery endpoints.
+      if (under(path, API_PATH)) {
+        const access = await checkAccess(req.headers, toAppEnv(env), { cookie: false, path: API_PATH });
+        if (access.state === "refused") return accessRefusalResponse(access);
+      }
       if (under(path, API_PATH) || path === resourceMetadataPath(API_PATH)) {
         return (await handlePublicApiRequest(req, toAppEnv(env))) ?? api.fetch(req, env, ctx);
+      }
+      if (path === TOKEN_PATH && req.method === "POST") {
+        const slot: HandoffSlot = {};
+        const res = await authorizationServer.fetch(req, { ...env, [HANDOFF_SLOT]: slot }, ctx);
+        if (!slot.handle) return res;
+        const access = await redeemAccessHandoff(toAppEnv(env), slot.handle);
+        return access ? withAccessToken(res, access) : res;
       }
       return authorizationServer.fetch(req, env, ctx);
     },
