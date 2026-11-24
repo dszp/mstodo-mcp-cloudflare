@@ -26,7 +26,7 @@ import { GraphClient, looksImmutable, GraphError, type TokenProvider } from "../
 import { followToTerminal, type DeltaRow } from "../graph/delta";
 import { encodeCursor, decodeCursor } from "../util/cursor";
 import { log } from "../log";
-import type { AlarmScheduler, AppEnv, SqlDb, SqlValue, StateStore, Transact } from "../ports";
+import type { AlarmScheduler, AppEnv, ChangeNotifier, SqlDb, SqlValue, StateStore, Transact } from "../ports";
 import {
   SCHEMA_DDL,
   TASK_COLUMNS,
@@ -43,6 +43,7 @@ import {
   type SyncStatusReport,
 } from "./sql";
 import { applyMigrations } from "./migrations";
+import { changesSince, currentCursor, taskBySid, taskSids, type FeedResult } from "./change-feed";
 import { loadListsConfig } from "../config/loader";
 import { isArchiveList, shouldSkipSync } from "../config/sync-policy";
 import {
@@ -243,8 +244,21 @@ export class IndexCore implements TokenProvider {
   readonly #transact: Transact;
   // Set by the sub-resource scan while more than one batch is waiting.
   #scanBacklog = false;
+  readonly #notifier: ChangeNotifier | null;
+  // The highest change-log seq announced to push clients.
+  #announcedSeq = -1;
+  // Lists named by webhooks since the last sync cycle; synced first.
+  #hotLists = new Set<string>();
 
-  constructor(deps: { sql: SqlDb; transact: Transact; state: StateStore; alarms: AlarmScheduler; env: AppEnv }) {
+  constructor(deps: {
+    sql: SqlDb;
+    transact: Transact;
+    state: StateStore;
+    alarms: AlarmScheduler;
+    env: AppEnv;
+    notifier?: ChangeNotifier;
+  }) {
+    this.#notifier = deps.notifier ?? null;
     this.#sql = deps.sql;
     this.#transact = deps.transact;
     this.#state = deps.state;
@@ -297,6 +311,7 @@ export class IndexCore implements TokenProvider {
   async revokeAllGrants(): Promise<string> {
     const epoch = await this.#newEpoch();
     log.warn("mcp_grants_revoked", {});
+    this.#notifier?.closeAll("revoked");
     return epoch;
   }
 
@@ -1572,6 +1587,211 @@ export class IndexCore implements TokenProvider {
   }
 
   // -- Ops ------------------------------------------------------------------
+  // ---- Client sync API, read side (docs/SYNC-API.md sections 4 and 14.1) ----
+
+  // The current position of the change log, for a push client's hello.
+  syncCursor(): string {
+    return currentCursor(this.#sql);
+  }
+
+  // Tells push clients the log moved, at most once per new seq. The hosts call
+  // it after every RPC (announcing() below); the sync cycle also calls it after
+  // each resource, so a webhook-driven edit doesn't wait for the whole walk.
+  announceChanges(): void {
+    if (!this.#notifier) return;
+    const cursor = currentCursor(this.#sql);
+    const seq = Number(cursor.slice(cursor.indexOf(".") + 1));
+    if (seq === this.#announcedSeq) return;
+    // The first check after a start only records where the log is: a client
+    // connecting gets the cursor in its hello, so nothing was missed.
+    const first = this.#announcedSeq < 0;
+    this.#announcedSeq = seq;
+    if (!first) this.#notifier.announce(cursor);
+  }
+
+  // One page of the change feed. See change-feed.ts for the cursor rules.
+  syncChanges(opts: { cursor?: string | null; limit?: number; scope?: string }): FeedResult {
+    return changesSince(this.#sql, { ...opts, timeZone: this.#env.TIMEZONE });
+  }
+
+  // One task by sid, with its steps, links and attachment details.
+  syncTask(sid: string): ReturnType<typeof taskBySid> {
+    return taskBySid(this.#sql, sid, this.#env.TIMEZONE);
+  }
+
+  // Graph task IDs → sids (search results are served by sid).
+  syncTaskSids(taskIds: string[]): Record<string, string> {
+    return taskSids(this.#sql, taskIds);
+  }
+
+  // ---- Client sync API, write side (docs/SYNC-API.md sections 5 and 6) ----
+  // The idempotency record and field clocks; src/core/sync/mutations.ts runs
+  // the batch and calls these. Each is one synchronous SQLite step.
+
+  // Claims a mutation id. `done` returns the stored result (a retry); a live
+  // `pending` row means another request is running it now; an expired one is
+  // taken over.
+  mutationBegin(
+    id: string,
+    principal: string,
+    nowMs: number,
+    leaseMs: number,
+  ): { state: "new" } | { state: "done"; result: unknown } | { state: "leased" } {
+    return this.#transact(() => {
+      const row = this.#sql
+        .exec<{ state: string; result_json: string | null; lease_until: number | null }>(
+          "SELECT state, result_json, lease_until FROM applied_mutations WHERE mutation_id = ?",
+          id,
+        )
+        .toArray()[0];
+      if (row?.state === "done") return { state: "done" as const, result: JSON.parse(row.result_json ?? "null") };
+      if (row && (row.lease_until ?? 0) > nowMs) return { state: "leased" as const };
+      this.#sql.exec(
+        `INSERT INTO applied_mutations (mutation_id, state, principal, lease_until, at_ms) VALUES (?, 'pending', ?, ?, ?)
+         ON CONFLICT(mutation_id) DO UPDATE SET state = 'pending', principal = excluded.principal,
+           lease_until = excluded.lease_until, at_ms = excluded.at_ms`,
+        id,
+        principal,
+        nowMs + leaseMs,
+        nowMs,
+      );
+      return { state: "new" as const };
+    });
+  }
+
+  // Records the outcome and the clocks of the fields it set, together.
+  mutationFinish(
+    id: string,
+    result: unknown,
+    clocks: Array<{ kind: string; sid: string; field: string; at_ms: number }>,
+  ): void {
+    this.#transact(() => {
+      this.#sql.exec(
+        "UPDATE applied_mutations SET state = 'done', result_json = ?, lease_until = NULL WHERE mutation_id = ?",
+        JSON.stringify(result),
+        id,
+      );
+      for (const c of clocks) {
+        this.#sql.exec(
+          `INSERT INTO field_clock (kind, sid, field, at_ms) VALUES (?, ?, ?, ?)
+           ON CONFLICT(kind, sid, field) DO UPDATE SET at_ms = max(at_ms, excluded.at_ms)`,
+          c.kind,
+          c.sid,
+          c.field,
+          c.at_ms,
+        );
+      }
+    });
+  }
+
+  // A mutation that failed and may be retried: forget it.
+  mutationAbandon(id: string): void {
+    this.#sql.exec("DELETE FROM applied_mutations WHERE mutation_id = ? AND state = 'pending'", id);
+  }
+
+  fieldClocks(kind: string, sid: string): Record<string, number> {
+    const rows = this.#sql
+      .exec<{ field: string; at_ms: number }>("SELECT field, at_ms FROM field_clock WHERE kind = ? AND sid = ?", kind, sid)
+      .toArray();
+    return Object.fromEntries(rows.map((r) => [r.field, r.at_ms]));
+  }
+
+  // sid → Graph ID, and whether that entity exists in the mirror now.
+  resolveSids(refs: Array<{ kind: string; sid: string }>): Record<string, { graph_id: string | null; live: boolean }> {
+    const table: Record<string, [string, string]> = {
+      list: ["lists", "list_id"],
+      task: ["tasks", "task_id"],
+      step: ["checklist_items", "item_id"],
+      link: ["linked_resources", "link_id"],
+      attachment: ["attachments", "attachment_id"],
+    };
+    const out: Record<string, { graph_id: string | null; live: boolean }> = {};
+    for (const r of refs) {
+      const t = table[r.kind];
+      if (!t) continue;
+      const m = this.#sql
+        .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = ? AND sid = ?", r.kind, r.sid)
+        .toArray()[0];
+      const graphId = m?.graph_id ?? null;
+      const live =
+        !!graphId && this.#sql.exec(`SELECT 1 FROM ${t[0]} WHERE ${t[1]} = ? LIMIT 1`, graphId).toArray().length > 0;
+      out[`${r.kind}:${r.sid}`] = { graph_id: graphId, live };
+    }
+    return out;
+  }
+
+  // Gives a newly created entity the sid the app chose. The mirror write that
+  // follows a Graph create mints a random sid first (the insert trigger), so
+  // this renames it, in the map and in the log, while no client can have seen
+  // it yet except through a pull racing this call. False when the app's sid
+  // already names another entity.
+  adoptSid(kind: string, sid: string, graphId: string): boolean {
+    return this.#transact(() => {
+      const taken = this.#sql
+        .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = ? AND sid = ?", kind, sid)
+        .toArray()[0];
+      if (taken) return taken.graph_id === graphId;
+      const minted = this.#sql
+        .exec<{ sid: string }>("SELECT sid FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
+        .toArray()[0];
+      if (!minted) {
+        this.#sql.exec(
+          "INSERT INTO entity_map (kind, sid, graph_id, created_ms) VALUES (?, ?, ?, ?)",
+          kind,
+          sid,
+          graphId,
+          Date.now(),
+        );
+        return true;
+      }
+      this.#sql.exec("UPDATE entity_map SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
+      this.#sql.exec("UPDATE sync_log SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
+      if (kind === "list") this.#sql.exec("UPDATE sync_log SET list_sid = ? WHERE list_sid = ?", sid, minted.sid);
+      this.#sql.exec("UPDATE field_clock SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
+      return true;
+    });
+  }
+
+  // Idempotency rows are kept 30 days, longer than the app keeps an unsent
+  // edit (section 5.4).
+  pruneMutations(olderThanMs: number): number {
+    const n = this.#sql
+      .exec<{ n: number }>("SELECT count(*) n FROM applied_mutations WHERE at_ms < ?", olderThanMs)
+      .one().n;
+    this.#sql.exec("DELETE FROM applied_mutations WHERE at_ms < ?", olderThanMs);
+    return n;
+  }
+
+  // What the app needs to set up and label an account (section 14.1).
+  // server_id is created once and never changes, unlike the cursor epoch, so
+  // the app recognizes a server it already has. The route decides how much of
+  // this an unauthenticated caller sees (section 18.7).
+  async syncInfo(): Promise<{
+    server_id: string;
+    cursor: string;
+    account: { email: string };
+    capabilities: { my_day: boolean; step_order: boolean; push: "none" | "websocket"; source: "graph" };
+  }> {
+    let serverId = await this.#state.get<string>("sync:server_id");
+    if (!serverId) {
+      serverId = crypto.randomUUID();
+      await this.#state.put("sync:server_id", serverId);
+    }
+    const myDay = myDayEnabled(this.#env);
+    return {
+      server_id: serverId,
+      cursor: currentCursor(this.#sql),
+      account: { email: this.#env.OWNER_EMAIL ?? "" },
+      capabilities: {
+        my_day: myDay,
+        // Step order is read from Substrate by the sub-resource scan.
+        step_order: myDay && checklistCacheEnabled(this.#env),
+        push: "none",
+        source: "graph",
+      },
+    };
+  }
+
   // Read-only health probe (sync_status tool). Reports one row per resource —
   // the roster ("lists") plus one per roster list ("tasks:{listId}") — built
   // from the UNION of the `lists` table and `sync_state`, so a list that's in
@@ -1690,6 +1910,7 @@ export class IndexCore implements TokenProvider {
         continue;
       }
       accepted += 1;
+      this.#hotLists.add(rec.list_id);
       work.push({ listId: rec.list_id, taskId: item.resourceId, changeType: item.changeType });
     }
 
@@ -1865,12 +2086,21 @@ export class IndexCore implements TokenProvider {
     if (await this.#state.get(REAUTH_KEY)) return;
     const midCycle = await this.runSyncCycle();
     const intervalMs = this.#intervalMs();
-    const next = midCycle
-      ? MID_CYCLE_REARM_MS
-      : this.#scanBacklog
-        ? Math.min(intervalMs, BACKFILL_REARM_MS)
-        : intervalMs;
+    // A webhook that arrived while this cycle ran armed the alarm for now, and
+    // the setAlarm below would push it back a whole interval: run again at once
+    // for any list it named.
+    const next =
+      this.#hotLists.size > 0
+        ? 1
+        : midCycle
+          ? MID_CYCLE_REARM_MS
+          : this.#scanBacklog
+            ? Math.min(intervalMs, BACKFILL_REARM_MS)
+            : intervalMs;
     await this.#alarms.setAlarm(Date.now() + next);
+    // Ends push sockets whose token expired even when nothing changed, since
+    // an idle socket is otherwise only checked when a change goes out.
+    this.#notifier?.sweep();
   }
 
   // Force a re-baseline: drop rows + delta tokens (one list or everything) and
@@ -1964,6 +2194,7 @@ export class IndexCore implements TokenProvider {
     // cleans up when it safely can and otherwise leaves the orphans to lapse
     // (≤2.94d). It never blocks or fails the wipe below.
     await this.#teardownAllSubscriptions();
+    this.#notifier?.closeAll("reset");
     this.#substrateToken = null;
     this.#substrateUnavailable = false;
     // Kill every MCP grant paired with the outgoing account; the new account's
@@ -2059,13 +2290,24 @@ export class IndexCore implements TokenProvider {
     //    priority rotation guarantees the unvisited tail is covered on following
     //    cycles. Running out of budget is NOT "outstanding" work — only a
     //    resource that returned an outstanding nextLink is (set via r.midCycle).
+    // Lists a webhook just named go first, and each list's changes are
+    // announced as soon as they land (docs/SYNC-API.md section 7.2), so an
+    // edit reaches push clients without waiting for the rest of the walk.
     let remaining = maxTaskPages;
-    for (const listId of this.#listIdsByPriority()) {
+    const hot = [...this.#hotLists];
+    this.#hotLists.clear();
+    const order = this.#listIdsByPriority();
+    for (const listId of [...hot.filter((id) => order.includes(id)), ...order.filter((id) => !hot.includes(id))]) {
       if (skip(listId)) continue;
       if (remaining <= 0) break;
       const r = await this.#syncResource(`tasks:${listId}`, tasksDeltaUrl(listId), remaining);
       remaining -= r.pagesFetched;
       anyOutstanding ||= r.midCycle;
+      try {
+        this.announceChanges();
+      } catch (e) {
+        log.warn("sync_announce_failed", { error: String(e) });
+      }
     }
 
     // 4. Background My Day Substrate scan — only when nothing is still draining
@@ -2577,3 +2819,44 @@ type Promisified<T> = {
   [K in keyof T]: T[K] extends (...a: infer A) => infer R ? (...a: A) => Promise<Awaited<R>> : never;
 };
 export type IndexBackendSurface = Promisified<Omit<IndexCoreMethods, "alarm">>;
+
+// Wraps an IndexCore so every method call is followed by announceChanges():
+// one check of the log's top seq per RPC, so a burst of writes inside one call
+// sends one message. Both hosts route their RPC surface through it.
+export function announcing(core: IndexCore): IndexCore {
+  return new Proxy(core, {
+    get(target, key) {
+      const member: unknown = Reflect.get(target, key);
+      if (typeof member !== "function" || key === "announceChanges" || key === "constructor") {
+        return typeof member === "function" ? member.bind(target) : member;
+      }
+      return (...args: unknown[]) => {
+        const after = () => {
+          try {
+            target.announceChanges();
+          } catch (e) {
+            log.warn("sync_announce_failed", { error: String(e) });
+          }
+        };
+        let out: unknown;
+        try {
+          out = (member as (...a: unknown[]) => unknown).apply(target, args);
+        } catch (e) {
+          after();
+          throw e;
+        }
+        if (out instanceof Promise) {
+          return out.then(
+            (v) => (after(), v),
+            (e) => {
+              after();
+              throw e;
+            },
+          );
+        }
+        after();
+        return out;
+      };
+    },
+  });
+}
