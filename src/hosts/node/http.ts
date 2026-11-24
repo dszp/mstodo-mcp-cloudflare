@@ -145,7 +145,14 @@ export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
     return oauthFront<NodeEnv>({ origin: url.origin, mcpHandler: nodeMcpHandler, toAppEnv: (e) => e }).fetch(req, env, ctx);
   }
 
-  return { fetch, drain: background.drain };
+  // Push-socket upgrades bypass fetch (ws-push.ts); this is their token check.
+  const authorizeSocket = (authorization: string | undefined) =>
+    oauthFront<NodeEnv>({ origin: options.publicOrigin, mcpHandler: nodeMcpHandler, toAppEnv: (e) => e }).authorizeSocket(
+      authorization,
+      env,
+    );
+
+  return { fetch, drain: background.drain, authorizeSocket };
 }
 
 // The Durable Object alarm and the Cloudflare cron, in one process: a timer
