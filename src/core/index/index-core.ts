@@ -43,6 +43,7 @@ import {
   type SyncStatusReport,
 } from "./sql";
 import { applyMigrations } from "./migrations";
+import { changesSince, currentCursor, taskBySid, taskSids, type FeedResult } from "./change-feed";
 import { loadListsConfig } from "../config/loader";
 import { isArchiveList, shouldSkipSync } from "../config/sync-policy";
 import {
@@ -1572,6 +1573,53 @@ export class IndexCore implements TokenProvider {
   }
 
   // -- Ops ------------------------------------------------------------------
+  // ---- Client sync API, read side (docs/SYNC-API.md sections 4 and 14.1) ----
+
+  // One page of the change feed. See change-feed.ts for the cursor rules.
+  syncChanges(opts: { cursor?: string | null; limit?: number; scope?: string }): FeedResult {
+    return changesSince(this.#sql, opts);
+  }
+
+  // One task by sid, with its steps, links and attachment details.
+  syncTask(sid: string): ReturnType<typeof taskBySid> {
+    return taskBySid(this.#sql, sid);
+  }
+
+  // Graph task IDs → sids (search results are served by sid).
+  syncTaskSids(taskIds: string[]): Record<string, string> {
+    return taskSids(this.#sql, taskIds);
+  }
+
+  // What the app needs to set up and label an account (section 14.1).
+  // server_id is created once and never changes, unlike the cursor epoch, so
+  // the app recognizes a server it already has. The route decides how much of
+  // this an unauthenticated caller sees (section 18.7).
+  async syncInfo(): Promise<{
+    server_id: string;
+    cursor: string;
+    account: { email: string };
+    capabilities: { my_day: boolean; step_order: boolean; push: "none" | "websocket"; source: "graph" };
+  }> {
+    let serverId = await this.#state.get<string>("sync:server_id");
+    if (!serverId) {
+      serverId = crypto.randomUUID();
+      await this.#state.put("sync:server_id", serverId);
+    }
+    const myDay = myDayEnabled(this.#env);
+    return {
+      server_id: serverId,
+      cursor: currentCursor(this.#sql),
+      account: { email: this.#env.OWNER_EMAIL ?? "" },
+      capabilities: {
+        my_day: myDay,
+        // Step order is read from Substrate by the sub-resource scan.
+        step_order: myDay && checklistCacheEnabled(this.#env),
+        push: "none",
+        source: "graph",
+      },
+    };
+  }
+
   // Read-only health probe (sync_status tool). Reports one row per resource —
   // the roster ("lists") plus one per roster list ("tasks:{listId}") — built
   // from the UNION of the `lists` table and `sync_state`, so a list that's in

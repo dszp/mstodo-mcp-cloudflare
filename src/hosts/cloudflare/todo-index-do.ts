@@ -48,6 +48,10 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   markMyDayUnavailable(...a: Parameters<IndexCore["markMyDayUnavailable"]>) { return this.#core.markMyDayUnavailable(...a); }
   markReauthRequired(...a: Parameters<IndexCore["markReauthRequired"]>) { return this.#core.markReauthRequired(...a); }
   moveTask(...a: Parameters<IndexCore["moveTask"]>) { return this.#core.moveTask(...a); }
+  syncChanges(...a: Parameters<IndexCore["syncChanges"]>) { return this.#core.syncChanges(...a); }
+  syncInfo(...a: Parameters<IndexCore["syncInfo"]>) { return this.#core.syncInfo(...a); }
+  syncTask(...a: Parameters<IndexCore["syncTask"]>) { return this.#core.syncTask(...a); }
+  syncTaskSids(...a: Parameters<IndexCore["syncTaskSids"]>) { return this.#core.syncTaskSids(...a); }
   onChangeNotification(...a: Parameters<IndexCore["onChangeNotification"]>) { return this.#core.onChangeNotification(...a); }
   onLifecycleEvent(...a: Parameters<IndexCore["onLifecycleEvent"]>) { return this.#core.onLifecycleEvent(...a); }
   putSubscription(...a: Parameters<IndexCore["putSubscription"]>) { return this.#core.putSubscription(...a); }
