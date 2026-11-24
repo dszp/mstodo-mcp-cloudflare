@@ -142,6 +142,7 @@ export type ExecOutcome =
 export type Executor = (input: ExecInput) => Promise<ExecOutcome>;
 
 const SID_RE = /^[0-9a-f]{32}$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const AT_RE = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/i;
 const ID_RE = /^[A-Za-z0-9._:-]{1,100}$/;
 
 export function normalizeSid(s: string): string {
@@ -175,7 +176,9 @@ function validate(raw: unknown): MutationIn | { id: string; error: string } {
   if (!id) return { id: String(m.id ?? ""), error: "bad_id" };
   if (typeof m.op !== "string" || !(OPS as readonly string[]).includes(m.op)) return { id, error: "unknown_op" };
   if (typeof m.sid !== "string" || !SID_RE.test(m.sid.toLowerCase())) return { id, error: "bad_sid" };
-  if (typeof m.at !== "string" || Number.isNaN(Date.parse(m.at))) return { id, error: "bad_at" };
+  // An offset is required: without one Date.parse reads the time in the
+  // server's zone.
+  if (typeof m.at !== "string" || !AT_RE.test(m.at) || Number.isNaN(Date.parse(m.at))) return { id, error: "bad_at" };
   if (m.fields !== undefined && (typeof m.fields !== "object" || m.fields === null || Array.isArray(m.fields))) {
     return { id, error: "bad_fields" };
   }
@@ -222,6 +225,11 @@ export async function applyBatch(
   // An entity whose earlier mutation in this batch didn't apply: later ones
   // for it are skipped, so a create followed by edits never runs out of order.
   const blocked = new Set<string>();
+  // An entity whose create in this batch didn't apply: a mutation that names
+  // it (a step under the task, a neighbour) is skipped rather than rejected
+  // for good as unknown_<kind>, since the retried batch creates it first. A
+  // failed edit of an existing parent blocks nothing under it.
+  const uncreated = new Set<string>();
 
   for (const raw of body.mutations) {
     const v = validate(raw);
@@ -231,17 +239,18 @@ export async function applyBatch(
     }
     const m = v;
     const self: SidRef = { kind: kindOf(m.op), sid: m.sid };
-    // Skipped, not tried, when an earlier mutation in the batch for this
-    // entity, or for one it names (its parent, a neighbour), didn't apply: a
-    // step whose task's create failed would otherwise be rejected for good as
-    // unknown_task, though the retried batch would create the task first.
-    if (refsOf(m).some((r) => blocked.has(key(r))) || now() > deadline) {
+    const others = refsOf(m).slice(1);
+    if (blocked.has(key(self)) || others.some((r) => uncreated.has(key(r))) || now() > deadline) {
       blocked.add(key(self));
+      if (isCreate(m.op)) uncreated.add(key(self));
       results.push({ id: m.id, status: "skipped" });
       continue;
     }
     const r = await applyOne(store, exec, m, principal, now());
-    if (r.status !== "applied" && r.status !== "duplicate") blocked.add(key(self));
+    if (r.status !== "applied" && r.status !== "duplicate") {
+      blocked.add(key(self));
+      if (isCreate(m.op)) uncreated.add(key(self));
+    }
     results.push(r);
   }
   return { cursor: await store.syncCursor(), results };
@@ -281,6 +290,11 @@ async function applyOne(
     // create already ran (its result row was lost) or the sid collides; either
     // way nothing new is made.
     if (self.live) return finish({ id: m.id, status: "applied", sid: m.sid });
+    // A sid with a Graph ID but no mirror row, on a retry of this same
+    // mutation: the earlier attempt created the entity and reserved the sid,
+    // then stopped before the mirror write. Graph has it; delta (or the
+    // sub-resource scan, for a step or link) brings the row.
+    if (self.graph_id && begun.prior_at_ms !== undefined) return finish({ id: m.id, status: "applied", sid: m.sid });
     if (self.graph_id) return finish({ id: m.id, status: "rejected", error: "sid_in_use" });
   } else if (!self.graph_id) {
     return finish({ id: m.id, status: "rejected", error: "unknown_sid" });
@@ -324,10 +338,16 @@ async function applyOne(
   const res: MutationResult = superseded.length
     ? { id: m.id, status: "applied", sid: m.sid, superseded_fields: superseded }
     : { id: m.id, status: "applied", sid: m.sid };
+  // Each field the app set now holds its edit, so its clock is the edit's
+  // time, even below the stamp the write-through gave it. Graph moves status
+  // and completion together, so setting either sets both.
+  const stamped = new Set(Object.keys(fields).filter((field) => !(isCreate(m.op) && PARENT_REFS.has(field))));
+  if (kind === "task" && (stamped.has("status") || stamped.has("completed_at"))) {
+    stamped.add("status");
+    stamped.add("completed_at");
+  }
   return finish(
     res,
-    Object.keys(fields)
-      .filter((field) => !(isCreate(m.op) && PARENT_REFS.has(field)))
-      .map((field) => ({ kind, sid: m.sid, field, at_ms: at })),
+    [...stamped].map((field) => ({ kind, sid: m.sid, field, at_ms: at })),
   );
 }

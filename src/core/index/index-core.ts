@@ -519,7 +519,13 @@ export class IndexCore implements TokenProvider {
   // inserted stamps nothing: no app edit can predate the entity's arrival,
   // and stamping a create's defaults would supersede the app's own queued
   // edits to them.
-  #clocked<T>(kind: string, graphId: string, atMs: number, write: () => T): T {
+  //
+  // Lists, links and a step's title carry no modification time from Graph,
+  // so their changes are stamped when this server sees them (a write-through,
+  // or for one made in To Do, the next roster sync or sub-resource scan).
+  // That can be later than the To Do edit, so a queued app edit made in
+  // between loses to it: a bias toward To Do, accepted.
+  #clocked<T>(kind: string, graphId: string, atMs: number | ((field: string) => number), write: () => T): T {
     const spec = CLOCKED[kind];
     const cols = [...new Set(Object.values(spec.fields).flat())];
     const read = () =>
@@ -543,7 +549,7 @@ export class IndexCore implements TokenProvider {
       this.#sql.exec(
         `INSERT INTO field_clock (kind, sid, field, at_ms) VALUES (?, ?, ?, ?)
          ON CONFLICT(kind, sid, field) DO UPDATE SET at_ms = max(at_ms, excluded.at_ms)`,
-        kind, sid, field, atMs,
+        kind, sid, field, typeof atMs === "number" ? atMs : atMs(field),
       );
     }
     return out;
@@ -689,7 +695,7 @@ export class IndexCore implements TokenProvider {
     this.#deleteMissing("checklist_items", "item_id", taskId, items.map((i) => i.id));
     for (const item of items) {
       const row = checklistItemToRow(item, taskId, listId);
-      this.#clocked("step", item.id, Date.now(), () => this.#sql.exec(
+      this.#clocked("step", item.id, stepClock(item), () => this.#sql.exec(
         `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
            VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})
          ON CONFLICT(item_id) DO UPDATE SET
@@ -772,7 +778,7 @@ export class IndexCore implements TokenProvider {
   // re-fetch next scan.
   upsertChecklistItem(taskId: string, listId: string, item: ChecklistItem): void {
     const row = checklistItemToRow(item, taskId, listId);
-    this.#clocked("step", item.id, Date.now(), () => this.#sql.exec(
+    this.#clocked("step", item.id, stepClock(item), () => this.#sql.exec(
       `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
          VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})
        ON CONFLICT(item_id) DO UPDATE SET
@@ -1760,28 +1766,11 @@ export class IndexCore implements TokenProvider {
     clocks: Array<{ kind: string; sid: string; field: string; at_ms: number }>,
   ): void {
     this.#transact(() => {
-      const begun = this.#sql
-        .exec<{ at_ms: number }>("SELECT at_ms FROM applied_mutations WHERE mutation_id = ?", id)
-        .toArray()[0]?.at_ms;
       this.#sql.exec(
         "UPDATE applied_mutations SET state = 'done', result_json = ?, lease_until = NULL WHERE mutation_id = ?",
         JSON.stringify(result),
         id,
       );
-      // The mutation's own write-through stamped the fields it changed with
-      // Graph's time, which is later than the app's edit. The edit is what
-      // those fields now hold, so they take its time: otherwise the app's next
-      // queued edit to them (made after this one, sent with it) would be
-      // superseded. That covers fields Graph changed as a consequence (status
-      // with a completion date), hence "stamped since the mutation began";
-      // the allowance is for Graph's clock against ours.
-      const at = clocks[0];
-      if (at && begun !== undefined) {
-        this.#sql.exec(
-          "UPDATE field_clock SET at_ms = ? WHERE kind = ? AND sid = ? AND at_ms >= ?",
-          at.at_ms, at.kind, at.sid, begun - CLOCK_SKEW_MS,
-        );
-      }
       for (const c of clocks) {
         this.#sql.exec(
           `INSERT INTO field_clock (kind, sid, field, at_ms) VALUES (?, ?, ?, ?)
@@ -3078,8 +3067,13 @@ const clampMs = (v: number, min: number, max: number) => Math.min(Math.max(Numbe
 // Idempotency rows outlive any edit the app still holds (section 5.4).
 const MUTATION_RETENTION_MS = 30 * 86_400_000;
 
-// How far Graph's clock may run behind ours.
-const CLOCK_SKEW_MS = 5_000;
+// A step's `checked` is stamped with Graph's checkedDateTime when it's checked;
+// anything else with now.
+function stepClock(item: ChecklistItem): (field: string) => number {
+  const now = Date.now();
+  const checkedAt = item.isChecked && item.checkedDateTime ? Date.parse(item.checkedDateTime) : NaN;
+  return (field) => (field === "checked" && !Number.isNaN(checkedAt) ? checkedAt : now);
+}
 
 const CLOCKED: Record<string, { table: string; key: string; fields: Record<string, readonly string[]> }> = {
   task: {

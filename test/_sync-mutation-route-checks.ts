@@ -40,6 +40,9 @@ export async function runSyncMutationRouteChecks(
   const graphCalls: Array<{ method: string; url: string; body: unknown }> = [];
   let hold: { url: string; until: Promise<void>; reached: () => void } | null = null;
   let throttle = false;
+  // Graph's copy of each task the checks write; the rest are as seeded. TR repeats.
+  const seeded = (id: string) => graphTask(id, id === "TR" ? { recurrence: RECURRENCE } : {});
+  const stored = new Map<string, Record<string, unknown>>();
   // Tasks a POST made even though its response was lost (a 502).
   const madeButLost: Array<ReturnType<typeof graphTask>> = [];
   // Source deletes that fail, per task: how many more times.
@@ -60,15 +63,22 @@ export async function runSyncMutationRouteChecks(
       madeButLost.push(graphTask("GA", { ...body, createdDateTime: new Date().toISOString() }));
       return json({ error: { code: "BadGateway" } }, 502);
     }
-    if (method === "POST" && url === `${G}/L1/tasks`) return json(graphTask("GT1", body), 201);
+    if (method === "POST" && url === `${G}/L1/tasks`) {
+      stored.set("GT1", graphTask("GT1", body));
+      return json(stored.get("GT1"), 201);
+    }
     if (method === "POST" && url === `${G}/L2/tasks`) return json(graphTask(`C-${body.title}`, body), 201);
     // The create recovery's lookup.
     if (method === "GET" && url.startsWith(`${G}/L1/tasks?`)) return json({ value: madeButLost });
     const one = /^https:\/\/graph\.microsoft\.com\/v1\.0\/me\/todo\/lists\/L1\/tasks\/(\w+)(\?.*)?$/.exec(url);
-    if (one && method === "PATCH") return json(graphTask(one[1], body));
+    // Graph answers a PATCH with the whole task: what it held, plus the patch.
+    if (one && method === "PATCH") {
+      stored.set(one[1], { ...(stored.get(one[1]) ?? seeded(one[1])), ...body, lastModifiedDateTime: new Date().toISOString() });
+      return json(stored.get(one[1]));
+    }
     // The completion-date check, the link rules' re-fetch and a move's source
     // read all GET the task. TR repeats.
-    if (one && method === "GET") return json(graphTask(one[1], one[1] === "TR" ? { recurrence: RECURRENCE } : {}));
+    if (one && method === "GET") return json(stored.get(one[1]) ?? seeded(one[1]));
     if (one && method === "DELETE" && (deleteFailures.get(one[1]) ?? 0) > 0) {
       deleteFailures.set(one[1], deleteFailures.get(one[1])! - 1);
       return json({ error: { code: "ServiceUnavailable" } }, 503);
