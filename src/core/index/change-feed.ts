@@ -70,14 +70,26 @@ export interface FeedList {
   wellknown: string | null;
   is_owner: boolean | null;
   is_shared: boolean | null;
-  // Sidebar groups and order come from Substrate (section 10.4); not mirrored yet.
-  group_id: null;
-  sort_key: null;
+  // The To Do sidebar, read from Substrate (section 10.4); all null until
+  // read, and always null on a server without Substrate. group_id is the
+  // list_group's sid. sort_key is the sidebar position as Substrate sends it
+  // (an ISO date-time string; null for the default list).
+  group_id: string | null;
+  sort_key: string | null;
+  // Theme color and background image, as Substrate sends them (undocumented
+  // formats, passed through unchanged).
+  theme: { color: string | null; background: string | null };
 }
+export interface FeedListGroup {
+  name: string | null;
+  sort_key: string | null;
+}
+export type FeedKind = "task" | "list" | "list_group";
 export type FeedChange =
   | { kind: "task"; id: string; seq: number; deleted: false; data: FeedTask; field_clock: Record<string, number> }
   | { kind: "list"; id: string; seq: number; deleted: false; data: FeedList }
-  | { kind: "task" | "list"; id: string; seq: number; deleted: true };
+  | { kind: "list_group"; id: string; seq: number; deleted: false; data: FeedListGroup }
+  | { kind: FeedKind; id: string; seq: number; deleted: true };
 
 export interface FeedPage {
   cursor: string;
@@ -296,7 +308,17 @@ function buildLists(sql: SqlDb, listIds: string[]): Map<string, FeedList> {
   const out = new Map<string, FeedList>();
   for (let i = 0; i < listIds.length; i += 200) {
     const chunk = listIds.slice(i, i + 200);
-    const rows = sql.exec(`SELECT * FROM lists WHERE list_id IN (${inPlaceholders(chunk.length)})`, ...chunk).toArray();
+    // The group's sid, only while the group is mirrored: a list naming a
+    // group the last read didn't return goes out ungrouped.
+    const rows = sql
+      .exec(
+        `SELECT l.*, m.sid AS group_sid FROM lists l
+           LEFT JOIN list_groups g ON g.group_id = l.group_id
+           LEFT JOIN entity_map m ON m.kind = 'list_group' AND m.graph_id = g.group_id
+          WHERE l.list_id IN (${inPlaceholders(chunk.length)})`,
+        ...chunk,
+      )
+      .toArray();
     for (const l of rows) {
       // An excluded list is never in the feed (section 1.2): with no data it
       // goes out as a deletion record on an incremental pull, and is skipped
@@ -308,8 +330,29 @@ function buildLists(sql: SqlDb, listIds: string[]): Map<string, FeedList> {
         wellknown: (l.wellknown as string | null) ?? null,
         is_owner: l.is_owner == null ? null : l.is_owner === 1,
         is_shared: l.is_shared == null ? null : l.is_shared === 1,
-        group_id: null,
-        sort_key: null,
+        group_id: (l.group_sid as string | null) ?? null,
+        sort_key: (l.order_datetime as string | null) ?? null,
+        theme: {
+          color: (l.theme_color as string | null) ?? null,
+          background: (l.theme_background as string | null) ?? null,
+        },
+      });
+    }
+  }
+  return out;
+}
+
+function buildGroups(sql: SqlDb, groupIds: string[]): Map<string, FeedListGroup> {
+  const out = new Map<string, FeedListGroup>();
+  for (let i = 0; i < groupIds.length; i += 200) {
+    const chunk = groupIds.slice(i, i + 200);
+    const rows = sql
+      .exec(`SELECT * FROM list_groups WHERE group_id IN (${inPlaceholders(chunk.length)})`, ...chunk)
+      .toArray();
+    for (const g of rows) {
+      out.set(g.group_id as string, {
+        name: (g.name as string | null) ?? null,
+        sort_key: (g.order_datetime as string | null) ?? null,
       });
     }
   }
@@ -413,6 +456,7 @@ export function changesSince(
   const live = (r: (typeof rows)[number]) => r.deleted === 0 && !r.out && !!r.graph_id;
   const taskData = buildTasks(sql, pageRows.filter((r) => r.kind === "task" && live(r)).map((r) => r.graph_id!), timeZone);
   const listData = buildLists(sql, pageRows.filter((r) => r.kind === "list" && live(r)).map((r) => r.graph_id!));
+  const groupData = buildGroups(sql, pageRows.filter((r) => r.kind === "list_group" && live(r)).map((r) => r.graph_id!));
 
   const changes: FeedChange[] = [];
   let bytes = 0;
@@ -420,12 +464,14 @@ export function changesSince(
   let cut = false;
   for (const r of pageRows) {
     let c: FeedChange | null = null;
-    const kind = r.kind as "task" | "list";
+    const kind = r.kind as FeedKind;
     if (live(r) && kind === "task" && taskData.has(r.graph_id!)) {
       const t = taskData.get(r.graph_id!)!;
       c = { kind, id: r.sid, seq: r.seq, deleted: false, data: t.data, field_clock: t.field_clock };
     } else if (live(r) && kind === "list" && listData.has(r.graph_id!)) {
       c = { kind, id: r.sid, seq: r.seq, deleted: false, data: listData.get(r.graph_id!)! };
+    } else if (live(r) && kind === "list_group" && groupData.has(r.graph_id!)) {
+      c = { kind, id: r.sid, seq: r.seq, deleted: false, data: groupData.get(r.graph_id!)! };
     } else if (!walk || r.seq > walkStart) {
       // Deleted, out of this device's scope, or logged as live with its row
       // gone: the device drops it. A later change logs it again as live.

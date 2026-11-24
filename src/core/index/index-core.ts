@@ -21,7 +21,7 @@ import {
   type StoredTokens,
 } from "../auth/microsoft";
 import { ReauthRequiredError, type ReauthState } from "../auth/reauth";
-import { SubstrateClient, SubstrateError } from "../graph/substrate-client";
+import { SubstrateClient, SubstrateError, type SubstrateFolder, type SubstrateFolderGroup } from "../graph/substrate-client";
 import { GraphClient, looksImmutable, GraphError, type TokenProvider } from "../graph/client";
 import { followToTerminal, type DeltaRow } from "../graph/delta";
 import { encodeCursor, decodeCursor } from "../util/cursor";
@@ -151,7 +151,9 @@ const MAX_LIMIT = 200;
 // subrequests. The My Day scan only runs on calm (non-mid-cycle) cycles and is
 // itself capped at MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE (default 6) + 1 substrate
 // mint, so even a calm cycle that fully drained its task pages stays ≈ 48 — still
-// under the ceiling with headroom.
+// under the ceiling with headroom. The sidebar appearance read
+// (#refreshListAppearance) adds two Substrate GETs at most once per
+// DELTA_SYNC_INTERVAL_MIN, plus once when a new list appears.
 const ROSTER_MAX_PAGES = 10;
 const MAX_PAGES_PER_CYCLE = 30;
 // While a baseline is still draining, re-arm quickly; otherwise wait the cron
@@ -176,6 +178,11 @@ interface SyncStateRow {
 // a string). It is NOT a "lists"/"tasks:*"/"myday:*" resource, so syncStatus'
 // generic report loop ignores it — it only surfaces via #webhookHealth().
 const WEBHOOK_HEALTH_KEY = "meta:webhook";
+
+// Reserved sync_state row for the sidebar appearance read (#refreshListAppearance):
+// last_synced_at = the last successful read. Like meta:webhook, syncStatus
+// doesn't report it.
+const APPEARANCE_STATE_KEY = "meta:appearance";
 
 // Delivery-health view of the Graph change-notification (webhook) path. The
 // signal that distinguishes "subscriptions exist (coverage ok)" from
@@ -2133,7 +2140,14 @@ export class IndexCore implements TokenProvider {
     server_id: string;
     cursor: string;
     account: { email: string };
-    capabilities: { my_day: boolean; step_order: boolean; sub_resources: boolean; push: "none" | "websocket"; source: "graph" };
+    capabilities: {
+      my_day: boolean;
+      step_order: boolean;
+      sub_resources: boolean;
+      list_appearance: boolean;
+      push: "none" | "websocket";
+      source: "graph";
+    };
   }> {
     let serverId = await this.#state.get<string>("sync:server_id");
     if (!serverId) {
@@ -2154,6 +2168,9 @@ export class IndexCore implements TokenProvider {
         // carries just the ones written through this server, and those can go
         // stale when edited in another app.
         sub_resources: checklistCacheEnabled(this.#env),
+        // Sidebar groups, order and theme are read from Substrate (section
+        // 10.4). Off when the Exchange Online scope is missing or refused.
+        list_appearance: myDay && !this.#substrateUnavailable,
         push: "websocket",
         source: "graph",
       },
@@ -2574,7 +2591,7 @@ export class IndexCore implements TokenProvider {
     // A different owner: no client may continue from a cursor into the old
     // owner's data. Drop the change log and stable IDs (the deletes above
     // logged tombstones) and replace the epoch.
-    for (const table of ["checklist_items", "linked_resources", "attachments", "sync_log", "entity_map"]) {
+    for (const table of ["checklist_items", "linked_resources", "attachments", "list_groups", "sync_log", "entity_map"]) {
       this.#sql.exec(`DELETE FROM ${table}`);
     }
     this.#sql.exec("UPDATE sync_meta SET epoch = lower(hex(randomblob(8))) WHERE id = 1");
@@ -2701,6 +2718,11 @@ export class IndexCore implements TokenProvider {
       );
       await this.renewSubscriptions().catch((e) =>
         log.warn("subscription_renew_batch_failed", { error: String(e) }),
+      );
+      // Sidebar groups, order and theme (section 10.4): two Substrate GETs
+      // when due. Never fails the cycle.
+      await this.#refreshListAppearance().catch((e) =>
+        log.warn("list_appearance_failed", { error: String(e) }),
       );
       await this.#runMyDayScanBatch(skip).catch((e) =>
         log.warn("my_day_scan_failed", { error: String(e) }),
@@ -2951,6 +2973,91 @@ export class IndexCore implements TokenProvider {
     return keyed
       .sort((a, b) => a.tier - b.tier || a.age - b.age)
       .map((k) => k.list_id);
+  }
+
+  // The To Do sidebar, read-only from Substrate (docs/SYNC-API.md section
+  // 10.4): every folder's group, position and theme, and every list group.
+  // Due when a list has never been read (a new list, or the first cycle after
+  // migration v12), or when the last successful read is a sync interval old;
+  // a sidebar reorder or theme change doesn't show in Graph's roster delta,
+  // so the interval is what picks those up. Without the Exchange Online scope
+  // it does nothing and the columns stay NULL. A failure records the error
+  // and leaves the read due, so the next calm cycle tries again.
+  async #refreshListAppearance(now: number = Date.now()): Promise<void> {
+    if (!myDayEnabled(this.#env) || this.#substrateUnavailable) return;
+    const unread = this.#sql.exec("SELECT 1 FROM lists WHERE appearance_synced_at IS NULL LIMIT 1").toArray().length > 0;
+    const last = this.#getSyncState(APPEARANCE_STATE_KEY)?.last_synced_at ?? null;
+    if (!unread && last !== null && now - last < this.#intervalMs()) return;
+    const listIds = this.listLists().map((l) => l.list_id);
+    if (listIds.length === 0) return;
+    try {
+      const sub = await this.#substrateForScan();
+      // Both reads before any write, so a failed second read changes nothing.
+      const folders = await sub.listFolders();
+      const groups = await sub.listFolderGroups();
+      const r = this.applyListAppearance(folders, groups, listIds, now);
+      this.#setSyncState(APPEARANCE_STATE_KEY, { last_synced_at: now, status: "idle", last_error: null });
+      log.info("list_appearance_synced", r);
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("my_day_unavailable")) return;
+      if (e instanceof SubstrateError && e.status === 403) {
+        this.markMyDayUnavailable();
+        log.warn("list_appearance_unavailable", { error: e.detail ?? "403" });
+        return;
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      this.#setSyncState(APPEARANCE_STATE_KEY, { status: "error", last_error: msg });
+      log.warn("list_appearance_read_failed", { error: msg });
+    }
+  }
+
+  // Stores one sidebar read: upserts the groups and deletes the ones that are
+  // gone (each logs a change or deletion record through migration v12's
+  // triggers), then sets each list's group, position and theme. Groups are
+  // written first, so a list moved into a new group is logged after the
+  // group. `listIds`: the lists that existed when the read started; each is
+  // marked read, matched or not, so a list Substrate doesn't return isn't
+  // read again every cycle. Lists added since keep the marker NULL.
+  applyListAppearance(
+    folders: SubstrateFolder[],
+    groups: SubstrateFolderGroup[],
+    listIds: string[],
+    now: number = Date.now(),
+  ): { lists: number; unmatched_folders: number; unread_lists: number; groups: number } {
+    return this.#transact(() => {
+      const keep = new Set(groups.map((g) => g.Id));
+      for (const g of groups) {
+        this.#sql.exec(
+          `INSERT INTO list_groups (group_id, name, order_datetime) VALUES (?, ?, ?)
+           ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, order_datetime = excluded.order_datetime`,
+          g.Id, g.Name ?? null, g.OrderDateTime ?? null,
+        );
+      }
+      const stored = this.#sql.exec<{ group_id: string }>("SELECT group_id FROM list_groups").toArray();
+      for (const { group_id } of stored) {
+        if (!keep.has(group_id)) this.#sql.exec("DELETE FROM list_groups WHERE group_id = ?", group_id);
+      }
+      const known = new Set(listIds);
+      const read = new Set<string>();
+      let unmatched = 0;
+      for (const f of folders) {
+        if (!known.has(f.Id)) {
+          unmatched += 1;
+          continue;
+        }
+        read.add(f.Id);
+        this.#sql.exec(
+          `UPDATE lists SET group_id = ?, order_datetime = ?, theme_color = ?, theme_background = ?,
+             appearance_synced_at = ? WHERE list_id = ?`,
+          f.ParentFolderGroupId ?? null, f.OrderDateTime ?? null,
+          rawAppearance(f.ThemeColor), rawAppearance(f.ThemeBackground), now, f.Id,
+        );
+      }
+      for (const id of listIds) {
+        if (!read.has(id)) this.#sql.exec("UPDATE lists SET appearance_synced_at = ? WHERE list_id = ?", now, id);
+      }
+      return { lists: read.size, unmatched_folders: unmatched, unread_lists: listIds.length - read.size, groups: groups.length };
+    });
   }
 
   // Budgeted background My Day Substrate scan. Substrate has no delta, so each
@@ -3320,6 +3427,13 @@ function stepClock(item: ChecklistItem): (field: string) => number {
   const now = Date.now();
   const checkedAt = item.isChecked && item.checkedDateTime ? Date.parse(item.checkedDateTime) : NaN;
   return (field) => (field === "checked" && !Number.isNaN(checkedAt) ? checkedAt : now);
+}
+
+// A theme value as stored: the string Substrate sent, or the JSON of anything
+// else (the format is undocumented, so nothing is mapped or validated).
+function rawAppearance(v: unknown): string | null {
+  if (v == null) return null;
+  return typeof v === "string" ? v : JSON.stringify(v);
 }
 
 const CLOCKED: Record<string, { table: string; key: string; fields: Record<string, readonly string[]> }> = {

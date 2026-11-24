@@ -149,6 +149,14 @@ export interface ListRow {
   // The list's sync setting (migration v11): todo | reference | excluded, or
   // NULL until the sync cycle first records it.
   sync?: string | null;
+  // Sidebar appearance read from Substrate (migration v12), NULL until read:
+  // the list group's Substrate Id, the sidebar position, and the theme as
+  // Substrate sends it.
+  group_id?: string | null;
+  order_datetime?: string | null;
+  theme_color?: string | null;
+  theme_background?: string | null;
+  appearance_synced_at?: number | null;
 }
 
 // One row per checklist item (migration v3). Joinable to `tasks` by task_id so

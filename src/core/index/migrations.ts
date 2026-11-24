@@ -533,6 +533,85 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 12,
+    apply: (sql) => {
+      // docs/SYNC-API.md section 10.4: the To Do sidebar, mirrored read-only
+      // from Substrate. Each list gets its group (the group's Substrate Id),
+      // its sidebar position (OrderDateTime, a string as Substrate sends it)
+      // and its theme (raw strings; the format isn't documented). All NULL
+      // until the first Substrate read, and they stay NULL without Substrate.
+      // appearance_synced_at is a marker, not data: NULL means "this list has
+      // never been read from Substrate", which makes the next calm cycle read
+      // the sidebar. It is not in the trigger's column list, so it logs nothing.
+      const cols = sql.exec<{ name: string }>("PRAGMA table_info(lists)").toArray().map((c) => c.name);
+      for (const [col, type] of [
+        ["group_id", "TEXT"],
+        ["order_datetime", "TEXT"],
+        ["theme_color", "TEXT"],
+        ["theme_background", "TEXT"],
+        ["appearance_synced_at", "INTEGER"],
+      ]) {
+        if (!cols.includes(col)) sql.exec(`ALTER TABLE lists ADD COLUMN ${col} ${type}`);
+      }
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS list_groups (
+          group_id       TEXT PRIMARY KEY,
+          name           TEXT,
+          order_datetime TEXT
+        )
+      `);
+
+      const NOW = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+      // v11's list update trigger, plus the appearance columns: a list moved
+      // into a group, reordered or re-themed is logged again. Same statement
+      // shape as v5.
+      const listSid = "(SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id = new.list_id)";
+      const LIST_SYNCED = [
+        "display_name", "wellknown", "is_owner", "is_shared", "sync",
+        "group_id", "order_datetime", "theme_color", "theme_background",
+      ];
+      sql.exec("DROP TRIGGER IF EXISTS lists_sync_au");
+      sql.exec(`
+        CREATE TRIGGER lists_sync_au AFTER UPDATE ON lists
+          WHEN ${LIST_SYNCED.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ")} BEGIN
+          DELETE FROM sync_log WHERE kind = 'list' AND sid = ${listSid};
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            SELECT 'list', ${listSid}, 0, ${listSid}, ${NOW} WHERE ${listSid} IS NOT NULL;
+        END
+      `);
+
+      // Groups are entities of their own in the change log (kind
+      // 'list_group'), with a sid minted on insert and a deletion record on
+      // delete. Same trigger shape as v5's lists; list_sid stays NULL because
+      // a group belongs to no list.
+      const groupSid = (ref: "new" | "old") =>
+        `(SELECT sid FROM entity_map WHERE kind = 'list_group' AND graph_id = ${ref}.group_id)`;
+      const logGroup = (ref: "new" | "old", deleted: 0 | 1) => `
+          DELETE FROM sync_log WHERE kind = 'list_group' AND sid = ${groupSid(ref)};
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            SELECT 'list_group', ${groupSid(ref)}, ${deleted}, NULL, ${NOW} WHERE ${groupSid(ref)} IS NOT NULL;`;
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS list_groups_sync_ai AFTER INSERT ON list_groups BEGIN
+          INSERT INTO entity_map (kind, sid, graph_id, created_ms)
+            SELECT 'list_group', lower(hex(randomblob(16))), new.group_id, ${NOW}
+            WHERE NOT EXISTS (SELECT 1 FROM entity_map WHERE kind = 'list_group' AND graph_id = new.group_id);
+          ${logGroup("new", 0)}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS list_groups_sync_au AFTER UPDATE ON list_groups
+          WHEN old.name IS NOT new.name OR old.order_datetime IS NOT new.order_datetime BEGIN
+          ${logGroup("new", 0)}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS list_groups_sync_ad AFTER DELETE ON list_groups BEGIN
+          ${logGroup("old", 1)}
+        END
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -551,12 +630,13 @@ function currentVersion(sql: SqlDb): number {
 
 // Returns the stored version before this call and the versions applied, so
 // the caller can react (v4 on an existing database cleared sync state and
-// needs the next sync cycle started).
-export function applyMigrations(sql: SqlDb): { from: number; applied: number[] } {
+// needs the next sync cycle started). `upTo` stops at that version; tests use
+// it to build an older database.
+export function applyMigrations(sql: SqlDb, upTo = LATEST_SCHEMA_VERSION): { from: number; applied: number[] } {
   const cur = currentVersion(sql);
   const applied: number[] = [];
   for (const m of MIGRATIONS) {
-    if (cur >= m.version) continue;
+    if (cur >= m.version || m.version > upTo) continue;
     m.apply(sql);
     sql.exec("UPDATE schema_meta SET version = ? WHERE id = 1", m.version);
     applied.push(m.version);
