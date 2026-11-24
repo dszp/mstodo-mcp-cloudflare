@@ -918,7 +918,7 @@ describe("wipeIdentityScopedState — Feature A alias clearing", () => {
         patterns: [{ pattern: "work", flags: "i", type: "todo" }],
         aliases: { inbox: "old-account-list-id", finance: "another-old-id" },
         no_sync: ["flaggedEmails"],
-        sync_flagged_emails: false,
+        archive: [], sync_flagged_emails: false,
       }),
     );
     await env.TODO_CACHE.put("config:link_rules", JSON.stringify({ rules: [] }));

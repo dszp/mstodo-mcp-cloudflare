@@ -7,6 +7,18 @@ import type { ListsConfig } from "./schemas";
 // ONLY by the explicit sync_flagged_emails opt-in — never by clearing no_sync.
 export const BUILTIN_NO_SYNC_WELLKNOWN = ["flaggedEmails"] as const;
 
+// Archive lists (section 1.2): kept and synced, shown apart in the app, and
+// scanned for steps/links/attachments on open tasks only. flaggedEmails is
+// always archive when it is synced.
+export function isArchiveList(
+  list: { list_id: string; wellknown: string | null },
+  cfg: ListsConfig,
+): boolean {
+  if (list.wellknown === "flaggedEmails") return true;
+  if (list.wellknown !== null && cfg.archive.includes(list.wellknown)) return true;
+  return cfg.archive.includes(list.list_id);
+}
+
 // Single source of truth for "should this list be excluded from delta sync?".
 // Matched by wellknownListName OR Graph list id (never display name — too
 // fragile). The built-in flaggedEmails skip is checked independently of no_sync

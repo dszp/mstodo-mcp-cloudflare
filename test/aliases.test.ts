@@ -7,7 +7,7 @@ const config = (aliases: Record<string, string>): ListsConfig => ({
   aliases,
   overrides: {},
   no_sync: [],
-  sync_flagged_emails: false,
+  archive: [], sync_flagged_emails: false,
 });
 
 const roster: RosterEntry[] = [

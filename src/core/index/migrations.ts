@@ -445,6 +445,30 @@ const MIGRATIONS: Migration[] = [
       sql.exec("UPDATE tasks SET checklist_synced_at = NULL");
     },
   },
+  {
+    version: 9,
+    apply: (sql) => {
+      // docs/SYNC-API.md section 1.1: step (checklist item) manual order, read
+      // from Substrate by the sub-resource scan. Null until a step is dragged.
+      const cols = sql.exec<{ name: string }>("PRAGMA table_info(checklist_items)").toArray().map((c) => c.name);
+      if (!cols.includes("order_datetime")) sql.exec("ALTER TABLE checklist_items ADD COLUMN order_datetime TEXT");
+      // Re-create v5's step update trigger with the new column, so a reorder is
+      // logged on the parent task. Same statement shape as v5.
+      const NOW = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+      const live = `(SELECT m.sid FROM entity_map m JOIN tasks t ON t.task_id = m.graph_id
+          WHERE m.kind = 'task' AND m.graph_id = new.task_id)`;
+      const listSid = `(SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id =
+          (SELECT list_id FROM tasks WHERE task_id = new.task_id))`;
+      const STEP_SYNCED = ["task_id", "display_name", "is_checked", "created_at", "checked_at", "order_datetime"];
+      sql.exec("DROP TRIGGER IF EXISTS steps_sync_au");
+      sql.exec(`CREATE TRIGGER steps_sync_au AFTER UPDATE ON checklist_items
+        WHEN ${STEP_SYNCED.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ")} BEGIN
+        DELETE FROM sync_log WHERE kind = 'task' AND sid = ${live};
+        INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+          SELECT 'task', ${live}, 0, ${listSid}, ${NOW} WHERE ${live} IS NOT NULL;
+      END`);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
