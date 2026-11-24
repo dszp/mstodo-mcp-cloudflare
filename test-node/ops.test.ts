@@ -128,6 +128,19 @@ describe("task ops", () => {
     expect(r.ok && "link_rules" in r.value).toBe(false);
   });
 
+  it("updateTask reports an applied PATCH even when the link-rule re-fetch fails", async () => {
+    const h = setup({
+      routes: [
+        on("PATCH", `${G}/L1/tasks/T1`, (b) => json(task("T1", b as object))),
+        on("GET", `${G}/L1/tasks/T1?%24expand=linkedResources`, () => json({ error: { code: "ErrorItemNotFound" } }, 404)),
+      ],
+    });
+    const r = await updateTask(h.ctx(), { list_id: "L1", task_id: "T1", title: "renamed" });
+    // Not task_not_found: the write committed, so a retry must not be invited.
+    expect(r).toMatchObject(ok({ task: { title: "renamed" }, link_rules: { created: [], error: expect.stringContaining("404") } }));
+    expect(h.core.query({} as never).rows.map((t) => t.title)).toEqual(["renamed"]);
+  });
+
   it("moveTask reports an orphaned copy when the abort cleanup fails", async () => {
     const h = setup({
       routes: [
