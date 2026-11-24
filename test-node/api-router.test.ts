@@ -23,6 +23,7 @@ function fakeEnv(overrides: Record<string, unknown> = {}) {
       capabilities: { my_day: true, step_order: false, push: "none", source: "graph" },
     })),
     search: vi.fn(async (_o: unknown) => ({ rows: [{ task_id: "G1" }, { task_id: "G-unmapped" }] })),
+    syncSearch: vi.fn(async (_q: string, _limit: number) => [{ id: "sid-G1", data: {}, field_clock: {} }]),
     ...overrides,
   };
   const env = {
@@ -105,19 +106,17 @@ describe("handleApiRequest", () => {
     expect(index.syncTask).not.toHaveBeenCalled();
   });
 
-  it("searches with literal terms and returns hits as tasks, dropping hits with no sid", async () => {
-    const { env, index } = fakeEnv({
-      syncTask: vi.fn(async (sid: string) => ({ id: sid, data: {}, field_clock: {} })),
-    });
+  it("searches with literal terms and returns hits as tasks", async () => {
+    const { env, index } = fakeEnv();
     const res = await handleApiRequest(req(`/search?q=${encodeURIComponent('pay "the" bill')}`), env, PROPS);
     expect(await body(res)).toEqual([200, { results: [{ kind: "task", id: "sid-G1", data: {}, field_clock: {} }] }]);
-    expect(index.search).toHaveBeenCalledWith({ query: '"pay"* """the"""* "bill"*', limit: 50, include_checklist: true });
+    expect(index.syncSearch).toHaveBeenCalledWith('"pay"* """the"""* "bill"*', 50);
   });
 
   it.each(["", "   ", "x".repeat(257)])("refuses search q=%j", async (q) => {
     const { env, index } = fakeEnv();
     expect(await body(await handleApiRequest(req(`/search?q=${q}`), env, PROPS))).toEqual([400, { error: "bad_query" }]);
-    expect(index.search).not.toHaveBeenCalled();
+    expect(index.syncSearch).not.toHaveBeenCalled();
   });
 
   it("serves the whole info with a token, the address only as a hint", async () => {

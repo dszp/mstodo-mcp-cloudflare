@@ -1619,6 +1619,18 @@ export class IndexCore implements TokenProvider {
     return taskBySid(this.#sql, sid, this.#env.TIMEZONE);
   }
 
+  // FTS search answered with feed-shaped tasks, in one call (one RPC on
+  // Cloudflare instead of one per hit).
+  syncSearch(query: string, limit: number): NonNullable<ReturnType<typeof taskBySid>>[] {
+    const { rows } = this.search({ query, limit, include_checklist: true });
+    const ids = rows.slice(0, limit).map((r) => r.task_id);
+    const sids = taskSids(this.#sql, ids);
+    return ids.flatMap((id) => {
+      const t = sids[id] ? taskBySid(this.#sql, sids[id], this.#env.TIMEZONE) : null;
+      return t ? [t] : [];
+    });
+  }
+
   // Graph task IDs → sids (search results are served by sid).
   syncTaskSids(taskIds: string[]): Record<string, string> {
     return taskSids(this.#sql, taskIds);

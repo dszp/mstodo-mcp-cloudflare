@@ -120,12 +120,21 @@ async function handleAuthRequest(req: Request, env: HandlerEnv): Promise<Respons
   return new Response("not found", { status: 404 });
 }
 
+// The path of the resource a client asked for ("/mcp" or "/api/v1").
+function resourcePath(resource: string | undefined): string {
+  try {
+    return resource ? new URL(resource).pathname : "";
+  } catch {
+    return "";
+  }
+}
+
 async function handleAuthorize(req: Request, env: HandlerEnv): Promise<Response> {
   const oauth = env.OAUTH_PROVIDER;
   const authRequest = await oauth.parseAuthRequest(req);
 
   if (await oauth.isConsentRemembered(req, authRequest, await rememberOptions(env))) {
-    log.info("consent_remembered", { client_id: authRequest.clientId });
+    log.info("consent_remembered", { client_id: authRequest.clientId, resource: resourcePath(authRequest.resource) });
     return startMicrosoftSignIn(req, env, authRequest, new Headers());
   }
 
@@ -133,7 +142,9 @@ async function handleAuthorize(req: Request, env: HandlerEnv): Promise<Response>
   const details = await oauth.describeConsent(authRequest);
   const consent = await oauth.beginConsent(authRequest);
   consent.headers.set("content-type", "text/html; charset=utf-8");
-  return new Response(consentPage(details, consent.handle), { headers: consent.headers });
+  return new Response(consentPage(details, consent.handle, resourcePath(authRequest.resource)), {
+    headers: consent.headers,
+  });
 }
 
 async function handleConsentDecision(req: Request, env: HandlerEnv): Promise<Response> {
@@ -156,7 +167,7 @@ async function handleConsentDecision(req: Request, env: HandlerEnv): Promise<Res
     handle,
     form.get("remember") === "1" ? { remember: await rememberOptions(env) } : {},
   );
-  log.info("consent_approved", { client_id: approved.request.clientId });
+  log.info("consent_approved", { client_id: approved.request.clientId, resource: resourcePath(approved.request.resource) });
   return startMicrosoftSignIn(req, env, approved.request, approved.headers);
 }
 
