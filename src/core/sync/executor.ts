@@ -16,11 +16,20 @@ import { SubstrateError } from "../graph/substrate-client";
 import { bestEffort, type OpsContext } from "../ops/context";
 import { createLink, deleteLink, updateLink } from "../ops/links";
 import { createList, deleteList, updateList } from "../ops/lists";
-import { addToMyDay, removeFromMyDay, reorderMyDayTask } from "../ops/my-day";
+import { addToMyDay, removeFromMyDay, reorderMyDayTask, todayInTimeZone } from "../ops/my-day";
 import type { ReorderPosition } from "../ops/position";
 import type { ToolResult } from "../ops/result";
-import { createStep, deleteStep, reorderStep, updateStep } from "../ops/steps";
-import { createTask, deleteTask, moveTask, reorderTask, updateTask, type UpdateTaskInput } from "../ops/tasks";
+import { createStep, deleteStep, findCreatedSteps, reorderStep, updateStep } from "../ops/steps";
+import {
+  createTask,
+  deleteTask,
+  findCreatedTasks,
+  moveTask,
+  refreshTask,
+  reorderTask,
+  updateTask,
+  type UpdateTaskInput,
+} from "../ops/tasks";
 import { WriteBusyError } from "../ops/write-lease";
 import { normalizeSid, type ExecInput, type ExecOutcome, type Executor, type Position } from "./mutations";
 
@@ -57,34 +66,60 @@ export function syncExecutor(ctx: OpsContext): Executor {
 
 // What a throw from an op means for the app (section 5.3). An op returns
 // err() for its own deterministic refusals; what propagates is transport,
-// throttling, auth and the write queue.
+// throttling, auth and the write queue. Only what is certainly permanent is
+// `rejected` (stored for good); anything that may clear on its own, or after
+// the owner signs in again, is `failed` with retry: true so the app keeps the
+// edit. On a create, a failure after the request may have reached Graph is
+// also `ambiguous`: the retry looks for what it made before creating again.
 async function outcomeOfThrown(ctx: OpsContext, input: ExecInput, e: unknown): Promise<ExecOutcome> {
+  const out = await classify(ctx, input, e);
+  if (!out.ok && out.retry && input.op.endsWith(".create") && mayHaveWritten(e)) return { ...out, ambiguous: true };
+  return out;
+}
+
+// A 5xx, a dropped connection, or an error we can't place: Graph may have
+// committed the write. A 429, 401 or a refused lease means it never ran.
+function mayHaveWritten(e: unknown): boolean {
+  if (e instanceof GraphError || e instanceof SubstrateError) return e.status >= 500;
+  return !(e instanceof WriteBusyError) && !isReauthRequired(e) && !(e instanceof Error && e.message === "not_authenticated");
+}
+
+async function classify(ctx: OpsContext, input: ExecInput, e: unknown): Promise<ExecOutcome> {
   // No stored Microsoft tokens at all is the same state for the app: the
-  // owner has to sign in before anything syncs.
+  // owner has to sign in before anything syncs. A 401 that survived the
+  // client's refresh-and-retry is that too.
   if (isReauthRequired(e) || (e instanceof Error && e.message === "not_authenticated")) return retryable("reauth_required");
+  if ((e instanceof GraphError || e instanceof SubstrateError) && e.status === 401) return retryable("reauth_required");
   if (e instanceof WriteBusyError) return retryable("write_busy");
-  if (e instanceof GraphError) {
-    if (e.status === 429 || e.status >= 500) return retryable(`graph_${e.status}`);
-    return rejected(`graph_${e.status}`);
-  }
+  if (e instanceof GraphError) return graphOutcome(`graph_${e.status}`, e.status);
   // The index throws a plain Error("my_day_unavailable") (flattened over DO
-  // RPC) when the Exchange Online scope isn't consented. Not `rejected`: a
-  // rejected result is stored for good, and this one clears once the owner
-  // re-authorizes.
-  if (e instanceof Error && e.message.includes("my_day_unavailable")) return { ok: false, error: "my_day_unavailable", retry: false };
+  // RPC) when the Exchange Online scope isn't consented; it clears when the
+  // owner re-authorizes.
+  if (e instanceof Error && e.message.includes("my_day_unavailable")) return retryable("my_day_unavailable");
   if (e instanceof SubstrateError) {
-    if (e.status === 429 || e.status >= 500) return retryable(`substrate_${e.status}`);
     if (e.status === 403) {
       // Same latch as the MCP tools: stop trying Substrate until re-consent.
       await bestEffort("mark_my_day_unavailable_failed", {}, () => ctx.index.markMyDayUnavailable());
-      return { ok: false, error: "my_day_unavailable", retry: false };
+      return retryable("my_day_unavailable");
     }
-    return rejected(`substrate_${e.status}`);
+    return graphOutcome(`substrate_${e.status}`, e.status);
   }
   // fetch() rejects with a TypeError when the network fails.
   if (e instanceof TypeError) return retryable("network_error");
+  // Everything else — a Microsoft token endpoint outage, a refresh racing a
+  // re-authorization, the index unreachable — is the server's trouble, not
+  // the edit's.
   log.error("sync_mutation_failed", { op: input.op, error: e instanceof Error ? e.message : String(e) });
-  return { ok: false, error: "internal_error", retry: false };
+  return retryable("internal_error");
+}
+
+// 429 and 5xx: throttling and outages. 409 and 423: a conflicting or locked
+// item, which passes. 403: not stored, since a permission can come back. Any
+// other 4xx is a request Graph will refuse every time.
+function graphOutcome(error: string, status: number): ExecOutcome {
+  if (status === 429 || status >= 500 || status === 409 || status === 423) return retryable(error);
+  if (status === 403) return { ok: false, error, retry: false };
+  return rejected(error);
 }
 
 async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> {
@@ -119,12 +154,19 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
 
     case "task.create": {
       const list_id = ref("list_id");
-      const t = taskFields(fields);
-      const r = await createTask(ctx, { list_id, title: requiredText(fields, "title"), ...createFields(t) });
+      const title = requiredText(fields, "title");
+      const t = completion(taskFields(fields), today(ctx));
+      if (input.priorAttemptMs !== undefined) {
+        // An earlier attempt may have made it (section 5.4).
+        const found = await findCreatedTasks(ctx, { list_id, title, since_ms: input.priorAttemptMs });
+        if (found.length === 1) return applied(found[0].id);
+        if (found.length > 1) return rejected("ambiguous_create");
+      }
+      const r = await createTask(ctx, { list_id, title, ...createFields(t) });
       if (!r.ok) return rejected(r.reason);
       const taskId = r.value.task.id;
-      // Graph's create takes no completion date; set it with a second write.
-      // The task exists either way, so a failure here doesn't fail the create.
+      // Graph's create takes no completion date; a backdated completion is a
+      // second write. The task exists either way, so its failure is logged.
       const completed_date = t.completed_date;
       if (completed_date) {
         await afterCommit("sync_create_completed_date_failed", taskId, () =>
@@ -136,7 +178,14 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
     case "task.update": {
       const list_id = await listOfTask(ctx, graphId);
       if (!list_id) return rejected("unknown_task");
-      const r = await updateTask(ctx, { list_id, task_id: graphId, ...taskFields(fields) });
+      const t = completion(taskFields(fields), today(ctx));
+      let r = await updateTask(ctx, { list_id, task_id: graphId, ...t });
+      if (!r.ok && r.reason === "recurring_completion_unsupported") {
+        // A repeating task can't keep a completion date: completing it moves
+        // it to the next occurrence. Complete it without one.
+        const { completed_date: _dropped, ...rest } = t;
+        r = await updateTask(ctx, { list_id, task_id: graphId, ...rest, status: rest.status ?? "completed" });
+      }
       return r.ok ? applied(graphId) : rejected(r.reason);
     }
     case "task.delete": {
@@ -156,10 +205,19 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       if (from_list_id !== to_list_id) {
         const r = await moveTask(ctx, { task_id: graphId, from_list_id, to_list_id });
         if (!r.ok) return rejected(r.reason);
-        // An aborted copy-and-delete left the source untouched; what stopped
-        // it (an attachment too large to copy, …) will stop a retry too.
-        if (r.value.status === "aborted") return { ok: false, error: `move_aborted:${r.value.error}`, retry: false };
-        taskId = r.value.task_id;
+        const v = r.value;
+        if (v.status === "aborted") {
+          // The source is untouched. A destination copy that couldn't be
+          // removed is a stray task only a person can judge; say where it is.
+          if (v.orphan_task_id) {
+            log.error("sync_move_orphan", { task_id: graphId, orphan_task_id: v.orphan_task_id, to_list_id });
+          }
+          // Throttling or an outage may pass; a reference attachment or an
+          // oversized file won't.
+          return { ok: false, error: `move_aborted:${v.error}`, retry: v.transient === true };
+        }
+        taskId = v.task_id;
+        if (v.method === "copy_delete" && v.warning) await finishCopyMove(ctx, graphId, from_list_id, to_list_id, taskId);
       }
       if (input.position) {
         // The move has committed; a failed reorder can't undo it.
@@ -210,12 +268,13 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       const task_id = ref("task_id");
       const list_id = await listOfTask(ctx, task_id);
       if (!list_id) return rejected("unknown_task");
-      const r = await createStep(ctx, {
-        list_id,
-        task_id,
-        display_name: requiredText(fields, "title"),
-        is_checked: optionalBool(fields, "checked"),
-      });
+      const title = requiredText(fields, "title");
+      if (input.priorAttemptMs !== undefined) {
+        const found = await findCreatedSteps(ctx, { list_id, task_id, title, since_ms: input.priorAttemptMs });
+        if (found.length === 1) return applied(found[0].id);
+        if (found.length > 1) return rejected("ambiguous_create");
+      }
+      const r = await createStep(ctx, { list_id, task_id, display_name: title, is_checked: optionalBool(fields, "checked") });
       return r.ok ? applied(r.value.item.id) : rejected(r.reason);
     }
     case "step.update": {
@@ -285,6 +344,27 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
   }
 }
 
+// A copy-and-delete move whose source delete failed: the copy exists, and the
+// mirror holds both tasks with the app's sid still on the source. The sid
+// goes to the copy (what the app asked for) and the source delete is tried
+// once more. If the source still won't go, it is mirrored again under a sid
+// of its own, so the app sees it as the extra task it is, and logged; the
+// move is not reported failed, since a retry would make another copy.
+async function finishCopyMove(ctx: OpsContext, sourceId: string, from: string, to: string, copyId: string): Promise<void> {
+  await bestEffort("index_move_task_failed", { task_id: sourceId }, () => ctx.index.moveTask(sourceId, to, copyId));
+  await bestEffort("index_mark_checklist_dirty_failed", { task_id: copyId }, () => ctx.index.markChecklistDirty(copyId));
+  let gone = false;
+  try {
+    const r = await deleteTask(ctx, { list_id: from, task_id: sourceId });
+    gone = r.ok || r.reason === "task_not_found";
+  } catch (e) {
+    log.warn("sync_move_source_delete_retry_failed", { task_id: sourceId, error: e instanceof Error ? e.message : String(e) });
+  }
+  if (gone) return;
+  log.error("sync_move_source_left", { source_task_id: sourceId, from_list_id: from, copy_task_id: copyId, to_list_id: to });
+  await afterCommit("sync_move_source_refresh_failed", sourceId, () => refreshTask(ctx, { list_id: from, task_id: sourceId }));
+}
+
 // The second write of a mutation whose first write committed (a create's
 // completion date, a move's or My Day add's position). Its failure is logged,
 // never returned: the mutation is applied, and failing it would invite a
@@ -340,12 +420,12 @@ export function taskFields(fields: Record<string, unknown>): TaskFields {
   if (has("status")) out.status = oneOf(fields, "status", STATUS);
   if (has("importance")) out.importance = oneOf(fields, "importance", IMPORTANCE);
   if (has("completed_at")) {
+    // A bare date in the owner's calendar, like due and start: To Do keeps
+    // completion at date granularity.
     const v = fields.completed_at;
     if (v === null) out.completed_date = null;
-    else if (typeof v === "string" && !Number.isNaN(Date.parse(v))) {
-      // To Do keeps completion as a UTC date.
-      out.completed_date = new Date(Date.parse(v)).toISOString().slice(0, 10);
-    } else invalid("completed_at");
+    else if (typeof v === "string" && BARE_DATE.test(v)) out.completed_date = v;
+    else invalid("completed_at");
   }
   for (const k of ["due", "start"] as const) {
     if (!has(k)) continue;
@@ -383,6 +463,17 @@ export function taskFields(fields: Record<string, unknown>): TaskFields {
 
 // A create has nothing to clear, so a null field means "not set"; the
 // completion date goes in a second write (Graph's create ignores it).
+const today = (ctx: OpsContext) => todayInTimeZone(ctx.env.TIMEZONE);
+
+// Completing a task today is a status change, not a backdate: Graph stamps
+// the date itself, and a repeating task accepts it (it can't hold a set
+// date). Only a completion on another day is sent as completed_date.
+export function completion(t: TaskFields, todayDate: string): TaskFields {
+  if (t.completed_date == null || t.completed_date !== todayDate) return t;
+  const { completed_date: _today, ...rest } = t;
+  return { ...rest, status: rest.status ?? "completed" };
+}
+
 function createFields(t: TaskFields) {
   const { completed_date: _later, reminder, due, start, recurrence, ...rest } = t;
   return {

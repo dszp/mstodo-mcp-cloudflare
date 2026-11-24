@@ -108,6 +108,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   mutationAbandon(...a: Parameters<IndexCore["mutationAbandon"]>) { return this.#core.mutationAbandon(...a); }
   mutationBegin(...a: Parameters<IndexCore["mutationBegin"]>) { return this.#core.mutationBegin(...a); }
   mutationFinish(...a: Parameters<IndexCore["mutationFinish"]>) { return this.#core.mutationFinish(...a); }
+  mutationRelease(...a: Parameters<IndexCore["mutationRelease"]>) { return this.#core.mutationRelease(...a); }
   pruneMutations(...a: Parameters<IndexCore["pruneMutations"]>) { return this.#core.pruneMutations(...a); }
   resolveSids(...a: Parameters<IndexCore["resolveSids"]>) { return this.#core.resolveSids(...a); }
   syncChanges(...a: Parameters<IndexCore["syncChanges"]>) { return this.#core.syncChanges(...a); }

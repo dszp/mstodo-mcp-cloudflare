@@ -23,7 +23,9 @@ describe("POST /api/v1/sync/mutations (node host)", () => {
       MS_TENANT_ID: "test-tenant",
       MS_CLIENT_ID: "test-client",
       MS_CLIENT_SECRET: "test-secret",
-      ENABLE_CHECKLIST_CACHE: "true",
+      // Off (the default) here and on in the Workers twin: a step or link
+      // the app creates must be editable either way.
+      ENABLE_CHECKLIST_CACHE: "false",
     });
     const handler = createHandler(env, { publicOrigin: ORIGIN });
     await runSyncMutationRouteChecks(env, handler.fetch);

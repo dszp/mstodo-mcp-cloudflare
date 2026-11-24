@@ -58,13 +58,16 @@ export async function syncMutations(
 
   // One lease for the whole batch (section 18.4): an MCP write or another
   // device's batch waits for it rather than interleaving between mutations.
-  // The wait is the batch's own time budget, so a queued batch still answers
-  // inside a client timeout.
+  // The wait and the batch share one time budget from the request's start, so
+  // a queued batch still answers inside a client timeout and finishes inside
+  // waitUntil's grace after a disconnect.
+  const started = Date.now();
   const lease = new WriteLease(index, { waitMs: BATCH_TIME_BUDGET_MS });
   const work = lease
     .hold((writes) => {
       const ctx = opsContext({ env, graph, index, substrate, accessToken: tokens.getAccessToken, writes });
-      return applyBatch(index, syncExecutor(ctx), batch, principal);
+      const budgetMs = Math.max(BATCH_TIME_BUDGET_MS - (Date.now() - started), 0);
+      return applyBatch(index, syncExecutor(ctx), batch, principal, { budgetMs });
     })
     .then(
       (out) => out,

@@ -49,6 +49,32 @@ export const UPDATABLE: Record<string, readonly string[]> = {
   "link.update": ["url", "title"],
 };
 
+// Fields every other op accepts. A create takes the update fields plus the
+// sid of its parent; reorders take only `position`.
+const TASK_FIELDS = UPDATABLE["task.update"];
+export const ALLOWED_FIELDS: Record<MutationOp, readonly string[]> = {
+  "list.update": UPDATABLE["list.update"],
+  "task.update": TASK_FIELDS,
+  "step.update": UPDATABLE["step.update"],
+  "link.update": UPDATABLE["link.update"],
+  "list.create": ["name"],
+  "list.delete": [],
+  "task.create": ["list_id", ...TASK_FIELDS],
+  "task.delete": [],
+  "task.move": ["list_id"],
+  "task.reorder": [],
+  "myday.add": [],
+  "myday.remove": [],
+  "myday.reorder": [],
+  "step.create": ["task_id", "title", "checked"],
+  "step.delete": [],
+  "step.reorder": [],
+  "link.create": ["task_id", "url", "title"],
+  "link.delete": [],
+};
+// A parent reference, not a field of the entity: it gets no field clock.
+const PARENT_REFS = new Set(["list_id", "task_id"]);
+
 export const kindOf = (op: MutationOp): EntityKind => {
   const k = op.slice(0, op.indexOf("."));
   return (k === "myday" ? "task" : k) as EntityKind;
@@ -70,8 +96,11 @@ export interface Resolved {
 // The server-side half, run inside the index (one SQLite each call). On
 // Cloudflare these are Durable Object RPCs.
 export interface MutationStore {
+  // `prior_at_ms` is set when an earlier attempt of this id may have written
+  // to Graph (it was released as ambiguous, or its lease ran out): the time it
+  // first began.
   mutationBegin(id: string, principal: string, nowMs: number, leaseMs: number): Promise<
-    | { state: "new" }
+    | { state: "new"; prior_at_ms?: number }
     | { state: "done"; result: unknown }
     | { state: "leased" }
   >;
@@ -81,6 +110,9 @@ export interface MutationStore {
     clocks: Array<{ kind: EntityKind; sid: string; field: string; at_ms: number }>,
   ): Promise<void>;
   mutationAbandon(id: string): Promise<void>;
+  // Keeps the row (and its first at_ms) but frees the lease: the write may
+  // have reached Graph, so the retry looks for it before writing again.
+  mutationRelease(id: string): Promise<void>;
   fieldClocks(kind: EntityKind, sid: string): Promise<Record<string, number>>;
   resolveSids(refs: SidRef[]): Promise<Record<string, Resolved>>;
   adoptSid(kind: EntityKind, sid: string, graphId: string): Promise<boolean>;
@@ -95,10 +127,15 @@ export interface ExecInput {
   fields: Record<string, unknown>;
   position?: Position;
   ids: Record<string, string>;
+  // A create retried after an attempt that may have reached Graph: find what
+  // that attempt made (created at or after this time) before creating again.
+  priorAttemptMs?: number;
 }
+// `ambiguous`: the failure came after the request may have reached Graph (a
+// 5xx or a dropped connection on a create), so the retry must check first.
 export type ExecOutcome =
   | { ok: true; graphId: string }
-  | { ok: false; error: string; retry: boolean; rejected?: boolean };
+  | { ok: false; error: string; retry: boolean; rejected?: boolean; ambiguous?: boolean };
 export type Executor = (input: ExecInput) => Promise<ExecOutcome>;
 
 const SID_RE = /^[0-9a-f]{32}$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -139,8 +176,8 @@ function validate(raw: unknown): MutationIn | { id: string; error: string } {
   if (m.fields !== undefined && (typeof m.fields !== "object" || m.fields === null || Array.isArray(m.fields))) {
     return { id, error: "bad_fields" };
   }
-  const allowed = UPDATABLE[m.op as string];
-  if (allowed && m.fields) {
+  const allowed = ALLOWED_FIELDS[m.op as MutationOp];
+  if (m.fields) {
     const extra = Object.keys(m.fields).filter((f) => !allowed.includes(f));
     if (extra.length) return { id, error: `unknown_fields:${extra.join(",")}` };
   }
@@ -214,8 +251,9 @@ async function applyOne(
   if (begun.state === "done") return { id: m.id, status: "duplicate", result: begun.result };
   if (begun.state === "leased") return { id: m.id, status: "failed", error: "in_progress", retry: true };
 
-  const finish = async (res: MutationResult, clocks: Parameters<MutationStore["mutationFinish"]>[2] = []) => {
+  const finish = async (res: MutationResult, clocks: Parameters<MutationStore["mutationFinish"]>[2] = [], ambiguous = false) => {
     if (res.status === "applied" || res.status === "rejected") await store.mutationFinish(m.id, res, clocks);
+    else if (ambiguous) await store.mutationRelease(m.id);
     else await store.mutationAbandon(m.id);
     return res;
   };
@@ -257,10 +295,17 @@ async function applyOne(
     }
   }
 
-  const out = await exec({ op: m.op, graphId: self.graph_id, fields, position: m.position, ids });
+  const out = await exec({
+    op: m.op,
+    graphId: self.graph_id,
+    fields,
+    position: m.position,
+    ids,
+    ...(isCreate(m.op) && begun.prior_at_ms !== undefined ? { priorAttemptMs: begun.prior_at_ms } : {}),
+  });
   if (!out.ok) {
     if (out.rejected) return finish({ id: m.id, status: "rejected", error: out.error });
-    return finish({ id: m.id, status: "failed", error: out.error, retry: out.retry });
+    return finish({ id: m.id, status: "failed", error: out.error, retry: out.retry }, [], out.ambiguous === true);
   }
   if (isCreate(m.op) && !(await store.adoptSid(kind, m.sid, out.graphId))) {
     // Graph has the entity but the sid couldn't be attached (a race with the
@@ -273,6 +318,8 @@ async function applyOne(
     : { id: m.id, status: "applied", sid: m.sid };
   return finish(
     res,
-    Object.keys(fields).map((field) => ({ kind, sid: m.sid, field, at_ms: at })),
+    Object.keys(fields)
+      .filter((field) => !(isCreate(m.op) && PARENT_REFS.has(field)))
+      .map((field) => ({ kind, sid: m.sid, field, at_ms: at })),
   );
 }

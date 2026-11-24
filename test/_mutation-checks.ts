@@ -9,6 +9,7 @@ export function storeOf(c: IndexCore): MutationStore {
     mutationBegin: async (...a) => c.mutationBegin(...a),
     mutationFinish: async (...a) => c.mutationFinish(...a),
     mutationAbandon: async (...a) => c.mutationAbandon(...a),
+    mutationRelease: async (...a) => c.mutationRelease(...a),
     fieldClocks: async (...a) => c.fieldClocks(...a),
     resolveSids: async (...a) => c.resolveSids(...a),
     adoptSid: async (...a) => c.adoptSid(...a),
@@ -57,6 +58,7 @@ export async function runMutationChecks(c: IndexCore) {
   const create = { id: "m-1", at: t0, op: "task.create", sid: appSid, fields: { list_id: listSid, title: "Call Acme" } };
   const r1 = await applyBatch(store, exec, { mutations: [create] }, "p");
   const created = c.syncTask(appSid);
+  const createClocks = c.fieldClocks("task", appSid.toLowerCase());
   const retry = await applyBatch(store, exec, { mutations: [create] }, "p");
 
   // Field clocks: an update made at t2 lands; a queued one made earlier
@@ -94,6 +96,8 @@ export async function runMutationChecks(c: IndexCore) {
       { id: "m-13", at: t0, op: "task.reorder", sid: appSid, position: { top: false } },
       { id: "m-14", at: t0, op: "task.reorder", sid: appSid, position: { before: appSid, after: appSid } },
       { id: "m-15", at: t0, op: "task.reorder", sid: appSid, position: { before: "not-a-sid" } },
+      { id: "m-16", at: t0, op: "task.create", sid: "cccccccccccccccccccccccccccccccc", fields: { list_id: listSid, title: "x", owner: "y" } },
+      { id: "m-17", at: t0, op: "myday.add", sid: appSid, fields: { title: "x" } },
     ],
   }, "p");
 
@@ -101,6 +105,10 @@ export async function runMutationChecks(c: IndexCore) {
   const lease1 = c.mutationBegin("m-lease", "p", 1_000, 60_000);
   const lease2 = c.mutationBegin("m-lease", "p", 2_000, 60_000);
   const lease3 = c.mutationBegin("m-lease", "p", 70_000, 60_000);
+  // Released as ambiguous: the next attempt runs at once and learns when the
+  // first one began.
+  c.mutationRelease("m-lease");
+  const lease4 = c.mutationBegin("m-lease", "p", 71_000, 60_000);
 
   const st = (r: { results: Array<{ status: string }> }) => r.results.map((x) => x.status).join(",");
   const err = (r: { results: Array<Record<string, unknown>> }) => r.results.map((x) => x.error ?? x.status).join(",");
@@ -114,9 +122,12 @@ export async function runMutationChecks(c: IndexCore) {
     "a failure skips the entity's later mutations": st(blocked) === "failed,skipped",
     "a failed mutation can be retried": st(retried) === "applied",
     "an edit to a deleted task is rejected": err(afterDelete) === "deleted",
-    "malformed mutations are rejected one by one": err(bad) === "bad_at,unknown_op,unknown_fields:owner,unknown_sid,unknown_list,bad_position,bad_position,bad_position",
+    "malformed mutations are rejected one by one": err(bad) === "bad_at,unknown_op,unknown_fields:owner,unknown_sid,unknown_list,bad_position,bad_position,bad_position,unknown_fields:owner,unknown_fields:title",
     "a running mutation is leased; an expired lease is taken over":
       lease1.state === "new" && lease2.state === "leased" && lease3.state === "new",
     "the batch returns the current cursor": r1.cursor.includes("."),
+    "a create stamps its fields' clocks, not its parent's": "title" in createClocks && !("list_id" in createClocks),
+    "a released attempt is re-run at once, with its first start":
+      lease4.state === "new" && "prior_at_ms" in lease4 && lease4.prior_at_ms === 1_000,
   };
 }

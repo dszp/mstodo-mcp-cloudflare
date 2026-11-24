@@ -1,20 +1,17 @@
 import { LinkedResourceSchema, type LinkedResource } from "../graph/types";
 import { createLinkedResource } from "../graph/todo-resources";
-import { checklistCacheEnabled } from "../checklist/gate";
 import { bestEffort, isGraphNotFound, type OpsContext } from "./context";
 import { err, ok, type ToolResult } from "./result";
 
 // link.create / link.update / link.delete (docs/SYNC-API.md section 5.2). To Do
 // allows one linked resource per task. The index write-throughs keep a just-
-// written link addressable by its sid; the per-task sub-resource scan, which
-// runs only with the checklist cache on (the same gate as here), stays the
-// authority.
+// written link addressable by its sid, with the checklist cache on or off; the
+// per-task sub-resource scan (cache on only) stays the authority.
 
 const linkUrl = (listId: string, taskId: string, resourceId: string) =>
   `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(listId)}/tasks/${encodeURIComponent(taskId)}/linkedResources/${encodeURIComponent(resourceId)}`;
 
 async function cacheUpsert(ctx: OpsContext, taskId: string, listId: string, link: LinkedResource): Promise<void> {
-  if (!checklistCacheEnabled(ctx.env)) return;
   await bestEffort("index_upsert_linked_resource_failed", { task_id: taskId }, () =>
     ctx.index.upsertLinkedResource(taskId, listId, link),
   );
@@ -83,9 +80,7 @@ export function deleteLink(
   return ctx.writes.run(async () => {
     try {
       await ctx.graph.deleteResource(linkUrl(list_id, task_id, resource_id));
-      if (checklistCacheEnabled(ctx.env)) {
-        await bestEffort("index_delete_linked_resource_failed", { task_id }, () => ctx.index.deleteLinkedResource(task_id, resource_id));
-      }
+      await bestEffort("index_delete_linked_resource_failed", { task_id }, () => ctx.index.deleteLinkedResource(task_id, resource_id));
       return ok({ list_id, task_id, resource_id });
     } catch (e) {
       if (isGraphNotFound(e)) return err("linked_resource_not_found", { list_id, task_id, resource_id });

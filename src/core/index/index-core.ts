@@ -535,38 +535,40 @@ export class IndexCore implements TokenProvider {
   // delete-then-upsert re-key, which dropped the task's steps and My Day fields
   // in between (and would read as a deletion to a change feed). newTaskId is
   // the ID after the move when it differs (plain Graph IDs change on a
-  // re-parent); omit it when the ID is stable. If delta already inserted the
-  // destination row, its Graph columns win and the Substrate-only fields the
-  // destination lacks are carried over from the source.
+  // re-parent); omit it when the ID is stable. If the destination is already
+  // mirrored, the source's row (and sid) replaces it; see below.
   moveTask(taskId: string, toListId: string, newTaskId?: string): void {
     this.#transact(() => {
       const to = newTaskId ?? taskId;
-      const destExists =
-        to !== taskId &&
-        this.#sql.exec("SELECT 1 FROM tasks WHERE task_id = ?", to).toArray().length > 0;
-      if (destExists) {
-        this.#sql.exec(
-          `UPDATE tasks AS d SET
-             committed_day   = COALESCE(d.committed_day,   s.committed_day),
-             committed_order = COALESCE(d.committed_order, s.committed_order),
-             order_datetime  = COALESCE(d.order_datetime,  s.order_datetime),
-             postponed_day   = COALESCE(d.postponed_day,   s.postponed_day)
-           FROM tasks AS s WHERE d.task_id = ? AND s.task_id = ?`,
-          to,
-          taskId,
-        );
-        this.#sql.exec("DELETE FROM tasks WHERE task_id = ?", taskId);
-      } else {
-        // Re-point the task's stable ID first, so the change log keeps the same
-        // sid when the row's Graph ID changes.
-        if (to !== taskId) {
-          this.#sql.exec(
-            "UPDATE entity_map SET graph_id = ? WHERE kind = 'task' AND graph_id = ?",
-            to,
-            taskId,
-          );
+      const dest =
+        to === taskId
+          ? undefined
+          : this.#sql.exec<Record<string, SqlValue>>("SELECT * FROM tasks WHERE task_id = ?", to).toArray()[0];
+      if (dest) {
+        // The destination is already mirrored under a sid of its own (delta, or
+        // a write-through, got there first). The task's sid must follow the
+        // move, so that row goes (clients that saw its sid get a deletion) and
+        // its map row lets go of the Graph ID; its columns are copied onto the
+        // re-keyed row below, keeping the source's Substrate-only fields where
+        // the destination has none.
+        this.#sql.exec("DELETE FROM tasks WHERE task_id = ?", to);
+        for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+          this.#sql.exec(`DELETE FROM ${table} WHERE task_id = ?`, to);
         }
-        this.#sql.exec("UPDATE tasks SET task_id = ?, list_id = ? WHERE task_id = ?", to, toListId, taskId);
+        this.#sql.exec("UPDATE entity_map SET graph_id = NULL WHERE kind = 'task' AND graph_id = ?", to);
+      }
+      // Re-point the task's stable ID first, so the change log keeps the same
+      // sid when the row's Graph ID changes.
+      if (to !== taskId) {
+        this.#sql.exec("UPDATE entity_map SET graph_id = ? WHERE kind = 'task' AND graph_id = ?", to, taskId);
+      }
+      this.#sql.exec("UPDATE tasks SET task_id = ?, list_id = ? WHERE task_id = ?", to, toListId, taskId);
+      if (dest) {
+        const substrateOnly = new Set(["committed_day", "committed_order", "order_datetime", "postponed_day"]);
+        const cols = Object.keys(dest).filter((k) => k !== "task_id" && k !== "list_id" && !(substrateOnly.has(k) && dest[k] == null));
+        if (cols.length) {
+          this.#sql.exec(`UPDATE tasks SET ${cols.map((k) => `${k} = ?`).join(", ")} WHERE task_id = ?`, ...cols.map((k) => dest[k]), to);
+        }
       }
       this.#stampTask(to);
       for (const table of ["checklist_items", "linked_resources", "attachments"]) {
@@ -1677,26 +1679,29 @@ export class IndexCore implements TokenProvider {
     principal: string,
     nowMs: number,
     leaseMs: number,
-  ): { state: "new" } | { state: "done"; result: unknown } | { state: "leased" } {
+  ): { state: "new"; prior_at_ms?: number } | { state: "done"; result: unknown } | { state: "leased" } {
     return this.#transact(() => {
       const row = this.#sql
-        .exec<{ state: string; result_json: string | null; lease_until: number | null }>(
-          "SELECT state, result_json, lease_until FROM applied_mutations WHERE mutation_id = ?",
+        .exec<{ state: string; result_json: string | null; lease_until: number | null; at_ms: number }>(
+          "SELECT state, result_json, lease_until, at_ms FROM applied_mutations WHERE mutation_id = ?",
           id,
         )
         .toArray()[0];
       if (row?.state === "done") return { state: "done" as const, result: JSON.parse(row.result_json ?? "null") };
       if (row && (row.lease_until ?? 0) > nowMs) return { state: "leased" as const };
+      // A pending row whose lease is free is an earlier attempt that may have
+      // written (released as ambiguous, or crashed): keep its first at_ms and
+      // hand it to the caller.
       this.#sql.exec(
         `INSERT INTO applied_mutations (mutation_id, state, principal, lease_until, at_ms) VALUES (?, 'pending', ?, ?, ?)
          ON CONFLICT(mutation_id) DO UPDATE SET state = 'pending', principal = excluded.principal,
-           lease_until = excluded.lease_until, at_ms = excluded.at_ms`,
+           lease_until = excluded.lease_until`,
         id,
         principal,
         nowMs + leaseMs,
         nowMs,
       );
-      return { state: "new" as const };
+      return row ? { state: "new" as const, prior_at_ms: row.at_ms } : { state: "new" as const };
     });
   }
 
@@ -1723,6 +1728,12 @@ export class IndexCore implements TokenProvider {
         );
       }
     });
+  }
+
+  // A mutation whose write may have reached Graph: keep the row, free the
+  // lease, so the retry runs at once and knows to look before writing.
+  mutationRelease(id: string): void {
+    this.#sql.exec("UPDATE applied_mutations SET lease_until = 0 WHERE mutation_id = ? AND state = 'pending'", id);
   }
 
   // A mutation that failed and may be retried: forget it.
@@ -1811,7 +1822,7 @@ export class IndexCore implements TokenProvider {
     server_id: string;
     cursor: string;
     account: { email: string };
-    capabilities: { my_day: boolean; step_order: boolean; push: "none" | "websocket"; source: "graph" };
+    capabilities: { my_day: boolean; step_order: boolean; sub_resources: boolean; push: "none" | "websocket"; source: "graph" };
   }> {
     let serverId = await this.#state.get<string>("sync:server_id");
     if (!serverId) {
@@ -1827,6 +1838,11 @@ export class IndexCore implements TokenProvider {
         my_day: myDay,
         // Step order is read from Substrate by the sub-resource scan.
         step_order: myDay && checklistCacheEnabled(this.#env),
+        // The feed carries every task's steps, links and attachments only when
+        // the sub-resource scan runs (the checklist cache). Without it a task
+        // carries just the ones written through this server, and those can go
+        // stale when edited in another app.
+        sub_resources: checklistCacheEnabled(this.#env),
         push: "websocket",
         source: "graph",
       },

@@ -784,6 +784,7 @@ exports[`move_task > aborts the copy and cleans up the destination when a step c
     "ok": false,
     "task_id": "T1",
     "to_list_id": "L2",
+    "transient": false,
   },
 }
 `;

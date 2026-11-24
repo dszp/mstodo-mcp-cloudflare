@@ -1,7 +1,6 @@
 import { compareOrderDateTimeDesc } from "../graph/substrate-client";
 import { ChecklistItemSchema, type ChecklistItem } from "../graph/types";
-import { createChecklistItem } from "../graph/todo-resources";
-import { checklistCacheEnabled } from "../checklist/gate";
+import { createChecklistItem, listChecklistItems } from "../graph/todo-resources";
 import { bestEffort, isGraphNotFound, type OpsContext } from "./context";
 import { computeOrder, orderValues, type ReorderPosition } from "./position";
 import { err, ok, type ToolResult } from "./result";
@@ -13,10 +12,12 @@ import { err, ok, type ToolResult } from "./result";
 const itemUrl = (listId: string, taskId: string, itemId: string) =>
   `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(listId)}/tasks/${encodeURIComponent(taskId)}/checklistItems/${encodeURIComponent(itemId)}`;
 
-// Checklist cache write-throughs (latency only — the edit also rides delta and
-// is re-fetched). Skipped when the cache is off: no scan would maintain rows.
+// Checklist write-throughs, made with the cache on or off. With it on they're
+// latency only (the edit rides delta and the scan re-fetches). With it off
+// they're the only rows a step gets, and they're how a step written here has
+// a sid the sync API can edit by; nothing re-fetches them, so a step changed
+// elsewhere can go stale (/sync/info reports sub_resources: false).
 async function cacheUpsert(ctx: OpsContext, taskId: string, listId: string, item: ChecklistItem): Promise<void> {
-  if (!checklistCacheEnabled(ctx.env)) return;
   await bestEffort("index_upsert_checklist_item_failed", { task_id: taskId }, () =>
     ctx.index.upsertChecklistItem(taskId, listId, item),
   );
@@ -43,6 +44,21 @@ export function createStep(
       throw e;
     }
   });
+}
+
+// Steps on the task titled `title` and created at or after `since_ms`: what an
+// earlier create attempt that lost its response may have made (section 5.4).
+// A single match is written through, so the caller can adopt it.
+export async function findCreatedSteps(
+  ctx: OpsContext,
+  input: { list_id: string; task_id: string; title: string; since_ms: number },
+): Promise<ChecklistItem[]> {
+  const items = await listChecklistItems(ctx.graph, input.list_id, input.task_id);
+  const found = items.filter(
+    (i) => i.displayName === input.title && !!i.createdDateTime && Date.parse(i.createdDateTime) >= input.since_ms - 5_000,
+  );
+  if (found.length === 1) await cacheUpsert(ctx, input.task_id, input.list_id, found[0]);
+  return found;
 }
 
 export function updateStep(
@@ -76,9 +92,7 @@ export function deleteStep(
       await ctx.graph.deleteResource(itemUrl(list_id, task_id, item_id));
       // has_checklist is left as-is (whether this was the last item is unknown
       // without a re-list); the next delta-driven re-fetch reconciles.
-      if (checklistCacheEnabled(ctx.env)) {
-        await bestEffort("index_delete_checklist_item_failed", { task_id }, () => ctx.index.deleteChecklistItem(task_id, item_id));
-      }
+      await bestEffort("index_delete_checklist_item_failed", { task_id }, () => ctx.index.deleteChecklistItem(task_id, item_id));
       return ok({ list_id, task_id, item_id });
     } catch (e) {
       if (isGraphNotFound(e)) return err("checklist_item_not_found", { list_id, task_id, item_id });

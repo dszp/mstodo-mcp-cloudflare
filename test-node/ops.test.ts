@@ -178,7 +178,7 @@ describe("task ops", () => {
 });
 
 describe("createStep", () => {
-  it("skips the checklist cache when it is off but still flags the task", async () => {
+  it("writes the step through with the cache off too, and flags the task", async () => {
     const h = setup({
       vars: { ENABLE_CHECKLIST_CACHE: "false" },
       routes: [on("POST", `${G}/L1/tasks/T1/checklistItems`, (b) => json({ id: "c1", ...(b as object) }, 201))],
@@ -186,7 +186,8 @@ describe("createStep", () => {
     h.core.upsertTask(task("T1") as never, "L1");
     const r = await createStep(h.ctx(), { list_id: "L1", task_id: "T1", display_name: "step" });
     expect(r).toEqual(ok({ list_id: "L1", task_id: "T1", item: { id: "c1", displayName: "step" } }));
-    expect(h.core.getChecklistItems("T1")).toEqual([]);
+    // The sync API addresses a step by the sid its mirror row gets.
+    expect(h.core.getChecklistItems("T1").map((i) => i.item_id)).toEqual(["c1"]);
     expect(h.core.query({} as never).rows[0]).toMatchObject({ has_checklist: 1 });
   });
 });
