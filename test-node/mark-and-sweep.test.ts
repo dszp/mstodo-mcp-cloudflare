@@ -25,8 +25,12 @@ describe("resync (mark and sweep)", () => {
     c.upsertTask(t("b"), "L1");
     const seqBefore = sql.exec<{ s: number }>("SELECT max(seq) s FROM sync_log").one().s;
 
+    sql.exec("INSERT INTO sync_state (resource, delta_link, last_synced_at) VALUES ('tasks:L1', 'dl', 1)");
+    expect(c.isListSynced("L1")).toBe(true);
     await c.resync("L1");
     expect(sql.exec("SELECT count(*) n FROM tasks").one()).toEqual({ n: 2 });
+    // Still served from the index while the baseline runs.
+    expect(c.isListSynced("L1")).toBe(true);
     // The baseline returns "a" unchanged and a write-through adds "c" meanwhile.
     c.upsertTask(t("a"), "L1");
     c.upsertTask(t("c"), "L1");
@@ -41,6 +45,13 @@ describe("resync (mark and sweep)", () => {
       { task_id: "a" },
       { task_id: "c" },
     ]);
+  });
+
+  it("a list that never finished a baseline isn't served from the index", async () => {
+    const { c } = core();
+    c.upsertList({ id: "L2", displayName: "y" } as never);
+    await c.resync("L2");
+    expect(c.isListSynced("L2")).toBe(false);
   });
 
   it("a full resync keeps the roster, the webhook telemetry and My Day scan state", async () => {

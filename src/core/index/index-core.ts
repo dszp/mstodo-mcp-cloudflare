@@ -1228,8 +1228,19 @@ export class IndexCore implements TokenProvider {
   // deltaLink — i.e. the DO holds the authoritative tail and reads can be served
   // from it. A mid-cycle (next_link set, delta_link still null) baseline is NOT
   // yet authoritative, so callers fall back to live Graph.
+  // Served from the index once a baseline has completed. A list that is being
+  // re-baselined (mark and sweep, section 3.3) keeps serving its rows: it has
+  // completed a baseline before (last_synced_at) and nothing was dropped.
   isListSynced(listId: string): boolean {
-    return !!this.#getSyncState(`tasks:${listId}`)?.delta_link;
+    const resource = `tasks:${listId}`;
+    const st = this.#getSyncState(resource);
+    if (st?.delta_link) return true;
+    if (st?.last_synced_at == null) return false;
+    return (
+      this.#sql
+        .exec<{ g: number | null }>("SELECT sweep_gen g FROM sync_state WHERE resource = ?", resource)
+        .toArray()[0]?.g != null
+    );
   }
 
   // -- query / search -------------------------------------------------------
