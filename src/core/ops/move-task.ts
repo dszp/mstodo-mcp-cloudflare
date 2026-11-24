@@ -1,9 +1,9 @@
 import type { TodoTask } from "../graph/types";
 
-// Pure helpers for the move_task handler. Extracted so the branching logic can
+// Pure helpers for moveTask (./tasks.ts). Extracted so the branching logic can
 // be unit-tested without standing up the full MCP agent (the repo tests pure
 // units + the Substrate/Graph clients; handler orchestration is covered by the
-// live smoke in PLAN-MOVE-TASK.md's verification step). See move_task in register-tools.ts.
+// live smoke in PLAN-MOVE-TASK.md's verification step). See moveTask in ./tasks.ts.
 
 // Build the POST body for the copy/delete fallback's create-in-destination
 // step. Copies only writable scalar fields that are present; excludes

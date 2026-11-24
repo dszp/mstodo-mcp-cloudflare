@@ -483,23 +483,6 @@ exports[`My Day and manual-order write tools > reorder_task computes positions f
     "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T9",
   },
   {
-    "method": "GET",
-    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks",
-  },
-  {
-    "body": {
-      "inputIds": [
-        "T1",
-        "T2",
-        "T3",
-      ],
-      "sourceIdType": "restId",
-      "targetIdType": "restImmutableEntryId",
-    },
-    "method": "POST",
-    "url": "https://graph.microsoft.com/v1.0/me/translateExchangeIds",
-  },
-  {
     "body": {
       "OrderDateTime": "2026-12-01T00:00:00.000Z",
     },
