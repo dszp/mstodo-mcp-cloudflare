@@ -6,7 +6,9 @@ import {
   accessSetting,
   accessTokenFrom,
   checkAccess,
+  handoffRedirectAllowed,
   verifyAccessJwt,
+  KEYS_FETCH_TIMEOUT_MS,
   resetAccessKeyCache,
   KEYS_FRESH_MS,
   KEYS_MAX_STALE_MS,
@@ -24,7 +26,7 @@ export function defineAccessVerifierTests() {
   let k2: TestKey;
   let other: TestKey;
   let published: TestKey[];
-  let certs: { calls: number; fail: boolean };
+  let certs: { calls: number; fail: boolean; lastInit?: RequestInit };
 
   beforeEach(async () => {
     resetAccessKeyCache();
@@ -169,9 +171,28 @@ export function defineAccessVerifierTests() {
       expect(await verify(await token(tooOld), tooOld)).toEqual({ ok: false, reason: "keys_unavailable" });
     });
 
+    it("fetches the keys without following redirects, with a timeout", async () => {
+      await verify(await signJwt(k1, goodClaims(T0)));
+      expect(certs.lastInit?.redirect).toBe("error");
+      expect(certs.lastInit?.signal).toBeInstanceOf(AbortSignal);
+      expect(KEYS_FETCH_TIMEOUT_MS).toBe(5000);
+    });
+
     it("fails closed when the keys can't be fetched at all", async () => {
       certs.fail = true;
       expect(await verify(await signJwt(k1, goodClaims(T0)))).toEqual({ ok: false, reason: "keys_unavailable" });
+    });
+  });
+
+  describe("handoffRedirectAllowed", () => {
+    it("allows only exact entries, and nothing when unset", () => {
+      const env = { ACCESS_HANDOFF_REDIRECT_URIS: " https://app.example/oauth/callback , http://127.0.0.1:9/cb" };
+      expect(handoffRedirectAllowed(env, "https://app.example/oauth/callback")).toBe(true);
+      expect(handoffRedirectAllowed(env, "http://127.0.0.1:9/cb")).toBe(true);
+      expect(handoffRedirectAllowed(env, "https://app.example/oauth/callback/")).toBe(false);
+      expect(handoffRedirectAllowed(env, "https://app.example/oauth")).toBe(false);
+      expect(handoffRedirectAllowed({}, "https://app.example/oauth/callback")).toBe(false);
+      expect(handoffRedirectAllowed({ ACCESS_HANDOFF_REDIRECT_URIS: "" }, "")).toBe(false);
     });
   });
 
@@ -213,6 +234,13 @@ export function defineAccessVerifierTests() {
       expect(
         await checkAccess(new Headers({ "cf-access-token": token }), env(ACCESS_VARS), { cookie: false, path: "/x" }),
       ).toMatchObject({ state: "passed", token });
+    });
+    it("answers 503 access_unavailable, not 403, when the keys can't be fetched", async () => {
+      certs.fail = true;
+      const token = await signJwt(k1, goodClaims());
+      expect(
+        await checkAccess(new Headers({ "cf-access-token": token }), env(ACCESS_VARS), { cookie: false, path: "/x" }),
+      ).toEqual({ state: "refused", status: 503, error: "access_unavailable" });
     });
     it("never logs the token", async () => {
       const spy = vi.spyOn(console, "warn").mockImplementation(() => {});

@@ -85,6 +85,9 @@ export interface AppEnv {
   // off; one alone is refused as a misconfiguration. See core/auth/access.ts.
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
+  // The app redirect URIs (comma-separated, exact) that may receive the Access
+  // token at code redemption. Empty: no hand-over. See hosts/shared/app-signin.ts.
+  ACCESS_HANDOFF_REDIRECT_URIS?: string;
   // Optional: serve /.well-known/apple-app-site-association for the app's
   // https sign-in callback (section 8). Both set turns it on.
   APPLE_TEAM_ID?: string;

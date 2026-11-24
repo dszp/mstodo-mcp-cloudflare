@@ -61,10 +61,11 @@ export function goodClaims(nowMs = Date.now(), over: Record<string, unknown> = {
 // Answers the certs URL with whatever keys() returns at the time; counts calls.
 // `fail` makes it answer 503. Any other URL goes to `fallback` (or 404).
 export function certsEndpoint(keys: () => TestKey[]) {
-  const state = { calls: 0, fail: false };
-  const answer = (url: string): Response | undefined => {
+  const state: { calls: number; fail: boolean; lastInit?: RequestInit } = { calls: 0, fail: false };
+  const answer = (url: string, init?: RequestInit): Response | undefined => {
     if (url !== CERTS_URL) return undefined;
     state.calls++;
+    state.lastInit = init;
     if (state.fail) return new Response("unavailable", { status: 503 });
     return Response.json({ keys: keys().map((k) => k.jwk), public_cert: {}, public_certs: [] });
   };
@@ -74,9 +75,9 @@ export function certsEndpoint(keys: () => TestKey[]) {
 // Stubs global fetch with the certs endpoint alone.
 export function stubCerts(keys: () => TestKey[]) {
   const certs = certsEndpoint(keys);
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : String(input);
-    return certs.answer(url) ?? new Response("unscripted", { status: 404 });
+    return certs.answer(url, init) ?? new Response("unscripted", { status: 404 });
   });
   return certs.state;
 }

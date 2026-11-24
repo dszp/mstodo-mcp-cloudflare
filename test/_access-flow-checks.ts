@@ -6,6 +6,9 @@ import { expect } from "vitest";
 import { resetAccessKeyCache } from "../src/core/auth/access";
 import type { AppEnv } from "../src/core/ports";
 import { ORIGIN, REDIRECT_URI, oauthClient, stubMicrosoft } from "../test-node/_oauth-client";
+
+// Another redirect URI the test client registers, never in the allowlist.
+const OTHER_REDIRECT_URI = "http://localhost:9/other";
 import { OWNER, certsEndpoint, goodClaims, makeKey, signJwt } from "./_access-keys";
 
 type FetchFn = (req: Request) => Promise<Response>;
@@ -26,17 +29,25 @@ async function stubAccess() {
   resetAccessKeyCache();
   const key = await makeKey("k1");
   const certs = certsEndpoint(() => [key]);
-  stubMicrosoft(OWNER, (url) => certs.answer(url));
+  stubMicrosoft(OWNER, (url, init) => certs.answer(url, init));
   return {
+    certs: certs.state,
     good: () => signJwt(key, goodClaims()),
     stranger: () => signJwt(key, goodClaims(Date.now(), { email: "someone-else@example.com" })),
   };
 }
 
-// Access configured (ACCESS_TEAM_DOMAIN + ACCESS_AUD in env).
 // `socket` opens /api/v1/sync/socket with the given headers and reports
 // whether it was let through.
-export async function runAccessOnChecks(env: AppEnv, fetchFn: FetchFn, socket: (h: Headers) => Promise<boolean>) {
+// Access configured (ACCESS_TEAM_DOMAIN + ACCESS_AUD, and
+// ACCESS_HANDOFF_REDIRECT_URIS = REDIRECT_URI). `setVar` changes one variable
+// on the live host env.
+export async function runAccessOnChecks(
+  env: AppEnv,
+  fetchFn: FetchFn,
+  socket: (h: Headers) => Promise<boolean>,
+  setVar: (name: "ACCESS_HANDOFF_REDIRECT_URIS", value: string | undefined) => void,
+) {
   const access = await stubAccess();
   const good = await access.good();
   const client = oauthClient(fetchFn);
@@ -102,7 +113,7 @@ export async function runAccessOnChecks(env: AppEnv, fetchFn: FetchFn, socket: (
   const reg = await client.send("/register", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ redirect_uris: [REDIRECT_URI], token_endpoint_auth_method: "none", client_name: "App" }),
+    body: JSON.stringify({ redirect_uris: [REDIRECT_URI, OTHER_REDIRECT_URI], token_endpoint_auth_method: "none", client_name: "App" }),
   });
   const { client_id: clientId } = (await reg.json()) as { client_id: string };
   const { verifier, challenge } = await pkce();
@@ -119,6 +130,21 @@ export async function runAccessOnChecks(env: AppEnv, fetchFn: FetchFn, socket: (
     });
 
   await status("signin without Access", await client.send(`/app/signin?${params()}`), 403);
+  const withAccess = { headers: { "cf-access-jwt-assertion": good } };
+  // A redirect URI outside ACCESS_HANDOFF_REDIRECT_URIS never gets the token,
+  // even for a client the owner would consent to.
+  await status(
+    "signin to a redirect URI not in the allowlist",
+    await client.send(`/app/signin?${params({ redirect_uri: OTHER_REDIRECT_URI })}`, withAccess),
+    400,
+  );
+  // A parameter given twice could be read differently by /authorize.
+  for (const name of ["resource", "client_id", "redirect_uri", "code_challenge"]) {
+    const q = params();
+    q.append(name, name === "resource" ? `${ORIGIN}/mcp` : "x");
+    await status(`signin with ${name} twice`, await client.send(`/app/signin?${q}`, withAccess), 400);
+  }
+  expect((await env.OAUTH_KV.list({ prefix: "access_handoff:" })).keys).toEqual([]);
   await status(
     "signin for the /mcp resource",
     await client.send(`/app/signin?${params({ resource: `${ORIGIN}/mcp` })}`, { headers: { "cf-access-jwt-assertion": good } }),
@@ -185,6 +211,35 @@ export async function runAccessOnChecks(env: AppEnv, fetchFn: FetchFn, socket: (
   await status("token for the swapped authorization", tok2, 200);
   expect(await tok2.json()).not.toHaveProperty("cf_access_token");
   expect((await env.OAUTH_KV.list({ prefix: "access_handoff:" })).keys).toEqual([]);
+
+  // The allowlist is checked again at the callback: a redirect URI removed
+  // from it after sign-in started gets no token.
+  const third = await pkce();
+  const begun = await client.send(`/app/signin?${params({ code_challenge: third.challenge })}`, withAccess);
+  await status("third signin", begun, 302);
+  setVar("ACCESS_HANDOFF_REDIRECT_URIS", undefined);
+  const code3 = await authorizeAndGetCode(client, new URL(begun.headers.get("location")!));
+  setVar("ACCESS_HANDOFF_REDIRECT_URIS", REDIRECT_URI);
+  const tok3 = await client.send(
+    "/token",
+    client.form({ grant_type: "authorization_code", code: code3, redirect_uri: REDIRECT_URI, client_id: clientId, code_verifier: third.verifier }),
+  );
+  await status("token after the allowlist changed", tok3, 200);
+  expect(await tok3.json()).not.toHaveProperty("cf_access_token");
+  expect((await env.OAUTH_KV.list({ prefix: "access_handoff:" })).keys).toEqual([]);
+
+  // The team's keys can't be fetched: 503 with a retry hint, not access_denied,
+  // so the app retries instead of signing in again.
+  resetAccessKeyCache();
+  access.certs.fail = true;
+  const outage = await status(
+    "keys unavailable",
+    await client.send("/api/v1/sync/changes", { headers: { ...bearer, "cf-access-token": good } }),
+    503,
+  );
+  expect(await outage.json()).toEqual({ error: "access_unavailable" });
+  expect(outage.headers.get("retry-after")).toBe("30");
+  access.certs.fail = false;
 }
 
 // GET /authorize (consent) → approve → Microsoft callback → the client's code.

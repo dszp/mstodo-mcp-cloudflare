@@ -3,7 +3,8 @@
 //
 //   GET /app/signin?<the app's OAuth authorization parameters>
 //     Behind Access. Verifies the Access JWT (signature, audience, issuer,
-//     lifetime, owner email), stores it server-side for ten minutes under a
+//     lifetime, owner email), requires the redirect URI to be listed in
+//     ACCESS_HANDOFF_REDIRECT_URIS, stores it server-side for ten minutes under a
 //     random handle bound to the request's client_id, redirect_uri and PKCE
 //     challenge, sets that handle in a __Host- cookie, and redirects to
 //     /authorize with the same parameters. From there the flow is the one every
@@ -21,7 +22,7 @@
 // The Access token never appears in a redirect URL (section 18.7). Off (Access
 // not configured), /app/signin is not served and no handle is ever attached.
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
-import { checkAccess } from "../../core/auth/access";
+import { checkAccess, handoffRedirectAllowed } from "../../core/auth/access";
 import { seal, unseal } from "../../core/auth/crypto";
 import { log } from "../../core/log";
 import type { AppEnv } from "../../core/ports";
@@ -33,6 +34,7 @@ export const HANDOFF_COOKIE = "__Host-mstodo-access-handoff";
 const HANDOFF_TTL_SEC = 600;
 const KV_PREFIX = "access_handoff:";
 const HANDLE_RE = /^[A-Za-z0-9_-]{43}$/;
+const SINGLE_PARAMS = ["resource", "client_id", "redirect_uri", "code_challenge"];
 
 interface HandoffRecord {
   sealed: string; // the Access JWT, sealed with MS_CLIENT_SECRET's derived key
@@ -64,14 +66,23 @@ export async function handleAppSignin(req: Request, env: AppEnv, origin: string)
   const check = await checkAccess(req.headers, env, { cookie: true, path: APP_SIGNIN_PATH });
   if (check.state === "off") return null;
   if (check.state === "refused") {
-    return check.error === "access_misconfigured"
-      ? errorPage("Sign-in unavailable", "This server's Cloudflare Access settings are incomplete.", 503)
-      : errorPage("Not authorized", "Sign in through Cloudflare Access as this server's owner, then try again.", 403);
+    if (check.error === "access_misconfigured") {
+      return errorPage("Sign-in unavailable", "This server's Cloudflare Access settings are incomplete.", 503);
+    }
+    if (check.error === "access_unavailable") {
+      return errorPage("Sign-in unavailable", "Cloudflare Access can't be checked right now. Try again in a minute.", 503);
+    }
+    return errorPage("Not authorized", "Sign in through Cloudflare Access as this server's owner, then try again.", 403);
   }
   if (req.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
 
   const url = new URL(req.url);
   const q = url.searchParams;
+  // A repeated parameter could be read one way here and another way by
+  // /authorize; refuse it rather than pick one.
+  if (SINGLE_PARAMS.some((p) => q.getAll(p).length > 1)) {
+    return errorPage("Invalid sign-in request", "A sign-in parameter appears more than once.", 400);
+  }
   const clientId = q.get("client_id");
   const redirectUri = q.get("redirect_uri");
   const challenge = q.get("code_challenge");
@@ -90,6 +101,11 @@ export async function handleAppSignin(req: Request, env: AppEnv, origin: string)
       `The app's sign-in request must ask for an authorization code with S256 PKCE for ${origin}${API_PATH}.`,
       400,
     );
+  }
+
+  if (!handoffRedirectAllowed(env, redirectUri)) {
+    log.warn("app_signin_redirect_not_allowed", { client_id: clientId });
+    return errorPage("Invalid sign-in request", "This redirect URI isn't one of the app's sign-in redirect URIs.", 400);
   }
 
   const handle = randomHandle();
@@ -131,7 +147,8 @@ export async function attachAccessHandoff(
   if (
     record.client_id !== authRequest.clientId ||
     record.redirect_uri !== authRequest.redirectUri ||
-    record.code_challenge !== authRequest.codeChallenge
+    record.code_challenge !== authRequest.codeChallenge ||
+    !handoffRedirectAllowed(env, authRequest.redirectUri)
   ) {
     log.warn("access_handoff_mismatch", { client_id: authRequest.clientId });
     await env.OAUTH_KV.delete(kvKey(handle));

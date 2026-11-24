@@ -4,7 +4,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { openDatabase } from "../src/hosts/node/sqlite-db";
 import { buildNodeEnv } from "../src/hosts/node/env";
 import { createHandler } from "../src/hosts/node/http";
-import { ORIGIN } from "./_oauth-client";
+import { ORIGIN, REDIRECT_URI } from "./_oauth-client";
 import { runAccessHalfConfiguredChecks, runAccessOffChecks, runAccessOnChecks } from "../test/_access-flow-checks";
 import { ACCESS_VARS, AUD } from "../test/_access-keys";
 
@@ -25,8 +25,10 @@ function host(vars: Record<string, string>) {
 
 describe("Cloudflare Access (node host)", () => {
   it("gates /api/v1 and the socket, runs /app/signin and hands the token over at redemption", async () => {
-    const h = host(ACCESS_VARS);
-    await runAccessOnChecks(h.env, h.handler.fetch, h.socket);
+    const h = host({ ...ACCESS_VARS, ACCESS_HANDOFF_REDIRECT_URIS: REDIRECT_URI });
+    await runAccessOnChecks(h.env, h.handler.fetch, h.socket, (name, value) => {
+      h.env[name] = value;
+    });
     await h.handler.drain();
   });
   it("changes nothing when not configured", async () => {

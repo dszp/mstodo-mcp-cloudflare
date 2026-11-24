@@ -78,6 +78,7 @@ const MAX_CERTS_BYTES = 64 * 1024;
 export const KEYS_FRESH_MS = 3_600_000;
 export const KEYS_REFETCH_MIN_MS = 60_000;
 export const KEYS_MAX_STALE_MS = 24 * 3_600_000;
+export const KEYS_FETCH_TIMEOUT_MS = 5_000;
 
 interface KeySet {
   keys: Map<string, CryptoKey>;
@@ -96,9 +97,19 @@ export function resetAccessKeyCache(): void {
 }
 
 async function fetchKeys(certsUrl: string): Promise<Map<string, CryptoKey>> {
-  const res = await fetch(certsUrl, { headers: { accept: "application/json" } });
-  if (res.status !== 200) throw new Error(`certs answered ${res.status}`);
-  const text = await res.text();
+  // Bounded and never redirected: the keys come from the team's own host. The
+  // timer is cleared once the body is in, so no timer outlives the fetch.
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(new Error("certs fetch timed out")), KEYS_FETCH_TIMEOUT_MS);
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(certsUrl, { headers: { accept: "application/json" }, redirect: "error", signal: abort.signal });
+    if (res.status !== 200) throw new Error(`certs answered ${res.status}`);
+    text = await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
   if (text.length > MAX_CERTS_BYTES) throw new Error("certs response too large");
   const body = JSON.parse(text) as { keys?: unknown };
   if (!Array.isArray(body.keys)) throw new Error("certs response has no keys");
@@ -258,7 +269,11 @@ export function accessTokenFrom(headers: Headers, opts: { cookie: boolean }): st
 export type AccessCheck =
   | { state: "off" }
   | { state: "passed"; token: string; exp: number }
-  | { state: "refused"; status: 403 | 503; error: "access_denied" | "access_misconfigured" };
+  | {
+      state: "refused";
+      status: 403 | 503;
+      error: "access_denied" | "access_misconfigured" | "access_unavailable";
+    };
 
 // The whole check for one request. "off" when Access isn't configured: the
 // caller then behaves exactly as without this module.
@@ -276,6 +291,9 @@ export async function checkAccess(
   const verdict = await verifyAccessJwt(accessTokenFrom(headers, opts), setting.config, env.OWNER_EMAIL);
   if (!verdict.ok) {
     log.warn("access_refused", { reason: verdict.reason, path: opts.path });
+    // The team's keys couldn't be fetched: the token may be fine, so the
+    // client retries instead of signing in again.
+    if (verdict.reason === "keys_unavailable") return { state: "refused", status: 503, error: "access_unavailable" };
     return { state: "refused", status: 403, error: "access_denied" };
   }
   return { state: "passed", token: verdict.token, exp: verdict.exp };
@@ -283,5 +301,16 @@ export async function checkAccess(
 
 // The API's answer to a refused check: JSON, never cached.
 export function accessRefusalResponse(check: Extract<AccessCheck, { state: "refused" }>): Response {
-  return json({ error: check.error }, check.status);
+  return json({ error: check.error }, check.status, check.error === "access_unavailable" ? { "retry-after": "30" } : {});
+}
+
+// Whether the Access token may be handed to `redirectUri`: only an exact
+// entry of ACCESS_HANDOFF_REDIRECT_URIS. Consent to some other client must not
+// yield the owner's Access token, or Access stops being an independent gate.
+export function handoffRedirectAllowed(env: Pick<AppEnv, "ACCESS_HANDOFF_REDIRECT_URIS">, redirectUri: string): boolean {
+  return (env.ACCESS_HANDOFF_REDIRECT_URIS ?? "")
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean)
+    .includes(redirectUri);
 }
