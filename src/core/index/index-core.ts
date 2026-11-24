@@ -755,6 +755,35 @@ export class IndexCore implements TokenProvider {
     );
   }
 
+  // Write-throughs for the link ops, the linked-resource twins of the two
+  // above: without them a link the sync API just created has a sid but no row,
+  // so resolveSids reports it not live until the next sub-resource scan, and an
+  // edit sent right after the create is refused as deleted.
+  upsertLinkedResource(taskId: string, listId: string, link: LinkedResource): void {
+    this.#sql.exec(
+      `INSERT INTO linked_resources (link_id, task_id, list_id, web_url, display_name, application_name, external_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(link_id) DO UPDATE SET web_url=excluded.web_url, display_name=excluded.display_name,
+         application_name=excluded.application_name, external_id=excluded.external_id`,
+      link.id, taskId, listId, link.webUrl ?? null, link.displayName ?? null, link.applicationName ?? null, link.externalId ?? null,
+    );
+  }
+
+  deleteLinkedResource(taskId: string, linkId: string): void {
+    this.#sql.exec("DELETE FROM linked_resources WHERE link_id = ? AND task_id = ?", linkId, taskId);
+  }
+
+  // The task and list a mirrored step or link belongs to: the sync API names
+  // a step or link by its own sid, while Graph addresses it under its task.
+  findParentOf(kind: "step" | "link", graphId: string): { task_id: string; list_id: string } | null {
+    const [table, key] = kind === "step" ? ["checklist_items", "item_id"] : ["linked_resources", "link_id"];
+    return (
+      this.#sql
+        .exec<{ task_id: string; list_id: string }>(`SELECT task_id, list_id FROM ${table} WHERE ${key} = ?`, graphId)
+        .toArray()[0] ?? null
+    );
+  }
+
   // A task's cached checklist rows, open items first then by creation order — the
   // "what am I waiting on" reading. Powers cross-task checklist enrichment.
   getChecklistItems(taskId: string): ChecklistItemRow[] {

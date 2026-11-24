@@ -78,11 +78,13 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   clearMyDayFields(...a: Parameters<IndexCore["clearMyDayFields"]>) { return this.#core.clearMyDayFields(...a); }
   clearReauth(...a: Parameters<IndexCore["clearReauth"]>) { return this.#core.clearReauth(...a); }
   deleteChecklistItem(...a: Parameters<IndexCore["deleteChecklistItem"]>) { return this.#core.deleteChecklistItem(...a); }
+  deleteLinkedResource(...a: Parameters<IndexCore["deleteLinkedResource"]>) { return this.#core.deleteLinkedResource(...a); }
   deleteList(...a: Parameters<IndexCore["deleteList"]>) { return this.#core.deleteList(...a); }
   deleteSubscriptionRecord(...a: Parameters<IndexCore["deleteSubscriptionRecord"]>) { return this.#core.deleteSubscriptionRecord(...a); }
   deleteTask(...a: Parameters<IndexCore["deleteTask"]>) { return this.#core.deleteTask(...a); }
   ensureSyncing(...a: Parameters<IndexCore["ensureSyncing"]>) { return this.#core.ensureSyncing(...a); }
   findListForTask(...a: Parameters<IndexCore["findListForTask"]>) { return this.#core.findListForTask(...a); }
+  findParentOf(...a: Parameters<IndexCore["findParentOf"]>) { return this.#core.findParentOf(...a); }
   findSubscription(...a: Parameters<IndexCore["findSubscription"]>) { return this.#core.findSubscription(...a); }
   forceRefresh(...a: Parameters<IndexCore["forceRefresh"]>) { return this.#core.forceRefresh(...a); }
   forceSubstrateRefresh(...a: Parameters<IndexCore["forceSubstrateRefresh"]>) { return this.#core.forceSubstrateRefresh(...a); }
@@ -124,6 +126,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   renewSubscriptions(...a: Parameters<IndexCore["renewSubscriptions"]>) { return this.#core.renewSubscriptions(...a); }
   replaceAttachments(...a: Parameters<IndexCore["replaceAttachments"]>) { return this.#core.replaceAttachments(...a); }
   replaceLinkedResources(...a: Parameters<IndexCore["replaceLinkedResources"]>) { return this.#core.replaceLinkedResources(...a); }
+  upsertLinkedResource(...a: Parameters<IndexCore["upsertLinkedResource"]>) { return this.#core.upsertLinkedResource(...a); }
   replaceChecklistItems(...a: Parameters<IndexCore["replaceChecklistItems"]>) { return this.#core.replaceChecklistItems(...a); }
   releaseWriteLease(...a: Parameters<IndexCore["releaseWriteLease"]>) { return this.#core.releaseWriteLease(...a); }
   reportClaimsChallenge(...a: Parameters<IndexCore["reportClaimsChallenge"]>) { return this.#core.reportClaimsChallenge(...a); }
