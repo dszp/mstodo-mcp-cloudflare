@@ -2645,6 +2645,18 @@ export class IndexCore implements TokenProvider {
     const checklist = checklistCacheEnabled(this.#env);
     for (const row of rows) {
       if (row.kind === "removed") {
+        // A list's delta reports a task that left it — deleted, or moved to
+        // another list. Task IDs are immutable, so a moved task's row already
+        // sits under its new list (the move's write-through, or the other
+        // list's delta earlier in the cycle); deleting by ID alone would drop
+        // it from the mirror until it next changed. Only remove it from here.
+        const owner = this.#sql
+          .exec<{ list_id: string }>("SELECT list_id FROM tasks WHERE task_id = ?", row.id)
+          .toArray()[0];
+        if (owner && owner.list_id !== listId) {
+          log.info("delta_removed_moved_task_kept", { list_id: listId, now_in: owner.list_id });
+          continue;
+        }
         this.deleteTask(row.id); // cascades checklist_items
       } else {
         const modifiedAt = () =>
