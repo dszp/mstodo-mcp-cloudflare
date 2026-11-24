@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { AppEnv, IndexBackend } from "../../core/ports";
-import { IndexCore } from "../../core/index/index-core";
+import { IndexCore, announcing } from "../../core/index/index-core";
+import { SocketHub } from "./ws-push";
 import { sqlDb, transactor } from "./sqlite-db";
 import { sqliteKv, type OAuthKvStore } from "./sqlite-kv";
 import { stateStore } from "./state-store";
@@ -92,8 +93,11 @@ export function buildNodeEnv(db: DatabaseSync, vars: Record<string, string | und
     OAUTH_KV: sqliteKv(db, "OAUTH_KV"),
     ownerIndex: () => backend,
   };
-  const core = new IndexCore({ sql: sqlDb(db), transact: transactor(db), state, alarms: state, env });
+  // Push sockets (docs/SYNC-API.md section 7.3). The core is wrapped so every
+  // call — RPC-style from core, and the scheduler's alarm — announces changes.
+  const push = new SocketHub();
+  const core = announcing(new IndexCore({ sql: sqlDb(db), transact: transactor(db), state, alarms: state, env, notifier: push }));
   backend = indexBackend(core);
   core.bootstrap();
-  return { env, core, state };
+  return { env, core, state, push };
 }
