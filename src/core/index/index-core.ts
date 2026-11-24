@@ -248,7 +248,16 @@ export class IndexCore implements TokenProvider {
     this.#sql.exec(SCHEMA_DDL);
     // Versioned migrations: ALTER existing/new DBs up to the latest schema.
     // Idempotent across boots (gated by the stored schema_meta version).
-    applyMigrations(this.#sql);
+    const { from, applied } = applyMigrations(this.#sql);
+    // A migration that cleared sync state (v4) must start the next cycle
+    // itself; otherwise the re-baseline waits for whatever alarm was set before
+    // the deploy (up to DELTA_SYNC_INTERVAL_MIN). Seen in production 2026-11-24.
+    // A fresh database (from 0) has nothing to rebuild; ensureSyncing starts it.
+    if (from > 0 && applied.includes(4)) {
+      void this.#alarms.setAlarm(Date.now() + 1000).catch((e) =>
+        log.warn("migration_alarm_failed", { error: String(e) }),
+      );
+    }
   }
 
   // -- MCP grant epoch + re-auth state --------------------------------------
@@ -508,6 +517,15 @@ export class IndexCore implements TokenProvider {
         );
         this.#sql.exec("DELETE FROM tasks WHERE task_id = ?", taskId);
       } else {
+        // Re-point the task's stable ID first, so the change log keeps the same
+        // sid when the row's Graph ID changes.
+        if (to !== taskId) {
+          this.#sql.exec(
+            "UPDATE entity_map SET graph_id = ? WHERE kind = 'task' AND graph_id = ?",
+            to,
+            taskId,
+          );
+        }
         this.#sql.exec("UPDATE tasks SET task_id = ?, list_id = ? WHERE task_id = ?", to, toListId, taskId);
       }
       this.#sql.exec(
@@ -1806,6 +1824,12 @@ export class IndexCore implements TokenProvider {
     this.#sql.exec("DELETE FROM lists");
     this.#sql.exec("DELETE FROM sync_state");
     this.#sql.exec("DELETE FROM subscriptions");
+    // A different owner: no client may continue from a cursor into the old
+    // owner's data. Drop the change log and stable IDs (the deletes above
+    // logged tombstones) and replace the epoch.
+    this.#sql.exec("DELETE FROM sync_log");
+    this.#sql.exec("DELETE FROM entity_map");
+    this.#sql.exec("UPDATE sync_meta SET epoch = lower(hex(randomblob(8))) WHERE id = 1");
     await this.#alarms.deleteAlarm();
   }
 

@@ -6,4 +6,7 @@ export interface Props extends Record<string, unknown> {
   user: string;
   epoch: string;
   authorized_at: number; // epoch ms
+  // Who signed in, as issuer + subject (docs/SYNC-API.md section 15.2). Set on
+  // grants issued from this version on; older grants lack it.
+  principal?: { iss: string; sub: string };
 }
