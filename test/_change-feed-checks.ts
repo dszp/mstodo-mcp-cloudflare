@@ -58,6 +58,13 @@ export async function runChangeFeedChecks(c: IndexCore) {
   const t1d = t1 && !t1.deleted && t1.kind === "task" ? t1.data : null;
 
   const paged = walk(c, null, "all", 1);
+  const pagedCursors: string[] = [];
+  for (let cur: string | null = null, i = 0; i < 10; i++) {
+    const p = page(c, { cursor: cur, scope: "all", limit: 1 });
+    pagedCursors.push(p.cursor);
+    cur = p.cursor;
+    if (!p.has_more) break;
+  }
   const active = walk(c, null, "active");
 
   // Incremental: one edit and one delete after the full sync's cursor.
@@ -73,6 +80,15 @@ export async function runChangeFeedChecks(c: IndexCore) {
   const garbage = c.syncChanges({ cursor: "not-a-cursor" });
   const badScope = c.syncChanges({ scope: "everything" });
 
+  // A phone holds T4 open, goes offline, and T4 is completed long ago (a
+  // backdated completion, or the phone was away more than 30 days). The
+  // incremental pull must tell it to drop T4, not skip it.
+  c.upsertTask(task("T4", "open on the phone"), "L1");
+  const phone = walk(c, null, "active");
+  c.upsertTask(task("T4", "open on the phone", { ...completedAt(now - 45 * DAY), lastModifiedDateTime: "2026-11-24T12:00:00Z" }), "L1");
+  const back = walk(c, phone.cursor, "active");
+  const t4sid = c.syncTaskSids(["T4"]).T4;
+
   const t2sid = c.syncTaskSids(["T2"]).T2;
   const one = t2sid ? c.syncTask(t2sid) : null;
   const info1 = await c.syncInfo();
@@ -82,10 +98,9 @@ export async function runChangeFeedChecks(c: IndexCore) {
     "full sync sends two lists and three live tasks, no deletion records":
       JSON.stringify(ids(full.all)) === JSON.stringify(["list:+", "list:+", "task:+", "task:+", "task:+"]),
     "full sync ends caught up with an epoch.seq cursor": /^[0-9a-f]+\.\d+$/.test(full.cursor),
-    // Pages after the first carry a cursor, so they may include deletion
-    // records for entities the client never had; it ignores those.
-    "paging one at a time returns the same live entities":
-      JSON.stringify(ids(paged.all.filter((x) => !x.deleted))) === JSON.stringify(ids(full.all)) && paged.pages >= 5,
+    "paging one at a time returns the same entities, no deletion records":
+      JSON.stringify(ids(paged.all)) === JSON.stringify(ids(full.all)) && paged.pages === 5,
+    "a full sync's intermediate cursors are marked as a walk": pagedCursors.slice(0, -1).every((x) => x.endsWith(".f")) && !pagedCursors[pagedCursors.length - 1].endsWith(".f"),
     "task references its list by sid": !!t1d && !!l1 && t1d.list_id === l1.id,
     "due goes out as a bare date": t1d?.due === "2026-11-25",
     "reminder is an instant": t1d?.reminder.on === true && t1d.reminder.at === "2026-11-25T14:00:00.000Z",
@@ -106,6 +121,8 @@ export async function runChangeFeedChecks(c: IndexCore) {
     "a cursor ahead of the log is a cursor reset": !ahead.ok && ahead.error === "cursor_reset",
     "a malformed cursor is refused": !garbage.ok && garbage.error === "bad_cursor",
     "an unknown scope is refused": !badScope.ok && badScope.error === "bad_scope",
+    "an incremental pull drops a task that left the device's scope":
+      back.all.length === 1 && back.all[0].deleted === true && back.all[0].id === t4sid,
     "a task is readable by sid": one?.data.title === "done recently, renamed" && one.id === t2sid,
     "server_id is created once": /^[0-9a-f-]{36}$/.test(info1.server_id) && info1.server_id === info2.server_id,
   };
