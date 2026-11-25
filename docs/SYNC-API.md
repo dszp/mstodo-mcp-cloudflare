@@ -1552,7 +1552,6 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 - 2026-11-25: section 7.1: `changed` messages are coalesced: one at once, then at most
   one per 3 seconds while changes keep coming. Measured on the Servant Voice server, a
   `task.create` went from three messages to two.
-
 - 2026-11-25: section 5.2: `step.reorder` gives a task's unordered steps order values in
   their shown order before the move, instead of failing with `reference_has_no_order`.
 - 2026-11-25: section 4.7 added: `GET /api/v1/link-rules` and `link_rules_rev` in
