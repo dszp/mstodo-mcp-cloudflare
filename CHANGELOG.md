@@ -35,6 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The server reads the sidebar (two Substrate GETs) on a calm cycle once per
   `DELTA_SYNC_INTERVAL_MIN`, and when a new list appears. Needs `ENABLE_MY_DAY`; without
   it the fields stay `null`. Migration v12 adds the columns and the `list_groups` table.
+- **Cloudflare Access for the sync app** (docs/SYNC-API.md section 8.1), off unless
+  `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are both set. When on, every `/api/v1` request,
+  including the anonymous `sync/info` probe and the WebSocket upgrade on both hosts, needs
+  an Access JWT that the server verifies itself: RS256 signature against the team's keys
+  (cached, refetched on an unknown key at most once a minute), audience, issuer, expiry,
+  and `email` equal to `OWNER_EMAIL`. One variable without the other answers `503`.
+  `/mcp`, the OAuth endpoints, `/webhook`, `/upload` and `/download` are unchanged.
+- `GET /app/signin` (with Access on): verifies Access, then continues into the usual
+  `/authorize` flow (consent, Microsoft sign-in, owner gate). The `authorization_code`
+  token response then carries `cf_access_token` and `cf_access_expires_at`, so the app can
+  send `cf-access-token`; the token never travels in a redirect URL. Only redirect URIs
+  listed in `ACCESS_HANDOFF_REDIRECT_URIS` receive it. When Access's keys can't be fetched,
+  `/api/v1` answers `503 access_unavailable` with `Retry-After`, not `403`.
+- `/.well-known/apple-app-site-association` (`webcredentials`) when `APPLE_TEAM_ID` and
+  `APPLE_BUNDLE_IDS` are set, for the app's `https` sign-in callback.
 - Sync API: lists in the change feed carry `sync` (`todo` | `reference`); `list.update` accepts
   `sync`; `GET /api/v1/lists/excluded` lists the excluded lists by sid. Task, My Day, step and
   link mutations that touch an excluded list are rejected with `list_excluded`.

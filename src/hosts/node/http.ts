@@ -7,6 +7,7 @@ import { handleUpload, json } from "../../core/upload/handler";
 import { handleDownload } from "../../core/upload/download-handler";
 import { handleWebhook } from "../../core/subscriptions/webhook-handler";
 import { VERSION } from "../../core/version";
+import { handleAppleAssociation } from "../../core/auth/apple-association";
 import { log } from "../../core/log";
 import { oauthFront, type McpHandler } from "../shared/oauth";
 import { parsePublicOrigin, type NodeEnv } from "./env";
@@ -89,7 +90,7 @@ export function toPublicOrigin(req: Request, origin: string): Request {
 }
 
 // Same routing order as the Worker (src/hosts/cloudflare/worker.ts): /health,
-// the three public capability/webhook endpoints, then the OAuth front, which
+// the Apple association file, the three public capability/webhook endpoints, then the OAuth front, which
 // owns /authorize, /token, /register, /.well-known/*, /mcp and /api/v1.
 // publicOrigin is required (SERVICE_BASE_URL in main.ts): throws
 // MissingConfigError / InvalidConfigError unless it is https or loopback http.
@@ -136,6 +137,7 @@ export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
     const ctx = { waitUntil: background.waitUntil, passThroughOnException() {} } as unknown as ExecutionContext;
 
     const early =
+      handleAppleAssociation(req, env) ??
       (await handleUpload(req, env)) ?? (await handleDownload(req, env)) ?? (await handleWebhook(req, env, ctx));
     if (early) return early;
 
@@ -146,9 +148,9 @@ export function createHandler(env: NodeEnv, options: { publicOrigin: string }) {
   }
 
   // Push-socket upgrades bypass fetch (ws-push.ts); this is their token check.
-  const authorizeSocket = (authorization: string | undefined) =>
+  const authorizeSocket = (headers: Headers) =>
     oauthFront<NodeEnv>({ origin: options.publicOrigin, mcpHandler: nodeMcpHandler, toAppEnv: (e) => e }).authorizeSocket(
-      authorization,
+      headers,
       env,
     );
 

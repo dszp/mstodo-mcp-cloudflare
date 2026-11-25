@@ -26,6 +26,7 @@ import {
   TokenExchangeError,
 } from "../../core/auth/microsoft";
 import type { AppEnv } from "../../core/ports";
+import { attachAccessHandoff, HANDOFF_PROP } from "./app-signin";
 
 // OAUTH_PROVIDER is the authorization server's helper API, which the OAuth
 // front (oauth.ts) adds to the host env for this route; core ports do not
@@ -295,6 +296,10 @@ async function handleCallback(req: Request, env: HandlerEnv, url: URL): Promise<
   const { epoch } = await index.authState();
   log.info("owner_authenticated", { id: me.id, identity_changed: identityChanged });
 
+  // Started at /app/signin behind Cloudflare Access: carry the handle of the
+  // stored Access token to code redemption (app-signin.ts). Null otherwise.
+  const accessHandoff = await attachAccessHandoff(req, env, authRequest, headers);
+
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
     request: authRequest,
     userId: "owner",
@@ -306,6 +311,7 @@ async function handleCallback(req: Request, env: HandlerEnv, url: URL): Promise<
       authorized_at: now,
       // Issuer + subject (section 15.2): the subject is the Graph object ID.
       principal: { iss: `https://login.microsoftonline.com/${tid ?? "unknown"}/v2.0`, sub: me.id },
+      ...(accessHandoff ? { [HANDOFF_PROP]: accessHandoff } : {}),
     },
   });
   headers.set("location", redirectTo);

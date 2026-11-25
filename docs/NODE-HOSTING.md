@@ -66,7 +66,9 @@ These variables are optional:
 | `HOST` | `127.0.0.1` | The address the server binds. The container image sets `0.0.0.0` so the published port reaches it; Compose still publishes the port on `127.0.0.1` only. |
 
 The Worker's feature and tuning variables, such as `ENABLE_MY_DAY`, `ENABLE_CHECKLIST_CACHE`,
-`ENABLE_TASK_SUBSCRIPTIONS`, and `DELTA_SYNC_INTERVAL_MIN`, work the same way on Node. The
+`ENABLE_TASK_SUBSCRIPTIONS`, and `DELTA_SYNC_INTERVAL_MIN`, work the same way on Node. So do
+`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` and `ACCESS_HANDOFF_REDIRECT_URIS`, for Cloudflare Access in front of the sync API through
+Cloudflare Tunnel, and `APPLE_TEAM_ID` and `APPLE_BUNDLE_IDS`. The
 [deployment guide](../DEPLOYMENT.md) describes each one.
 
 The database holds sealed Microsoft tokens, the MCP client grants, and the task cache in plain

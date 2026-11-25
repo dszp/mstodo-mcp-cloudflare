@@ -1,7 +1,7 @@
 // Push sockets on the Node host (docs/SYNC-API.md section 7.3). One process
 // serves every client (single-instance.ts enforces it), so the hub is an
 // in-memory set; no cross-process fan-out.
-import type { IncomingMessage, Server } from "node:http";
+import type { IncomingHttpHeaders, IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ChangeNotifier } from "../../core/ports";
@@ -114,4 +114,15 @@ export class SocketHub implements ChangeNotifier {
 
 function refuse(socket: Duplex, status: number, text: string): void {
   socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+}
+
+// An upgrade request's headers as a fetch Headers, for the shared token and
+// Cloudflare Access checks.
+export function upgradeHeaders(raw: IncomingHttpHeaders): Headers {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value === "string") headers.set(name, value);
+    else if (Array.isArray(value)) for (const v of value) headers.append(name, v);
+  }
+  return headers;
 }
