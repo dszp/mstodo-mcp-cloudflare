@@ -660,11 +660,22 @@ Content-Type: application/json
 | `task.delete` | — | Graph `DELETE` |
 | `task.move` | `list_id`, optional `position` | Substrate re-parent, with `move_task`'s fallback |
 | `task.reorder` | `position` | Substrate `OrderDateTime`, via `reorder.ts` |
-| `myday.add` / `myday.remove` | optional `position` | Substrate `CommittedDay` / `CommittedOrder` |
+| `myday.add` | optional `position` | Substrate `CommittedDay`, then `CommittedOrder` when `position` isn't `top` |
+| `myday.remove` | — | Substrate `CommittedDay` |
 | `myday.reorder` | `position` | Substrate `CommittedOrder`, via `my-day-order.ts` |
-| `step.create` / `step.update` / `step.delete` | `task_id`, `title`, `checked` | Graph `checklistItems` |
+| `step.create` | `task_id`, `title`, `checked` | Graph `POST checklistItems` |
+| `step.update` | any subset of: `title`, `checked` | Graph `PATCH` with only those fields |
+| `step.delete` | — | Graph `DELETE` |
 | `step.reorder` | `position` | Substrate `patchSubtask` |
-| `link.create` / `link.update` / `link.delete` | `task_id`, `url`, `title` | Graph `linkedResources` |
+| `link.create` | `task_id`, `url`, `title` | Graph `POST linkedResources` |
+| `link.update` | any subset of: `url`, `title` | Graph `PATCH` with only those fields |
+| `link.delete` | — | Graph `DELETE` |
+
+`position` is a property of the mutation itself, beside `fields`; every other name in the
+Fields column goes in `fields`. A field that isn't listed for the op, including a parent
+reference (`list_id`, `task_id`) on anything but a create or `task.move`, makes the whole
+mutation `rejected` with `unknown_fields:<names>`. The server finds the parent of an
+existing step or link from its `sid`.
 
 `position` is `{ "before": sid }`, `{ "after": sid }`, `{ "top": true }` or
 `{ "bottom": true }`. The server converts it to an order value with the existing
@@ -1174,12 +1185,14 @@ are ISO 8601 instants but not all in one form: some carry milliseconds
 (`2026-11-23T23:45:45.623Z`) and some don't (`2026-11-23T23:45:47Z`). Parse them as
 instants before comparing; comparing the strings puts some in the wrong order.
 
-What isn't known yet:
+**Sidebar order.** A later `sort_key` is nearer the top, the same direction as tasks.
+Groups and top-level lists share one ordering, and lists inside a group are ordered the
+same way within it. The default list (`sort_key` `null`) isn't part of this order: To Do
+shows it at the top with the smart lists. Confirmed on 2026-11-24 against the To Do web
+sidebar of a test account: a group keyed `…45:49.248Z` sat above a group keyed
+`…45:45.623Z`, which sat above a list keyed 2026-05-19.
 
-- The full set of theme names.
-- Whether a higher or lower `sort_key` is nearer the top. For tasks, a later
-  `OrderDateTime` is nearer the top. Groups and lists appear to share one ordering
-  across the sidebar; a reorder test on a live account confirms both.
+The full set of theme names isn't known yet.
 
 Collapsed or expanded state isn't stored by Microsoft. The app keeps it locally.
 
@@ -1529,6 +1542,12 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 - 2026-11-25: section 4.7 added: `GET /api/v1/link-rules` and `link_rules_rev` in
   `/sync/info`, so the app can mark link-rule matches before the server makes the link.
+- 2026-11-25: section 5.2's table split into one row per op, with the fields the server
+  accepts. The shared rows had implied that `step.update`, `step.delete`, `link.update`
+  and `link.delete` take `task_id`; the server rejects it. `myday.remove` ignores
+  `position`.
+- 2026-11-25: section 10.4's open question on sidebar order closed: a later
+  `sort_key` is nearer the top, groups and lists sharing one ordering.
 - 2026-11-24: section 10.4 built read-only. Lists in the feed carry `group_id`,
   `sort_key` and `theme`; a new `list_group` kind; `capabilities.list_appearance`.
 - 2026-11-24: section 8.1 rewritten for what is built: the server-side Access check on
