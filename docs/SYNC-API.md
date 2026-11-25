@@ -584,11 +584,22 @@ Content-Type: application/json
 | `task.delete` | — | Graph `DELETE` |
 | `task.move` | `list_id`, optional `position` | Substrate re-parent, with `move_task`'s fallback |
 | `task.reorder` | `position` | Substrate `OrderDateTime`, via `reorder.ts` |
-| `myday.add` / `myday.remove` | optional `position` | Substrate `CommittedDay` / `CommittedOrder` |
+| `myday.add` | optional `position` | Substrate `CommittedDay`, then `CommittedOrder` when `position` isn't `top` |
+| `myday.remove` | — | Substrate `CommittedDay` |
 | `myday.reorder` | `position` | Substrate `CommittedOrder`, via `my-day-order.ts` |
-| `step.create` / `step.update` / `step.delete` | `task_id`, `title`, `checked` | Graph `checklistItems` |
+| `step.create` | `task_id`, `title`, `checked` | Graph `POST checklistItems` |
+| `step.update` | any subset of: `title`, `checked` | Graph `PATCH` with only those fields |
+| `step.delete` | — | Graph `DELETE` |
 | `step.reorder` | `position` | Substrate `patchSubtask` |
-| `link.create` / `link.update` / `link.delete` | `task_id`, `url`, `title` | Graph `linkedResources` |
+| `link.create` | `task_id`, `url`, `title` | Graph `POST linkedResources` |
+| `link.update` | any subset of: `url`, `title` | Graph `PATCH` with only those fields |
+| `link.delete` | — | Graph `DELETE` |
+
+`position` is a property of the mutation itself, beside `fields`; every other name in the
+Fields column goes in `fields`. A field that isn't listed for the op, including a parent
+reference (`list_id`, `task_id`) on anything but a create or `task.move`, makes the whole
+mutation `rejected` with `unknown_fields:<names>`. The server finds the parent of an
+existing step or link from its `sid`.
 
 `position` is `{ "before": sid }`, `{ "after": sid }`, `{ "top": true }` or
 `{ "bottom": true }`. The server converts it to an order value with the existing
@@ -1452,6 +1463,10 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-25: section 5.2's table split into one row per op, with the fields the server
+  accepts. The shared rows had implied that `step.update`, `step.delete`, `link.update`
+  and `link.delete` take `task_id`; the server rejects it. `myday.remove` ignores
+  `position`.
 - 2026-11-25: section 10.4's open question on sidebar order closed: a later
   `sort_key` is nearer the top, groups and lists sharing one ordering.
 - 2026-11-24: section 10.4 built read-only. Lists in the feed carry `group_id`,
