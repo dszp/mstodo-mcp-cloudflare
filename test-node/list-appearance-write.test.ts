@@ -83,10 +83,10 @@ afterEach(() => vi.restoreAllMocks());
 describe("list.update theme", () => {
   it("writes the color alone and stores what Substrate returns", async () => {
     const h = harness();
-    expect(await h.exec(update("La", { theme: { color: "purple" } }))).toEqual({ ok: true, graphId: "La" });
+    expect(await h.exec(update("La", { theme: { color: "dark_purple" } }))).toEqual({ ok: true, graphId: "La" });
     // No ThemeBackground in the body: Substrate keeps the list's background.
-    expect(h.patches).toEqual([{ id: "La", body: { ThemeColor: "purple" } }]);
-    expect(h.stored).toEqual([{ Id: "La", ThemeColor: "purple" }]);
+    expect(h.patches).toEqual([{ id: "La", body: { ThemeColor: "dark_purple" } }]);
+    expect(h.stored).toEqual([{ Id: "La", ThemeColor: "dark_purple" }]);
   });
 
   it.each([
@@ -96,6 +96,7 @@ describe("list.update theme", () => {
     ["no keys", {}],
     ["text that isn't a name", { color: "red; drop" }],
     ["a color To Do hasn't been seen to use", { color: "chartreuse" }],
+    ["a plain color name To Do hasn't been seen to use", { color: "red" }],
     ["a background (not writable yet)", { background: "mountain" }],
     ["a color with a background", { color: "blue", background: "beach" }],
     ["a string instead of an object", "red"],

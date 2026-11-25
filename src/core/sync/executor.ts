@@ -447,13 +447,22 @@ async function listOfTask(ctx: OpsContext, taskId: string): Promise<string | nul
 
 // ---- field translation -----------------------------------------------------
 
-// A list theme. Only the color is writable, and only a name seen on a real
-// list in To Do: Substrate stores any string, and a name To Do doesn't know
-// fails silently at best (a client may also crash on it; suspected
-// 2026-11-25 on iOS with a guessed background). The background isn't
-// writable until its names are known. There is no "no theme": Substrate
-// ignores null and stores "" as given, so neither is accepted.
-export const THEME_COLORS: ReadonlySet<string> = new Set(["blue", "purple"]);
+// A list theme. Only the color is writable, and only a name To Do itself
+// wrote: Substrate stores any string, and a name To Do doesn't know fails
+// silently at best (a client may also crash on it; suspected 2026-11-25 on
+// iOS with a list themed purple/beach; "beach" was a guess). The 14 are iOS
+// To Do's swatches in its picker order, read back from Substrate on
+// 2026-11-25. "blue" is the value every new list gets, and "purple" renders
+// in To Do web. The background isn't writable until its names are
+// known. There is no "no theme": Substrate ignores null and stores "" as
+// given, so neither is accepted.
+export const THEME_COLORS: ReadonlySet<string> = new Set([
+  "blue",
+  "purple",
+  ...["dark", "light"].flatMap((shade) =>
+    ["blue", "purple", "rose", "red", "green", "teal", "grey"].map((c) => `${shade}_${c}`),
+  ),
+]);
 function listTheme(v: unknown): { color: string } {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return invalid("theme");
   const keys = Object.keys(v);
