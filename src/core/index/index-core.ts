@@ -120,6 +120,10 @@ export function selectDueScanLists(
 
 // Precomputed UPSERT statement (all columns; update every non-key column on
 // task_id conflict). The AFTER INSERT/UPDATE triggers keep tasks_fts in sync.
+// A list-id set bound as one JSON array parameter. Durable Object SQLite
+// allows 100 bound parameters per statement, and a roster can pass that.
+const IN_JSON = "(SELECT value FROM json_each(?))";
+
 const UPSERT_TASK_SQL = (() => {
   const cols = TASK_COLUMNS.join(", ");
   const placeholders = TASK_COLUMNS.map(() => "?").join(", ");
@@ -950,12 +954,9 @@ export class IndexCore implements TokenProvider {
     skipListIds: string[],
     openOnlyListIds: string[] = [],
   ): Array<{ task_id: string; list_id: string }> {
-    const ph = (ids: string[]) => ids.map(() => "?").join(", ");
-    const skipClause = skipListIds.length > 0 ? `AND list_id NOT IN (${ph(skipListIds)})` : "";
-    const openOnlyClause =
-      openOnlyListIds.length > 0
-        ? `AND (status <> 'completed' OR list_id NOT IN (${ph(openOnlyListIds)}))`
-        : "";
+    // One bound JSON array per list set (IN_JSON), not one parameter per list.
+    const skipClause = skipListIds.length > 0 ? `AND list_id NOT IN ${IN_JSON}` : "";
+    const openOnlyClause = openOnlyListIds.length > 0 ? `AND (status <> 'completed' OR list_id NOT IN ${IN_JSON})` : "";
     return this.#sql
       .exec(
         `SELECT task_id, list_id FROM tasks
@@ -964,8 +965,8 @@ export class IndexCore implements TokenProvider {
             ${openOnlyClause}
           ORDER BY (status = 'completed'), modified_at DESC
           LIMIT ?`,
-        ...skipListIds,
-        ...openOnlyListIds,
+        ...(skipListIds.length > 0 ? [JSON.stringify(skipListIds)] : []),
+        ...(openOnlyListIds.length > 0 ? [JSON.stringify(openOnlyListIds)] : []),
         max,
       )
       .toArray() as unknown as Array<{ task_id: string; list_id: string }>;
@@ -1618,8 +1619,8 @@ export class IndexCore implements TokenProvider {
     const params: (string | number)[] = [];
 
     if (f.lists && f.lists.length > 0) {
-      where.push(`list_id IN (${f.lists.map(() => "?").join(", ")})`);
-      params.push(...f.lists);
+      where.push(`list_id IN ${IN_JSON}`);
+      params.push(JSON.stringify(f.lists));
     }
     if (f.status && f.status.length > 0) {
       where.push(`status IN (${f.status.map(() => "?").join(", ")})`);
@@ -1715,8 +1716,8 @@ export class IndexCore implements TokenProvider {
     const tFilters: string[] = [];
     const tParams: (string | number)[] = [];
     if (opts.lists && opts.lists.length > 0) {
-      tFilters.push(`t.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
-      tParams.push(...opts.lists);
+      tFilters.push(`t.list_id IN ${IN_JSON}`);
+      tParams.push(JSON.stringify(opts.lists));
     }
     if (opts.status && opts.status.length > 0) {
       tFilters.push(`t.status IN (${opts.status.map(() => "?").join(", ")})`);
@@ -1791,8 +1792,8 @@ export class IndexCore implements TokenProvider {
     }
     if (pendingOnly) where.push("ci.is_checked = 0");
     if (opts.lists && opts.lists.length > 0) {
-      where.push(`ci.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
-      params.push(...opts.lists);
+      where.push(`ci.list_id IN ${IN_JSON}`);
+      params.push(JSON.stringify(opts.lists));
     }
 
     const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
