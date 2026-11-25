@@ -653,8 +653,9 @@ Content-Type: application/json
 | `op` | Fields | Write-through (today's code path) |
 |---|---|---|
 | `list.create` | `name` | Graph `POST /lists`, then the new list is pinned `todo` (section 1.2) |
-| `list.update` | `name`, `sync` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. Allowed on an excluded list. |
+| `list.update` | any subset of: `name`, `sync`, `theme`, `group_id` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. `theme`, `group_id`: Substrate `PATCH taskfolders/{id}` (section 10.4). Allowed on an excluded list. |
 | `list.delete` | — | Graph `DELETE` |
+| `list.reorder` | `position` | Substrate `OrderDateTime` on the folder (section 10.4) |
 | `task.create` | `list_id`, any task field | Graph `POST`, then any Substrate fields |
 | `task.update` | any subset of: `title`, `body`, `status`, `completed_at`, `importance`, `due`, `start`, `reminder`, `categories`, `recurrence` | Graph `PATCH` with only those fields |
 | `task.delete` | — | Graph `DELETE` |
@@ -682,6 +683,17 @@ shows them oldest first, below any ordered steps. Before a `step.reorder`, the s
 gives every other unordered step of that task an order value in that shown order, so
 the move has neighbors and nothing else appears to move. It costs one Substrate write
 per unordered step, once per task.
+
+A list's `theme` is `{ "color": name, "background": name }`, either part alone, each one
+of To Do's preset names (letters, digits, `-` and `_`, at most 64). There is no "no theme"
+value: `null` and `""` are rejected with `invalid_field:theme`. `group_id` is a group's
+`sid` from the feed, or `null` to take the list out of its group; an unknown group sid is
+`rejected` with `unknown_list_group`. A `list.reorder` reference is a list or a group in
+the list's own container: for a list in a group, another list in that group; for a
+top-level list, another top-level list or a group. Any other reference is `rejected` with
+`reference_not_sibling`. The default list can't be grouped or moved (`default_list`).
+These need `capabilities.list_appearance`; without it they are `rejected` with
+`list_appearance_unavailable`.
 
 `position` is `{ "before": sid }`, `{ "after": sid }`, `{ "top": true }` or
 `{ "bottom": true }`. The server converts it to an order value with the existing
@@ -1148,10 +1160,22 @@ Already solved by section 2: the `sid` is the primary key in both modes.
 
 ### 10.4 List groups and sidebar order
 
-**Built, read-only, in Graph mode.** Graph exposes neither groups nor sidebar order.
-Substrate does (see the spike results), so the server mirrors them from Substrate and
-serves them in the change feed. The app can't change them yet: no mutation writes a
-group, an order or a theme back to Microsoft To Do.
+**Built in Graph mode.** Graph exposes neither groups nor sidebar order. Substrate does
+(see the spike results), so the server mirrors them from Substrate and serves them in
+the change feed. The app changes a list's theme and group with `list.update` and its
+position with `list.reorder` (section 5.2). Each writes the folder in Substrate, and the
+server stores the folder as Substrate returns it, so the change is in the feed at once.
+Groups themselves are read-only: no mutation creates, renames, moves or deletes one.
+
+Observed on the Servant Voice account (2026-11-25): Substrate accepted `ThemeColor`,
+`ThemeBackground`, `ParentFolderGroupId` (a group's `Id`, or `null` to ungroup) and
+`OrderDateTime` in one `PATCH taskfolders/{id}`, and returned the whole folder. It
+ignored `null` for a theme value and stored `""` as given. It keeps a list's
+`OrderDateTime` to the whole second (groups keep milliseconds), so the server writes
+whole seconds and refuses a move with `order_precision_exhausted` when no whole second
+lies between the neighbors. Moving a list into a group
+through Substrate leaves its `OrderDateTime` unchanged, unlike a drag in To Do, which
+gives it a new one; send a `list.reorder` after the `list.update` to place it.
 
 **What the server reads.** One read is two Substrate GETs:
 
@@ -1545,6 +1569,9 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 ---
 
 ## Revisions
+
+- 2026-11-25: sections 5.2 and 10.4: `list.update` takes `theme` and `group_id`, and
+  `list.reorder` moves a list in the sidebar. Groups stay read-only.
 
 - 2026-11-25: section 5.2: `step.reorder` gives a task's unordered steps order values in
   their shown order before the move, instead of failing with `reference_has_no_order`.

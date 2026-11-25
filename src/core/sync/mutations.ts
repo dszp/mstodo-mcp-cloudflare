@@ -13,7 +13,7 @@ export const BATCH_TIME_BUDGET_MS = 20_000;
 export const MUTATION_LEASE_MS = 60_000;
 
 export const OPS = [
-  "list.create", "list.update", "list.delete",
+  "list.create", "list.update", "list.delete", "list.reorder",
   "task.create", "task.update", "task.delete", "task.move", "task.reorder",
   "myday.add", "myday.remove", "myday.reorder",
   "step.create", "step.update", "step.delete", "step.reorder",
@@ -21,6 +21,9 @@ export const OPS = [
 ] as const;
 export type MutationOp = (typeof OPS)[number];
 export type EntityKind = "list" | "task" | "step" | "link";
+// What a mutation can name: an entity, or a sidebar group (list.update's
+// group_id), which the app reads but can't create or edit.
+export type RefKind = EntityKind | "list_group";
 
 export type Position = { before: string } | { after: string } | { top: true } | { bottom: true };
 
@@ -46,7 +49,9 @@ export const UPDATABLE: Record<string, readonly string[]> = {
   "task.update": ["title", "body", "status", "completed_at", "importance", "due", "start", "reminder", "categories", "recurrence"],
   // `sync` is the list's sync setting (section 1.2), kept by this server
   // rather than in Microsoft To Do.
-  "list.update": ["name", "sync"],
+  // `theme` and `group_id` are the list's sidebar appearance (section 10.4),
+  // written to Substrate.
+  "list.update": ["name", "sync", "theme", "group_id"],
   "step.update": ["title", "checked"],
   "link.update": ["url", "title"],
 };
@@ -61,6 +66,7 @@ export const ALLOWED_FIELDS: Record<MutationOp, readonly string[]> = {
   "link.update": UPDATABLE["link.update"],
   "list.create": ["name"],
   "list.delete": [],
+  "list.reorder": [],
   "task.create": ["list_id", ...TASK_FIELDS],
   "task.delete": [],
   "task.move": ["list_id"],
@@ -85,7 +91,7 @@ const isCreate = (op: MutationOp) => op.endsWith(".create");
 
 // What the server stores and the executor needs, per entity a mutation names.
 export interface SidRef {
-  kind: EntityKind;
+  kind: RefKind;
   sid: string;
 }
 export interface Resolved {
@@ -209,6 +215,10 @@ export function refsOf(m: MutationIn): SidRef[] {
   const f = m.fields ?? {};
   if (typeof f.list_id === "string") refs.push({ kind: "list", sid: normalizeSid(f.list_id) });
   if (typeof f.task_id === "string") refs.push({ kind: "task", sid: normalizeSid(f.task_id) });
+  if (m.op === "list.update" && typeof f.group_id === "string") refs.push({ kind: "list_group", sid: normalizeSid(f.group_id) });
+  // A list.reorder neighbour can be a list or a group; the executor resolves
+  // it against the sidebar itself.
+  if (m.op === "list.reorder") return refs;
   const p = m.position as Record<string, unknown> | undefined;
   for (const k of ["before", "after"]) if (typeof p?.[k] === "string") refs.push({ kind, sid: normalizeSid(p[k] as string) });
   return refs;

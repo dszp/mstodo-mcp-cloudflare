@@ -108,6 +108,8 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   createCandidates(...a: Parameters<IndexCore["createCandidates"]>) { return this.#core.createCandidates(...a); }
   forgetSubresources(...a: Parameters<IndexCore["forgetSubresources"]>) { return this.#core.forgetSubresources(...a); }
   setStepOrder(...a: Parameters<IndexCore["setStepOrder"]>) { return this.#core.setStepOrder(...a); }
+  storeFolderAppearance(...a: Parameters<IndexCore["storeFolderAppearance"]>) { return this.#core.storeFolderAppearance(...a); }
+  sidebar() { return this.#core.sidebar(); }
   fieldClocks(...a: Parameters<IndexCore["fieldClocks"]>) { return this.#core.fieldClocks(...a); }
   mutationAbandon(...a: Parameters<IndexCore["mutationAbandon"]>) { return this.#core.mutationAbandon(...a); }
   mutationBegin(...a: Parameters<IndexCore["mutationBegin"]>) { return this.#core.mutationBegin(...a); }

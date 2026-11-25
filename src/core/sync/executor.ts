@@ -15,7 +15,7 @@ import { GraphError } from "../graph/client";
 import { SubstrateError } from "../graph/substrate-client";
 import { bestEffort, type OpsContext } from "../ops/context";
 import { createLink, deleteLink, findCreatedLinks, updateLink } from "../ops/links";
-import { createList, deleteList, findCreatedLists, setListSync, updateList } from "../ops/lists";
+import { createList, deleteList, findCreatedLists, reorderList, setListAppearance, setListSync, updateList } from "../ops/lists";
 import { LIST_SYNC_VALUES, type ListSync } from "../config/sync-policy";
 import { addToMyDay, removeFromMyDay, reorderMyDayTask, todayInTimeZone } from "../ops/my-day";
 import type { ReorderPosition } from "../ops/position";
@@ -129,7 +129,7 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
     if (!myDayEnabled(ctx.env)) return rejected("my_day_disabled");
   }
   const graphId = input.graphId ?? "";
-  const ref = (key: "list_id" | "task_id"): string => {
+  const ref = (key: "list_id" | "task_id" | "group_id"): string => {
     const sid = fields[key];
     if (typeof sid !== "string") return invalid(key);
     // applyBatch resolved every sid in fields before calling.
@@ -149,10 +149,17 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       return r.ok ? applied(r.value.list.id) : rejected(r.reason);
     }
     case "list.update": {
-      // Either field alone is an update; a list.update with neither is invalid.
+      // Any one field is an update; a list.update with none is invalid.
       const sync = fields.sync;
-      const name = fields.name !== undefined || sync === undefined ? requiredText(fields, "name") : undefined;
+      const theme = fields.theme === undefined ? undefined : listTheme(fields.theme);
+      // group_id: a group's sid (applyBatch resolved it to the Substrate Id),
+      // or null to ungroup.
+      const group_id =
+        fields.group_id === undefined ? undefined : fields.group_id === null ? null : ref("group_id");
+      const appearance = theme !== undefined || group_id !== undefined;
+      const name = fields.name !== undefined || (sync === undefined && !appearance) ? requiredText(fields, "name") : undefined;
       if (sync !== undefined && !(LIST_SYNC_VALUES as readonly unknown[]).includes(sync)) invalid("sync");
+      if (appearance && !myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
       if (name !== undefined) {
         const r = await updateList(ctx, { list_id: graphId, display_name: name });
         if (!r.ok) return rejected(r.reason);
@@ -161,7 +168,30 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
         const r = await setListSync(ctx, { list_id: graphId, sync: sync as ListSync });
         if (!r.ok) return rejected(r.reason);
       }
+      if (appearance) {
+        const r = await setListAppearance(ctx, { list_id: graphId, theme, group_id });
+        if (!r.ok) return rejected(r.reason);
+      }
       return applied(graphId);
+    }
+    case "list.reorder": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      if (!input.position) invalid("position");
+      const p = input.position!;
+      let position: Parameters<typeof reorderList>[1]["position"];
+      if ("top" in p) position = { kind: "top" };
+      else if ("bottom" in p) position = { kind: "bottom" };
+      else {
+        // The neighbour is a list or a group; applyBatch left it to us.
+        const kind = "before" in p ? "before" : "after";
+        const sid = normalizeSid("before" in p ? p.before : p.after);
+        const r = await ctx.index.resolveSids([{ kind: "list", sid }, { kind: "list_group", sid }]);
+        const hit = [r[`list:${sid}`], r[`list_group:${sid}`]].find((x) => x?.graph_id && x.live);
+        if (!hit?.graph_id) return rejected("unknown_reference");
+        position = { kind, reference_id: hit.graph_id };
+      }
+      const r = await reorderList(ctx, { list_id: graphId, position });
+      return r.ok ? applied(graphId) : rejected(r.reason);
     }
     case "list.delete": {
       const r = await deleteList(ctx, { list_id: graphId });
@@ -416,6 +446,24 @@ async function listOfTask(ctx: OpsContext, taskId: string): Promise<string | nul
 }
 
 // ---- field translation -----------------------------------------------------
+
+// A list theme: { color?, background? }, each one of To Do's preset names.
+// Names aren't checked against a list (the full set isn't known); a name is
+// short text, which keeps arbitrary payloads out of Substrate. There is no
+// "no theme": Substrate ignores null and stores "" as a name To Do doesn't
+// know (observed 2026-11-25), so neither is accepted.
+const THEME_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+function listTheme(v: unknown): { color?: string; background?: string } {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return invalid("theme");
+  const out: { color?: string; background?: string } = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (k !== "color" && k !== "background") invalid("theme");
+    if (typeof val !== "string" || !THEME_NAME.test(val)) invalid("theme");
+    out[k as "color" | "background"] = val as string;
+  }
+  if (Object.keys(out).length === 0) invalid("theme");
+  return out;
+}
 
 function requiredText(fields: Record<string, unknown>, key: string): string {
   const v = fields[key];

@@ -2029,6 +2029,8 @@ export class IndexCore implements TokenProvider {
       step: ["checklist_items", "item_id"],
       link: ["linked_resources", "link_id"],
       attachment: ["attachments", "attachment_id"],
+      // A sidebar group: list.update's group_id and list.reorder's reference.
+      list_group: ["list_groups", "group_id"],
     };
     const out: Record<string, { graph_id: string | null; live: boolean; excluded?: true }> = {};
     for (const r of refs) {
@@ -2042,6 +2044,7 @@ export class IndexCore implements TokenProvider {
         !!graphId && this.#sql.exec(`SELECT 1 FROM ${t[0]} WHERE ${t[1]} = ? LIMIT 1`, graphId).toArray().length > 0;
       let listId: string | null = null;
       if (graphId && r.kind === "list") listId = graphId;
+      else if (r.kind === "list_group") listId = null;
       else if (graphId && live) {
         listId = this.#sql.exec<{ l: string }>(`SELECT list_id l FROM ${t[0]} WHERE ${t[1]} = ?`, graphId).toArray()[0]?.l ?? null;
       } else if (r.kind === "task") {
@@ -3143,6 +3146,36 @@ export class IndexCore implements TokenProvider {
         groups_kept_unconfirmed: !groupsComplete,
       };
     });
+  }
+
+  // The sidebar as the mirror last read it: each list's group and position,
+  // and each group's position (docs/SYNC-API.md section 10.4). Excluded lists
+  // are included: they still hold a place in To Do's sidebar.
+  sidebar(): {
+    lists: Array<{ list_id: string; group_id: string | null; order_datetime: string | null; wellknown: string | null }>;
+    groups: Array<{ group_id: string; order_datetime: string | null }>;
+  } {
+    return {
+      lists: this.#sql
+        .exec<{ list_id: string; group_id: string | null; order_datetime: string | null; wellknown: string | null }>(
+          "SELECT list_id, group_id, order_datetime, wellknown FROM lists",
+        )
+        .toArray(),
+      groups: this.#sql
+        .exec<{ group_id: string; order_datetime: string | null }>("SELECT group_id, order_datetime FROM list_groups")
+        .toArray(),
+    };
+  }
+
+  // Stores one folder as a write returned it (ops setListAppearance), the
+  // same columns a sidebar read sets. A group the mirror hasn't read yet is
+  // stored as named; the next sidebar read adds the group itself.
+  storeFolderAppearance(folder: SubstrateFolder): void {
+    this.#sql.exec(
+      `UPDATE lists SET group_id = ?, order_datetime = ?, theme_color = ?, theme_background = ? WHERE list_id = ?`,
+      folder.ParentFolderGroupId ?? null, folder.OrderDateTime ?? null,
+      rawAppearance(folder.ThemeColor), rawAppearance(folder.ThemeBackground), folder.Id,
+    );
   }
 
   // Budgeted background My Day Substrate scan. Substrate has no delta, so each
