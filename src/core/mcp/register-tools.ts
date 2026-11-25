@@ -1653,7 +1653,7 @@ class ToDoTools implements TokenProvider {
       "create_upload_link",
       {
         description:
-          "Mint a short-lived (default 15 min, max 30), single-use web link the user opens in a browser to attach a file to THIS specific task. The file's bytes go straight from the browser to the server and on to Microsoft (≤ 25 MB) — they never pass through the model, so this is the way to attach anything beyond a trivial generated snippet. Returns { upload_url, expires_at }. Present upload_url to the user as a tappable link, then poll list_attachments / get_attachment to confirm. With `filename` the link accepts exactly one file stored under that name; without it the link accepts up to `max_files` files.",
+          "Mint a short-lived (default 15 min, max 30), single-use web link the user opens in a browser to attach a file to THIS specific task. The file's bytes go straight from the browser to the server and on to Microsoft (≤ 25 MB) — they never pass through the model, so this is the way to attach anything beyond a trivial generated snippet. Returns { upload_url, expires_at }, or task_not_found when the task isn't in that list. Present upload_url to the user as a tappable link, then poll list_attachments / get_attachment to confirm. With `filename` the link accepts exactly one file stored under that name; without it the link accepts up to `max_files` files.",
         inputSchema: {
           list: z
             .string()
@@ -1688,7 +1688,7 @@ class ToDoTools implements TokenProvider {
         },
       },
       async ({ list, task_id, filename, content_type, max_files, ttl_minutes }): Promise<McpResponse> =>
-        instrument("create_upload_link", async () => {
+        this.withGraph("create_upload_link", async (graph) => {
           const base = (this.ctx.env.SERVICE_BASE_URL ?? "").replace(/\/+$/, "");
           if (!/^https?:\/\/[^/]+/i.test(base)) {
             return errResponse("upload_disabled", {
@@ -1725,8 +1725,29 @@ class ToDoTools implements TokenProvider {
               log.warn("upload_link_meta_failed", { task_id, error: String(e) });
               return null;
             });
-          if (meta?.title) scope.task_title = meta.title;
-          if (meta?.list_display_name) scope.list_name = meta.list_display_name;
+          // The link must not outlive a typo: a task the index doesn't hold in
+          // this list (an explicit `list`, or a task too new to be mirrored) is
+          // checked live, so the person isn't sent to a page whose upload fails
+          // after they've picked files.
+          if (meta?.list_id !== list_id) {
+            const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}?$select=id,title`;
+            try {
+              const live = await graph.getJson(url, TodoTaskSchema);
+              if (live.title) scope.task_title = live.title;
+            } catch (e) {
+              if (
+                e instanceof GraphError &&
+                (e.status === 404 ||
+                  (e.status === 400 && getGraphInnerErrorCode(e.detail) === "ErrorInvalidIdMalformed"))
+              ) {
+                return errResponse("task_not_found", { list_id, task_id });
+              }
+              throw e;
+            }
+          } else if (meta.title) {
+            scope.task_title = meta.title;
+          }
+          if (meta?.list_id === list_id && meta.list_display_name) scope.list_name = meta.list_display_name;
 
           const ttlSeconds = ttl_minutes ? ttl_minutes * 60 : undefined;
           const { token, expiresAt } = await createUploadCapability(this.ctx.env, scope, ttlSeconds);
