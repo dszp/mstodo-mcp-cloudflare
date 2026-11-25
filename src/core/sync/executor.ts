@@ -447,22 +447,21 @@ async function listOfTask(ctx: OpsContext, taskId: string): Promise<string | nul
 
 // ---- field translation -----------------------------------------------------
 
-// A list theme: { color?, background? }, each one of To Do's preset names.
-// Names aren't checked against a list (the full set isn't known); a name is
-// short text, which keeps arbitrary payloads out of Substrate. There is no
-// "no theme": Substrate ignores null and stores "" as a name To Do doesn't
-// know (observed 2026-11-25), so neither is accepted.
-const THEME_NAME = /^[A-Za-z0-9_-]{1,64}$/;
-function listTheme(v: unknown): { color?: string; background?: string } {
+// A list theme. Only the color is writable, and only a name seen on a real
+// list in To Do: Substrate stores any string, and a name To Do doesn't know
+// fails silently at best (a client may also crash on it; suspected
+// 2026-11-25 on iOS with a guessed background). The background isn't
+// writable until its names are known. There is no "no theme": Substrate
+// ignores null and stores "" as given, so neither is accepted.
+export const THEME_COLORS: ReadonlySet<string> = new Set(["blue", "purple"]);
+function listTheme(v: unknown): { color: string } {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return invalid("theme");
-  const out: { color?: string; background?: string } = {};
-  for (const [k, val] of Object.entries(v)) {
-    if (k !== "color" && k !== "background") invalid("theme");
-    if (typeof val !== "string" || !THEME_NAME.test(val)) invalid("theme");
-    out[k as "color" | "background"] = val as string;
+  const keys = Object.keys(v);
+  const color = (v as { color?: unknown }).color;
+  if (keys.length !== 1 || keys[0] !== "color" || typeof color !== "string" || !THEME_COLORS.has(color)) {
+    return invalid("theme");
   }
-  if (Object.keys(out).length === 0) invalid("theme");
-  return out;
+  return { color };
 }
 
 function requiredText(fields: Record<string, unknown>, key: string): string {

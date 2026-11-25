@@ -684,9 +684,11 @@ gives every other unordered step of that task an order value in that shown order
 the move has neighbors and nothing else appears to move. It costs one Substrate write
 per unordered step, once per task.
 
-A list's `theme` is `{ "color": name, "background": name }`, either part alone, each one
-of To Do's preset names (letters, digits, `-` and `_`, at most 64). There is no "no theme"
-value: `null` and `""` are rejected with `invalid_field:theme`. `group_id` is a group's
+A list's `theme` is written as `{ "color": name }`. Only the color is writable, and only
+a name seen on a real list in To Do: `blue` and `purple` so far; the list grows as more
+are confirmed. Substrate stores any string, and To Do shows a name it doesn't know as no
+theme at best, so any other name, a `background`, `null` or `""` is rejected with
+`invalid_field:theme`. A color-only write keeps the list's background. `group_id` is a group's
 `sid` from the feed, or `null` to take the list out of its group; an unknown group sid is
 `rejected` with `unknown_list_group`. A `list.reorder` reference is a list or a group in
 the list's own container: for a list in a group, another list in that group; for a
@@ -1577,7 +1579,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 - 2026-11-25: sections 5.2 and 10.4: `list.update` takes `theme` and `group_id`, and
   `list.reorder` moves a list in the sidebar. Groups stay read-only. New
-  `capabilities.list_appearance_write` says the server accepts these edits.
+  `capabilities.list_appearance_write` says the server accepts these edits. A theme write
+  sets the color only, from the colors seen in To Do (`blue`, `purple`).
 - 2026-11-25: section 5.2: `step.reorder` gives a task's unordered steps order values in
   their shown order before the move, instead of failing with `reference_has_no_order`.
 - 2026-11-25: section 4.7 added: `GET /api/v1/link-rules` and `link_rules_rev` in

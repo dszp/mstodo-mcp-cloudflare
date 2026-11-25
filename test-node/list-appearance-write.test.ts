@@ -81,17 +81,12 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("list.update theme", () => {
-  it("writes the names to the folder and stores what Substrate returns", async () => {
+  it("writes the color alone and stores what Substrate returns", async () => {
     const h = harness();
-    expect(await h.exec(update("La", { theme: { color: "red", background: "beach" } }))).toEqual({ ok: true, graphId: "La" });
-    expect(h.patches).toEqual([{ id: "La", body: { ThemeColor: "red", ThemeBackground: "beach" } }]);
-    expect(h.stored).toEqual([{ Id: "La", ThemeColor: "red", ThemeBackground: "beach" }]);
-  });
-
-  it("sends only the part that was set", async () => {
-    const h = harness();
-    await h.exec(update("La", { theme: { background: "mountain" } }));
-    expect(h.patches[0].body).toEqual({ ThemeBackground: "mountain" });
+    expect(await h.exec(update("La", { theme: { color: "purple" } }))).toEqual({ ok: true, graphId: "La" });
+    // No ThemeBackground in the body: Substrate keeps the list's background.
+    expect(h.patches).toEqual([{ id: "La", body: { ThemeColor: "purple" } }]);
+    expect(h.stored).toEqual([{ Id: "La", ThemeColor: "purple" }]);
   });
 
   it.each([
@@ -100,6 +95,9 @@ describe("list.update theme", () => {
     ["an unknown key", { colour: "red" }],
     ["no keys", {}],
     ["text that isn't a name", { color: "red; drop" }],
+    ["a color To Do hasn't been seen to use", { color: "chartreuse" }],
+    ["a background (not writable yet)", { background: "mountain" }],
+    ["a color with a background", { color: "blue", background: "beach" }],
     ["a string instead of an object", "red"],
   ])("refuses %s", async (_label, theme) => {
     const h = harness();
@@ -185,7 +183,7 @@ describe("list.reorder", () => {
 
 describe("appearance writes need Substrate", () => {
   it.each([
-    ["theme", update("La", { theme: { color: "red" } })],
+    ["theme", update("La", { theme: { color: "blue" } })],
     ["group", update("La", { group_id: null })],
     ["reorder", reorder("La", { top: true })],
   ])("refuses %s when ENABLE_MY_DAY is off", async (_label, input) => {
@@ -196,13 +194,13 @@ describe("appearance writes need Substrate", () => {
 
   it("a 403 refuses the edit without turning My Day off", async () => {
     const h = harness({ patchError: new SubstrateError(403, "forbidden") });
-    expect(await h.exec(update("La", { theme: { color: "red" } }))).toEqual(rejected("list_appearance_unavailable"));
+    expect(await h.exec(update("La", { theme: { color: "blue" } }))).toEqual(rejected("list_appearance_unavailable"));
     expect(h.markMyDayUnavailable).not.toHaveBeenCalled();
   });
 
   it("a 404 is list_not_found", async () => {
     const h = harness({ patchError: new SubstrateError(404, "gone") });
-    expect(await h.exec(update("La", { theme: { color: "red" } }))).toEqual(rejected("list_not_found"));
+    expect(await h.exec(update("La", { theme: { color: "blue" } }))).toEqual(rejected("list_not_found"));
   });
 
 });
