@@ -100,6 +100,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A queued app edit of a list's `sync` older than a change made through `set_list_config` no
   longer overrides it.
 
+### Security
+- **Dependencies updated past open advisories.** The Node host bundles `hono` 4.13.21 and
+  `@hono/node-server` 2.1.11 (path-separator and mount bypasses, an `ECONNRESET` crash during
+  a WebSocket upgrade), and the MCP SDK's `express` stack now resolves `body-parser` 2.4.0
+  and `qs` 6.17.1 (both denial of service). The Worker bundle's only affected package was
+  `fast-uri` 3.1.9, pulled in by `ajv` for tool input schemas. `vitest` 4.1.12 fixes
+  `@vitest/mocker` (test runs only). `undici` and `sharp` were already patched through
+  `wrangler`'s `miniflare`.
+
 ## [0.17.1] – 2026-10-17
 
 ### Security

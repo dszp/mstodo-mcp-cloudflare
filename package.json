@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.2.3",
-    "@hono/node-server": "2.1.5",
+    "@hono/node-server": "2.1.11",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "agents": "^0.28.1",
     "ws": "8.21.0",
@@ -31,7 +31,7 @@
     "buffer": "^6.0.3",
     "esbuild": "^0.28.2",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.6",
+    "vitest": "^4.1.12",
     "wrangler": "^4.158.0"
   }
 }
