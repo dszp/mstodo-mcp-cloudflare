@@ -152,6 +152,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   updateMyDayFields(...a: Parameters<IndexCore["updateMyDayFields"]>) { return this.#core.updateMyDayFields(...a); }
   upsertChecklistItem(...a: Parameters<IndexCore["upsertChecklistItem"]>) { return this.#core.upsertChecklistItem(...a); }
   upsertList(...a: Parameters<IndexCore["upsertList"]>) { return this.#core.upsertList(...a); }
+  applyListAppearance(...a: Parameters<IndexCore["applyListAppearance"]>) { return this.#core.applyListAppearance(...a); }
   upsertTask(...a: Parameters<IndexCore["upsertTask"]>) { return this.#core.upsertTask(...a); }
 }
 
