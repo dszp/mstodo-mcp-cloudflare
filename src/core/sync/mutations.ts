@@ -13,14 +13,17 @@ export const BATCH_TIME_BUDGET_MS = 20_000;
 export const MUTATION_LEASE_MS = 60_000;
 
 export const OPS = [
-  "list.create", "list.update", "list.delete",
+  "list.create", "list.update", "list.delete", "list.reorder",
+  "list_group.create", "list_group.update", "list_group.delete", "list_group.reorder",
   "task.create", "task.update", "task.delete", "task.move", "task.reorder",
   "myday.add", "myday.remove", "myday.reorder",
   "step.create", "step.update", "step.delete", "step.reorder",
   "link.create", "link.update", "link.delete",
 ] as const;
 export type MutationOp = (typeof OPS)[number];
-export type EntityKind = "list" | "task" | "step" | "link";
+export type EntityKind = "list" | "task" | "step" | "link" | "list_group";
+// What a mutation can name.
+export type RefKind = EntityKind;
 
 export type Position = { before: string } | { after: string } | { top: true } | { bottom: true };
 
@@ -46,7 +49,11 @@ export const UPDATABLE: Record<string, readonly string[]> = {
   "task.update": ["title", "body", "status", "completed_at", "importance", "due", "start", "reminder", "categories", "recurrence"],
   // `sync` is the list's sync setting (section 1.2), kept by this server
   // rather than in Microsoft To Do.
-  "list.update": ["name", "sync"],
+  // `theme` and `group_id` are the list's sidebar appearance (section 10.4),
+  // written to Substrate.
+  "list.update": ["name", "sync", "theme", "group_id"],
+  // A sidebar list group (section 10.4), written to Substrate.
+  "list_group.update": ["name"],
   "step.update": ["title", "checked"],
   "link.update": ["url", "title"],
 };
@@ -61,6 +68,11 @@ export const ALLOWED_FIELDS: Record<MutationOp, readonly string[]> = {
   "link.update": UPDATABLE["link.update"],
   "list.create": ["name"],
   "list.delete": [],
+  "list.reorder": [],
+  "list_group.create": ["name"],
+  "list_group.update": UPDATABLE["list_group.update"],
+  "list_group.delete": [],
+  "list_group.reorder": [],
   "task.create": ["list_id", ...TASK_FIELDS],
   "task.delete": [],
   "task.move": ["list_id"],
@@ -85,7 +97,7 @@ const isCreate = (op: MutationOp) => op.endsWith(".create");
 
 // What the server stores and the executor needs, per entity a mutation names.
 export interface SidRef {
-  kind: EntityKind;
+  kind: RefKind;
   sid: string;
 }
 export interface Resolved {
@@ -209,12 +221,30 @@ export function refsOf(m: MutationIn): SidRef[] {
   const f = m.fields ?? {};
   if (typeof f.list_id === "string") refs.push({ kind: "list", sid: normalizeSid(f.list_id) });
   if (typeof f.task_id === "string") refs.push({ kind: "task", sid: normalizeSid(f.task_id) });
+  if (m.op === "list.update" && typeof f.group_id === "string") refs.push({ kind: "list_group", sid: normalizeSid(f.group_id) });
+  // A top-level sidebar neighbour (list.reorder, and a group's position) can
+  // be a list or a group; the executor resolves it against the sidebar itself.
+  if (m.op === "list.reorder" || m.op.startsWith("list_group.")) return refs;
   const p = m.position as Record<string, unknown> | undefined;
   for (const k of ["before", "after"]) if (typeof p?.[k] === "string") refs.push({ kind, sid: normalizeSid(p[k] as string) });
   return refs;
 }
 
 const key = (r: SidRef) => `${r.kind}:${r.sid}`;
+
+// The sidebar neighbours refsOf leaves to the executor (list.reorder and the
+// list_group ops), under both kinds a neighbour can be, so applyBatch can skip
+// a mutation whose neighbour's create in this batch didn't apply.
+function sidebarNeighbourKeys(m: MutationIn): string[] {
+  if (m.op !== "list.reorder" && !m.op.startsWith("list_group.")) return [];
+  const p = m.position as Record<string, unknown> | undefined;
+  return ["before", "after"].flatMap((k) => {
+    const v = p?.[k];
+    if (typeof v !== "string") return [];
+    const sid = normalizeSid(v);
+    return (["list", "list_group"] as const).map((kind) => key({ kind, sid }));
+  });
+}
 
 export async function applyBatch(
   store: MutationStore,
@@ -244,7 +274,8 @@ export async function applyBatch(
     const m = v;
     const self: SidRef = { kind: kindOf(m.op), sid: m.sid };
     const others = refsOf(m).slice(1);
-    if (blocked.has(key(self)) || others.some((r) => uncreated.has(key(r))) || now() > deadline) {
+    const waits = others.some((r) => uncreated.has(key(r))) || sidebarNeighbourKeys(m).some((k) => uncreated.has(k));
+    if (blocked.has(key(self)) || waits || now() > deadline) {
       blocked.add(key(self));
       if (isCreate(m.op)) uncreated.add(key(self));
       results.push({ id: m.id, status: "skipped" });

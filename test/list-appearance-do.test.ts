@@ -8,6 +8,7 @@ import {
   runListAppearanceIdentityChecks,
   runListAppearanceMigrationChecks,
   runListAppearanceRefusedChecks,
+  runListAppearanceSupersededChecks,
 } from "./_list-appearance-checks";
 
 const core = (state: DurableObjectState) =>
@@ -49,6 +50,16 @@ describe("list appearance (Durable Object)", () => {
       const c = core(state);
       c.bootstrap();
       const r = await runListAppearanceIdentityChecks(c, env as never, state.storage.sql);
+      await state.storage.deleteAlarm();
+      check(r);
+    });
+  });
+
+  it("drops a sidebar read that a write overtook", async () => {
+    await runInDurableObject(env.TODO_INDEX_DO.getByName("appearance-superseded"), async (_i, state) => {
+      const c = core(state);
+      c.bootstrap();
+      const r = await runListAppearanceSupersededChecks(c, env as never, state.storage.sql);
       await state.storage.deleteAlarm();
       check(r);
     });

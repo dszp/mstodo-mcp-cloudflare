@@ -310,6 +310,7 @@ export async function runListAppearanceCycleChecks(
         m.folderQueries?.[0] === "$select=Id,OrderDateTime,ParentFolderGroupId,ThemeColor,ThemeBackground",
       "every Substrate call is a GET": m.substrate.every((p) => p.startsWith("GET ")),
       "list_appearance is on while Substrate works": info.capabilities.list_appearance === true,
+      "list_appearance_write is on while Substrate works": info.capabilities.list_appearance_write === true,
       "the next cycle within the interval doesn't read again": afterSecond === afterFirst,
       "a new list makes the next cycle read": afterNewList === afterSecond + 2 && c.getList("C3")?.theme_color === "purple",
       "a read a sync interval old is repeated": afterInterval === afterNewList + 2,
@@ -326,6 +327,7 @@ export async function runListAppearanceCycleChecks(
       "a 403 doesn't fail the cycle": !deniedCycleThrew,
       "after a 403 the sidebar isn't read again": reads(m) === beforeDenied,
       "after a 403 list_appearance is off": infoDenied.capabilities.list_appearance === false,
+      "after a 403 list_appearance_write is off": infoDenied.capabilities.list_appearance_write === false,
       "a 403 on the sidebar leaves My Day on": exoToken === "EXO" && myDayCallsAfter > myDayCallsBefore,
     };
   } finally {
@@ -352,6 +354,7 @@ export async function runListAppearanceRefusedChecks(c: IndexCore, env: AppEnv) 
       "the appearance columns stay null": row?.theme_color == null && row?.order_datetime == null && row?.group_id == null,
       "the feed sends null appearance": feed?.data.theme.color === null && feed.data.sort_key === null && feed.data.group_id === null,
       "list_appearance is off": info.capabilities.list_appearance === false,
+      "list_appearance_write is off": info.capabilities.list_appearance_write === false,
     };
   } finally {
     vi.unstubAllGlobals();
@@ -431,6 +434,51 @@ export async function runListAppearanceIdentityChecks(c: IndexCore, env: AppEnv,
       "the cycle succeeds": !threw,
       "no group from the old owner's read is stored": groups === 0,
       "no list gets the old owner's appearance": row?.theme_color == null && row?.appearance_synced_at == null,
+    };
+  } finally {
+    vi.unstubAllGlobals();
+  }
+}
+
+// A write stores sidebar values while a read is in flight: the read may
+// predate the write, so nothing from it is applied, and the next cycle reads
+// again. `sql` is the same database, to inspect the mirror.
+export async function runListAppearanceSupersededChecks(c: IndexCore, env: AppEnv, sql: SqlDb) {
+  await signIn(env);
+  const m: FakeMicrosoft = {
+    roster: ["W1"],
+    folders: [{ Id: "W1", ThemeColor: "blue", OrderDateTime: "2026-11-01T00:00:00Z" }],
+    groups: [],
+    substrate: [],
+  };
+  try {
+    stubMicrosoft(m);
+    m.onFolders = async () => {
+      m.onFolders = undefined;
+      // The list must exist for the write's UPDATE to land.
+      sql.exec("INSERT OR IGNORE INTO lists (list_id, display_name) VALUES ('W1', 'W1')");
+      c.storeFolderGroup({ Id: "WG", Name: "new", OrderDateTime: "2026-11-05T00:00:00.123Z" });
+      c.storeFolderAppearance({ Id: "W1", ThemeColor: "dark_red", OrderDateTime: "2026-11-01T00:00:00Z", ParentFolderGroupId: "WG" });
+    };
+    await c.runSyncCycle();
+    const afterRace = c.getList("W1");
+    const firstReadAfterDrop = await c.sidebarFirstReadAt();
+    const groupKept = sql.exec<{ n: number }>("SELECT count(*) n FROM list_groups WHERE group_id = 'WG'").one().n === 1;
+    const readsBefore = reads(m);
+    m.folders = [{ Id: "W1", ThemeColor: "dark_red", OrderDateTime: "2026-11-01T00:00:00Z", ParentFolderGroupId: "WG" }];
+    m.groups = [{ Id: "WG", Name: "new", OrderDateTime: "2026-11-05T00:00:00.123Z" }];
+    await c.runSyncCycle();
+    const afterNext = c.getList("W1");
+    const firstRead = await c.sidebarFirstReadAt();
+    await c.resetIdentity();
+    const afterReset = await c.sidebarFirstReadAt();
+    return {
+      "the dropped read doesn't count as the first read": firstReadAfterDrop === null,
+      "the next read counts as the first": firstRead !== null,
+      "an owner switch forgets the first read": afterReset === null,
+      "the write's theme survives the stale read": afterRace?.theme_color === "dark_red",
+      "the write's group survives the stale read": groupKept && afterRace?.group_id === "WG",
+      "the next cycle reads again and marks the list read": reads(m) > readsBefore && afterNext?.appearance_synced_at != null,
     };
   } finally {
     vi.unstubAllGlobals();

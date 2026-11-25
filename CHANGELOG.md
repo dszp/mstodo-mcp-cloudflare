@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since My Day tasks in them (flagged emails, for one) are missing from it.
 
 ### Added
+- **The sync API writes a list's sidebar appearance** (docs/SYNC-API.md sections 5.2 and
+  10.4). `list.update` takes `theme` (`{ color, background }`, To Do's preset names) and
+  `group_id` (a group's sid, or `null` to ungroup), and the new `list.reorder` op moves a
+  list among its siblings: the lists in its group, or the top-level lists and groups. Each
+  writes the folder through Substrate and stores what Substrate returns, so the feed has
+  the change at once. The `list_group.create`, `list_group.update`, `list_group.reorder` and
+  `list_group.delete` ops create, rename, move and delete sidebar groups; deleting a group
+  moves its lists out first and keeps them.
 - **`GET /api/v1/link-rules`** (docs/SYNC-API.md section 4.7): the owner's enabled link rules
   whose URL template is `http` or `https`, without `external_id_template`, so the app can mark
   matches in titles and notes before the server makes the link. `/sync/info` carries

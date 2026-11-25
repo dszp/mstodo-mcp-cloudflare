@@ -185,6 +185,10 @@ const WEBHOOK_HEALTH_KEY = "meta:webhook";
 const APPEARANCE_STATE_KEY = "meta:appearance";
 // StateStore key for the read's backoff after failures, and its ceiling.
 const APPEARANCE_BACKOFF_KEY = "appearance:backoff";
+// When the first sidebar read succeeded (ms). Every group existing then got a
+// row stamped with that time, so a retried group create can tell old groups
+// from new only for an attempt made after it (ops/lists.ts).
+const APPEARANCE_FIRST_READ_KEY = "appearance:first_read_at";
 const APPEARANCE_BACKOFF_MAX_MS = 6 * 3_600_000;
 interface AppearanceBackoff {
   failures: number;
@@ -408,6 +412,10 @@ export class IndexCore implements TokenProvider {
   // refresh so a refresh that resolves AFTER the switch can detect it and refuse
   // to persist the prior account's tokens over the new identity's (H4).
   #identityGeneration = 0;
+  // Bumped by every sidebar store from a write (storeFolderAppearance,
+  // storeFolderGroup, removeFolderGroup). A sidebar read that sees it change
+  // between its GETs and its apply may predate the write, so it is dropped.
+  #sidebarWriteGen = 0;
 
   // Returns a valid access token, refreshing only if the stored one is within
   // REFRESH_SKEW_MS of expiry. The agent already gates on freshness before
@@ -2029,6 +2037,8 @@ export class IndexCore implements TokenProvider {
       step: ["checklist_items", "item_id"],
       link: ["linked_resources", "link_id"],
       attachment: ["attachments", "attachment_id"],
+      // A sidebar group: list.update's group_id and list.reorder's reference.
+      list_group: ["list_groups", "group_id"],
     };
     const out: Record<string, { graph_id: string | null; live: boolean; excluded?: true }> = {};
     for (const r of refs) {
@@ -2042,6 +2052,7 @@ export class IndexCore implements TokenProvider {
         !!graphId && this.#sql.exec(`SELECT 1 FROM ${t[0]} WHERE ${t[1]} = ? LIMIT 1`, graphId).toArray().length > 0;
       let listId: string | null = null;
       if (graphId && r.kind === "list") listId = graphId;
+      else if (r.kind === "list_group") listId = null;
       else if (graphId && live) {
         listId = this.#sql.exec<{ l: string }>(`SELECT list_id l FROM ${t[0]} WHERE ${t[1]} = ?`, graphId).toArray()[0]?.l ?? null;
       } else if (r.kind === "task") {
@@ -2133,13 +2144,15 @@ export class IndexCore implements TokenProvider {
         this.#sql.exec("DELETE FROM sync_log WHERE kind = ? AND sid = ?", k, s);
         this.#sql.exec("INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms) VALUES (?, ?, ?, ?, ?)", k, s, deleted, listSid, now);
       };
-      if (kind === "task" || kind === "list") {
+      // A list group is logged on its own, like a list. A group just made has
+      // no lists, so none needs logging again.
+      if (kind === "task" || kind === "list" || kind === "list_group") {
         const logged = this.#sql
           .exec<{ list_sid: string | null }>("SELECT list_sid FROM sync_log WHERE kind = ? AND sid = ?", kind, minted.sid)
           .toArray()[0];
         if (!logged) return true;
         relog(kind, minted.sid, 1, logged.list_sid);
-        relog(kind, sid, 0, kind === "list" ? sid : logged.list_sid);
+        relog(kind, sid, 0, kind === "list" ? sid : kind === "list_group" ? null : logged.list_sid);
         return true;
       }
       // A step or link: log its task again, so a client that pulled the task
@@ -2184,6 +2197,7 @@ export class IndexCore implements TokenProvider {
       step_order: boolean;
       sub_resources: boolean;
       list_appearance: boolean;
+      list_appearance_write: boolean;
       attachment_download: boolean;
       push: "none" | "websocket";
       source: "graph";
@@ -2195,6 +2209,7 @@ export class IndexCore implements TokenProvider {
       await this.#state.put("sync:server_id", serverId);
     }
     const myDay = myDayEnabled(this.#env);
+    const appearance = myDay && !this.#substrateUnavailable && !this.#appearanceUnavailable;
     return {
       server_id: serverId,
       cursor: currentCursor(this.#sql),
@@ -2210,7 +2225,12 @@ export class IndexCore implements TokenProvider {
         sub_resources: checklistCacheEnabled(this.#env),
         // Sidebar groups, order and theme are read from Substrate (section
         // 10.4). Off when the Exchange Online scope is missing or refused.
-        list_appearance: myDay && !this.#substrateUnavailable && !this.#appearanceUnavailable,
+        list_appearance: appearance,
+        // list.update theme/group_id and list.reorder (section 5.2). A flag of
+        // its own because servers that read appearance predate the writes: an
+        // app gating writes on list_appearance would send them to a server
+        // that rejects them.
+        list_appearance_write: appearance,
         // GET /api/v1/attachments/{sid} streams an attachment's bytes.
         attachment_download: true,
         push: "websocket",
@@ -2624,6 +2644,7 @@ export class IndexCore implements TokenProvider {
     this.#substrateUnavailable = false;
     this.#appearanceUnavailable = false;
     await this.#state.delete(APPEARANCE_BACKOFF_KEY);
+    await this.#state.delete(APPEARANCE_FIRST_READ_KEY);
     // Kill every MCP grant paired with the outgoing account; the new account's
     // grant is issued under the fresh epoch right after this wipe.
     await this.#newEpoch();
@@ -3043,6 +3064,7 @@ export class IndexCore implements TokenProvider {
     // An owner switch during the reads (resetIdentity) makes them the old
     // account's sidebar: nothing from them is written.
     const gen = this.#identityGeneration;
+    const writeGen = this.#sidebarWriteGen;
     try {
       const sub = await this.#substrateForScan();
       // Both reads before any write, so a failed second read changes nothing.
@@ -3051,7 +3073,18 @@ export class IndexCore implements TokenProvider {
       const folders = await sub.listFolders({ fast: true });
       const groups = await sub.listFolderGroups({ fast: true });
       if (gen !== this.#identityGeneration) return;
+      if (writeGen !== this.#sidebarWriteGen) {
+        // A write stored during the GETs may be missing from them; applying
+        // them would undo it. last_synced_at stays, so the next cycle reads again.
+        log.info("list_appearance_read_superseded", {});
+        return;
+      }
       const r = this.applyListAppearance(folders, groups, listIds, now);
+      if ((await this.#state.get<number>(APPEARANCE_FIRST_READ_KEY)) === undefined) {
+        // The apply's time, not the read's start: the groups' entity_map rows
+        // are stamped as they are inserted, after the GETs.
+        await this.#state.put(APPEARANCE_FIRST_READ_KEY, Date.now());
+      }
       this.#setSyncState(APPEARANCE_STATE_KEY, { last_synced_at: now, status: "idle", last_error: null });
       if (backoff) await this.#state.delete(APPEARANCE_BACKOFF_KEY);
       log.info("list_appearance_synced", r);
@@ -3142,6 +3175,64 @@ export class IndexCore implements TokenProvider {
         groups_deleted: deleted,
         groups_kept_unconfirmed: !groupsComplete,
       };
+    });
+  }
+
+  // The sidebar as the mirror last read it: each list's group and position,
+  // and each group's position (docs/SYNC-API.md section 10.4). Excluded lists
+  // are included: they still hold a place in To Do's sidebar.
+  sidebar(): {
+    lists: Array<{ list_id: string; group_id: string | null; order_datetime: string | null; wellknown: string | null }>;
+    groups: Array<{ group_id: string; order_datetime: string | null }>;
+  } {
+    return {
+      lists: this.#sql
+        .exec<{ list_id: string; group_id: string | null; order_datetime: string | null; wellknown: string | null }>(
+          "SELECT list_id, group_id, order_datetime, wellknown FROM lists",
+        )
+        .toArray(),
+      groups: this.#sql
+        .exec<{ group_id: string; order_datetime: string | null }>("SELECT group_id, order_datetime FROM list_groups")
+        .toArray(),
+    };
+  }
+
+  // When the first sidebar read succeeded, or null if none has.
+  async sidebarFirstReadAt(): Promise<number | null> {
+    return (await this.#state.get<number>(APPEARANCE_FIRST_READ_KEY)) ?? null;
+  }
+
+  // Stores one folder as a write returned it (ops setListAppearance), the
+  // same columns a sidebar read sets. A group the mirror hasn't read yet is
+  // stored as named; the next sidebar read adds the group itself.
+  storeFolderAppearance(folder: SubstrateFolder): void {
+    this.#sidebarWriteGen++;
+    this.#sql.exec(
+      `UPDATE lists SET group_id = ?, order_datetime = ?, theme_color = ?, theme_background = ? WHERE list_id = ?`,
+      folder.ParentFolderGroupId ?? null, folder.OrderDateTime ?? null,
+      rawAppearance(folder.ThemeColor), rawAppearance(folder.ThemeBackground), folder.Id,
+    );
+  }
+
+  // Stores one list group as a write returned it (ops/lists.ts), the same
+  // columns a sidebar read sets. The insert trigger logs it; on a create the
+  // caller has reserved the app's sid first, so none is minted.
+  storeFolderGroup(group: SubstrateFolderGroup): void {
+    this.#sidebarWriteGen++;
+    this.#sql.exec(
+      `INSERT INTO list_groups (group_id, name, order_datetime) VALUES (?, ?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, order_datetime = excluded.order_datetime`,
+      group.Id, group.Name ?? null, group.OrderDateTime ?? null,
+    );
+  }
+
+  // Drops a deleted group the way a sidebar read does: its lists are
+  // ungrouped first, so each is logged again with group_id null.
+  removeFolderGroup(groupId: string): void {
+    this.#sidebarWriteGen++;
+    this.#transact(() => {
+      this.#sql.exec("UPDATE lists SET group_id = NULL WHERE group_id = ?", groupId);
+      this.#sql.exec("DELETE FROM list_groups WHERE group_id = ?", groupId);
     });
   }
 

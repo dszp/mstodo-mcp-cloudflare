@@ -10,6 +10,7 @@ import {
   runListAppearanceIdentityChecks,
   runListAppearanceMigrationChecks,
   runListAppearanceRefusedChecks,
+  runListAppearanceSupersededChecks,
 } from "../test/_list-appearance-checks";
 
 function memoryKv() {
@@ -61,6 +62,12 @@ describe("list appearance: owner change during the read (node)", async () => {
   for (const [name, ok] of Object.entries(r)) it(name, () => expect(ok).toBe(true));
 });
 
+describe("list appearance: a write during the read (node)", async () => {
+  const { c, env, sql } = core();
+  const r = await runListAppearanceSupersededChecks(c, env, sql);
+  for (const [name, ok] of Object.entries(r)) it(name, () => expect(ok).toBe(true));
+});
+
 describe("list appearance: Exchange Online scope refused (node)", async () => {
   const { c, env } = core();
   const r = await runListAppearanceRefusedChecks(c, env);
@@ -88,7 +95,9 @@ describe("list appearance: My Day off (node)", () => {
       await c.runSyncCycle();
       expect(urls.some((u) => u.includes("substrate.office.com"))).toBe(false);
       expect(c.getList("N1")?.theme_color ?? null).toBeNull();
-      expect((await c.syncInfo()).capabilities.list_appearance).toBe(false);
+      const caps = (await c.syncInfo()).capabilities;
+      expect(caps.list_appearance).toBe(false);
+      expect(caps.list_appearance_write).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }

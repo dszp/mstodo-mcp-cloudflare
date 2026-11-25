@@ -15,7 +15,21 @@ import { GraphError } from "../graph/client";
 import { SubstrateError } from "../graph/substrate-client";
 import { bestEffort, type OpsContext } from "../ops/context";
 import { createLink, deleteLink, findCreatedLinks, updateLink } from "../ops/links";
-import { createList, deleteList, findCreatedLists, setListSync, updateList } from "../ops/lists";
+import {
+  adoptCreatedListGroup,
+  createList,
+  createListGroup,
+  deleteList,
+  deleteListGroup,
+  findCreatedListGroups,
+  findCreatedLists,
+  renameListGroup,
+  reorderList,
+  reorderListGroup,
+  setListAppearance,
+  setListSync,
+  updateList,
+} from "../ops/lists";
 import { LIST_SYNC_VALUES, type ListSync } from "../config/sync-policy";
 import { addToMyDay, removeFromMyDay, reorderMyDayTask, todayInTimeZone } from "../ops/my-day";
 import type { ReorderPosition } from "../ops/position";
@@ -129,7 +143,7 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
     if (!myDayEnabled(ctx.env)) return rejected("my_day_disabled");
   }
   const graphId = input.graphId ?? "";
-  const ref = (key: "list_id" | "task_id"): string => {
+  const ref = (key: "list_id" | "task_id" | "group_id"): string => {
     const sid = fields[key];
     if (typeof sid !== "string") return invalid(key);
     // applyBatch resolved every sid in fields before calling.
@@ -149,10 +163,17 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       return r.ok ? applied(r.value.list.id) : rejected(r.reason);
     }
     case "list.update": {
-      // Either field alone is an update; a list.update with neither is invalid.
+      // Any one field is an update; a list.update with none is invalid.
       const sync = fields.sync;
-      const name = fields.name !== undefined || sync === undefined ? requiredText(fields, "name") : undefined;
+      const theme = fields.theme === undefined ? undefined : listTheme(fields.theme);
+      // group_id: a group's sid (applyBatch resolved it to the Substrate Id),
+      // or null to ungroup.
+      const group_id =
+        fields.group_id === undefined ? undefined : fields.group_id === null ? null : ref("group_id");
+      const appearance = theme !== undefined || group_id !== undefined;
+      const name = fields.name !== undefined || (sync === undefined && !appearance) ? requiredText(fields, "name") : undefined;
       if (sync !== undefined && !(LIST_SYNC_VALUES as readonly unknown[]).includes(sync)) invalid("sync");
+      if (appearance && !myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
       if (name !== undefined) {
         const r = await updateList(ctx, { list_id: graphId, display_name: name });
         if (!r.ok) return rejected(r.reason);
@@ -161,7 +182,55 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
         const r = await setListSync(ctx, { list_id: graphId, sync: sync as ListSync });
         if (!r.ok) return rejected(r.reason);
       }
+      if (appearance) {
+        const r = await setListAppearance(ctx, { list_id: graphId, theme, group_id });
+        if (!r.ok) return rejected(r.reason);
+      }
       return applied(graphId);
+    }
+    case "list.reorder": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      if (!input.position) invalid("position");
+      const position = await sidebarPosition(ctx, input.position!);
+      if (!position) return rejected("unknown_reference");
+      const r = await reorderList(ctx, { list_id: graphId, position });
+      return r.ok ? applied(graphId) : rejected(r.reason);
+    }
+
+    case "list_group.create": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      const name = requiredText(fields, "name");
+      if (input.priorAttemptMs !== undefined) {
+        // An earlier attempt may have made it (section 5.4).
+        const found = await findCreatedListGroups(ctx, { name, since_ms: input.priorAttemptMs });
+        if (found === "unknown" || found.length > 1) return rejected("ambiguous_create");
+        if (found.length === 1) {
+          await adoptCreatedListGroup(ctx, found[0], input.sid);
+          return applied(found[0].Id);
+        }
+      }
+      const position = input.position ? await sidebarPosition(ctx, input.position) : undefined;
+      if (position === null) return rejected("unknown_reference");
+      const r = await createListGroup(ctx, { name, sid: input.sid, position });
+      return r.ok ? applied(r.value.group_id) : rejected(r.reason);
+    }
+    case "list_group.update": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      const r = await renameListGroup(ctx, { group_id: graphId, name: requiredText(fields, "name") });
+      return r.ok ? applied(graphId) : rejected(r.reason);
+    }
+    case "list_group.reorder": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      if (!input.position) invalid("position");
+      const position = await sidebarPosition(ctx, input.position!);
+      if (!position) return rejected("unknown_reference");
+      const r = await reorderListGroup(ctx, { group_id: graphId, position });
+      return r.ok ? applied(graphId) : rejected(r.reason);
+    }
+    case "list_group.delete": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      const r = await deleteListGroup(ctx, { group_id: graphId });
+      return deleted(r, graphId, "list_group_not_found");
     }
     case "list.delete": {
       const r = await deleteList(ctx, { list_id: graphId });
@@ -415,7 +484,48 @@ async function listOfTask(ctx: OpsContext, taskId: string): Promise<string | nul
   return (await ctx.index.findListForTask(taskId))?.list_id ?? null;
 }
 
+// A sidebar position. A before/after neighbour is a list or a group, which
+// applyBatch leaves to the executor; null when it names neither.
+async function sidebarPosition(
+  ctx: OpsContext,
+  p: Position,
+): Promise<{ kind: "top" | "bottom" } | { kind: "before" | "after"; reference_id: string } | null> {
+  if ("top" in p) return { kind: "top" };
+  if ("bottom" in p) return { kind: "bottom" };
+  const kind = "before" in p ? "before" : "after";
+  const sid = normalizeSid("before" in p ? p.before : p.after);
+  const r = await ctx.index.resolveSids([{ kind: "list", sid }, { kind: "list_group", sid }]);
+  const hit = [r[`list:${sid}`], r[`list_group:${sid}`]].find((x) => x?.graph_id && x.live);
+  return hit?.graph_id ? { kind, reference_id: hit.graph_id } : null;
+}
+
 // ---- field translation -----------------------------------------------------
+
+// A list theme. Only the color is writable, and only a name To Do itself
+// wrote: Substrate stores any string, and a name To Do doesn't know fails
+// silently at best (a client may also crash on it; suspected 2026-11-25 on
+// iOS with a list themed purple/beach; "beach" was a guess). The 14 are iOS
+// To Do's swatches in its picker order, read back from Substrate on
+// 2026-11-25. "blue" is the value every new list gets, and "purple" renders
+// in To Do web. The background isn't writable until its names are
+// known. There is no "no theme": Substrate ignores null and stores "" as
+// given, so neither is accepted.
+export const THEME_COLORS: ReadonlySet<string> = new Set([
+  "blue",
+  "purple",
+  ...["dark", "light"].flatMap((shade) =>
+    ["blue", "purple", "rose", "red", "green", "teal", "grey"].map((c) => `${shade}_${c}`),
+  ),
+]);
+function listTheme(v: unknown): { color: string } {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return invalid("theme");
+  const keys = Object.keys(v);
+  const color = (v as { color?: unknown }).color;
+  if (keys.length !== 1 || keys[0] !== "color" || typeof color !== "string" || !THEME_COLORS.has(color)) {
+    return invalid("theme");
+  }
+  return { color };
+}
 
 function requiredText(fields: Record<string, unknown>, key: string): string {
   const v = fields[key];
