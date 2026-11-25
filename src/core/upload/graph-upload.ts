@@ -173,11 +173,11 @@ async function sessionAttach(
   graph: GraphClient,
   accessToken: string,
   args: AttachArgs,
+  // Same-name attachments on the task before attachFile began (null: unknown),
+  // so a commit Graph reports as a failure can be told apart (see below).
+  before: Set<string> | null,
 ): Promise<UploadResult> {
   const total = args.bytes.byteLength;
-  // Same-name attachments already on the task, so a commit that Graph reports
-  // as a failure can be told apart from what was there before (see below).
-  const before = await sameNameIds(graph, args);
   const session = await graph.postJson(
     `${attachmentsUrl(args.listId, args.taskId)}/createUploadSession`,
     { attachmentInfo: { attachmentType: "file", name: args.name, size: total } },
@@ -259,13 +259,18 @@ async function sameNameIds(graph: GraphClient, args: AttachArgs): Promise<Set<st
     const all = await listExistingFileAttachments(graph, args.listId, args.taskId);
     return new Set(all.filter((a) => a.name === args.name).map((a) => a.id));
   } catch (e) {
-    log.warn("upload_session_snapshot_failed", { task_id: args.taskId, error: String(e) });
+    log.warn("upload_snapshot_failed", { task_id: args.taskId, error: String(e) });
     return null;
   }
 }
 
-async function findCommitted(graph: GraphClient, args: AttachArgs, before: Set<string>): Promise<string | null> {
-  for (const ms of COMMIT_CHECK_DELAYS_MS) {
+async function findCommitted(
+  graph: GraphClient,
+  args: AttachArgs,
+  before: Set<string>,
+  delaysMs: readonly number[] = COMMIT_CHECK_DELAYS_MS,
+): Promise<string | null> {
+  for (const ms of delaysMs) {
     if (ms > 0) await new Promise((r) => setTimeout(r, ms));
     try {
       const all = await listExistingFileAttachments(graph, args.listId, args.taskId);
@@ -293,14 +298,34 @@ async function cancelSession(uploadUrl: string, accessToken: string): Promise<vo
  * Attach a file to a To Do task, choosing the inline or upload-session path by
  * size. Throws GraphError on a Graph failure (mapped by the caller). The caller
  * must enforce PER_FILE_MAX_BYTES before calling.
+ *
+ * Graph can answer 500 generalException to an inline POST (seen live,
+ * 2026-11-24: every inline POST on the Servant Voice account, whatever the task
+ * ID form or Prefer header, with nothing stored). On an inline 5xx we look once
+ * for a new attachment of this name, then send the file through an upload
+ * session, whose 5xx handling is in sessionAttach. Without a same-name snapshot
+ * the inline error stands: a blind retry could attach the file twice.
  */
 export async function attachFile(
   graph: GraphClient,
   accessToken: string,
   args: AttachArgs,
 ): Promise<UploadResult> {
+  const before = await sameNameIds(graph, args);
   if (args.bytes.byteLength <= args.maxInlineBytes) {
-    return inlineAttach(graph, args);
+    try {
+      return await inlineAttach(graph, args);
+    } catch (e) {
+      if (!(e instanceof GraphError) || e.status < 500 || before === null) throw e;
+      // One immediate look: inline failures seen so far stored nothing, even
+      // 4 s later, so the session retry shouldn't wait out the full schedule.
+      const id = await findCommitted(graph, args, before, [0]);
+      if (id !== null) {
+        log.warn("upload_inline_commit_after_error", { status: e.status, task_id: args.taskId });
+        return { attachment_id: id, name: args.name, size: args.bytes.byteLength, content_type: args.contentType, via: "inline" };
+      }
+      log.warn("upload_inline_error_retry_session", { status: e.status, task_id: args.taskId });
+    }
   }
-  return sessionAttach(graph, accessToken, args);
+  return sessionAttach(graph, accessToken, args, before);
 }

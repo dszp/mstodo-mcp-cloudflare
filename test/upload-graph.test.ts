@@ -180,3 +180,95 @@ describe("attachFile — Graph reports a failure after committing", () => {
     }
   });
 });
+
+// Graph answered 500 generalException to every inline POST on a live account
+// (nothing stored) while upload sessions stored the file and still answered the
+// final PUT with 500. An inline 5xx falls through to a session.
+describe("attachFile — inline 5xx", () => {
+  const SESSION_URL = "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/attachmentSessions/S1";
+  const graph500 = () =>
+    Response.json({ error: { code: "generalException", message: "Internal Server Error" } }, { status: 500 });
+  const att = (id: string, name: string) => ({ "@odata.type": "#microsoft.graph.taskFileAttachment", id, name, size: 300 });
+
+  // A fake task: `stored` is what a GET of the collection returns; each option
+  // says what a write answers and whether the file lands.
+  function fakeTask(opts: {
+    initial?: { id: string; name: string }[];
+    listStatus?: number;
+    inline: "500-stored" | "500-lost";
+    finalPut?: "201" | "500-stored";
+  }) {
+    const stored = [...(opts.initial ?? [])];
+    install((c) => {
+      if (c.url.endsWith("/attachments") && c.method === "GET") {
+        if (opts.listStatus) return new Response("nope", { status: opts.listStatus });
+        return Response.json({ value: stored.map((a) => att(a.id, a.name)) });
+      }
+      if (c.url.endsWith("/attachments") && c.method === "POST") {
+        if (opts.inline === "500-stored") stored.push({ id: "INLINE_STORED", name: "file.bin" });
+        return graph500();
+      }
+      if (c.url.endsWith("/createUploadSession")) {
+        return Response.json({ uploadUrl: SESSION_URL, nextExpectedRanges: ["0-"] });
+      }
+      if (c.url === `${SESSION_URL}/content` && c.method === "PUT") {
+        if (opts.finalPut === "500-stored") {
+          stored.push({ id: "SESSION_STORED", name: "file.bin" });
+          return graph500();
+        }
+        stored.push({ id: "SESSION1", name: "file.bin" });
+        return new Response(null, {
+          status: 201,
+          headers: { Location: "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/attachments/SESSION1" },
+        });
+      }
+      if (c.method === "DELETE") return new Response(null, { status: 204 });
+      return new Response("unexpected", { status: 418 });
+    });
+  }
+  const small = () => new Uint8Array([1, 2, 3]);
+  const INLINE_MAX = 3072 * 1024;
+  const writes = () => calls.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.url.split("/").pop()}`);
+
+  it("with nothing stored, sends the file through an upload session", async () => {
+    fakeTask({ inline: "500-lost", finalPut: "201" });
+    const r = await attachFile(graph, "tok", args(small(), INLINE_MAX));
+    expect(r).toMatchObject({ via: "session", attachment_id: "SESSION1", size: 3 });
+    expect(writes()).toEqual(["POST attachments", "POST createUploadSession", "PUT content"]);
+  });
+
+  it("when the session's final PUT also answers 500 but stores the file, reports it attached", async () => {
+    fakeTask({ inline: "500-lost", finalPut: "500-stored" });
+    const r = await attachFile(graph, "tok", args(small(), INLINE_MAX));
+    expect(r).toMatchObject({ via: "session", attachment_id: "SESSION_STORED", size: 3 });
+    expect(writes()).toEqual(["POST attachments", "POST createUploadSession", "PUT content"]);
+  });
+
+  it("when the POST stored the file anyway, returns it without a session", async () => {
+    fakeTask({ inline: "500-stored" });
+    const r = await attachFile(graph, "tok", args(small(), INLINE_MAX));
+    expect(r).toMatchObject({ via: "inline", attachment_id: "INLINE_STORED", name: "file.bin", size: 3 });
+    expect(writes()).toEqual(["POST attachments"]);
+  });
+
+  it("doesn't take a same-name attachment that was already there for the new one", async () => {
+    fakeTask({ initial: [{ id: "OLD", name: "file.bin" }], inline: "500-lost", finalPut: "201" });
+    const r = await attachFile(graph, "tok", args(small(), INLINE_MAX));
+    expect(r.attachment_id).toBe("SESSION1");
+  });
+
+  it("without a readable snapshot, the inline 500 stands (no blind retry)", async () => {
+    fakeTask({ listStatus: 404, inline: "500-lost", finalPut: "201" });
+    await expect(attachFile(graph, "tok", args(small(), INLINE_MAX))).rejects.toMatchObject({ status: 500 });
+    expect(writes()).toEqual(["POST attachments"]);
+  });
+
+  it("a 4xx is neither checked nor retried", async () => {
+    install((c) => {
+      if (c.method === "GET") return Response.json({ value: [] });
+      return Response.json({ error: { code: "ErrorInvalidIdMalformed" } }, { status: 400 });
+    });
+    await expect(attachFile(graph, "tok", args(small(), INLINE_MAX))).rejects.toMatchObject({ status: 400 });
+    expect(writes()).toEqual(["POST attachments"]);
+  });
+});

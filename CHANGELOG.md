@@ -7,21 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **List groups, sidebar order and theme in the sync feed** (docs/SYNC-API.md section 10.4),
-  read-only from Substrate. Feed lists carry `group_id`, `sort_key` and `theme`; groups
-  arrive as a new `list_group` kind; `/sync/info` reports `capabilities.list_appearance`.
-  The server reads the sidebar (two Substrate GETs) on a calm cycle once per
-  `DELTA_SYNC_INTERVAL_MIN`, and when a new list appears. Needs `ENABLE_MY_DAY`; without
-  it the fields stay `null`. Migration v12 adds the columns and the `list_groups` table.
-
-### Fixed
-- **Uploads over the inline limit no longer report a failure for a file that attached.**
-  Graph can answer the last chunk of an upload session with a 500 after it has stored the
-  attachment (seen with a 6 MB PDF). The upload page then said the file failed, and a retry
-  said "duplicate". The server now looks for a new attachment of that name before reporting
-  an error.
-
 ### Changed
 - **A list's class is now its sync setting** (docs/SYNC-API.md section 1.2). `todo` and
   unclassified lists sync as before, with a Graph subscription. `reference` lists sync after
@@ -44,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since My Day tasks in them (flagged emails, for one) are missing from it.
 
 ### Added
+- **List groups, sidebar order and theme in the sync feed** (docs/SYNC-API.md section 10.4),
+  read-only from Substrate. Feed lists carry `group_id`, `sort_key` and `theme`; groups
+  arrive as a new `list_group` kind; `/sync/info` reports `capabilities.list_appearance`.
+  The server reads the sidebar (two Substrate GETs) on a calm cycle once per
+  `DELTA_SYNC_INTERVAL_MIN`, and when a new list appears. Needs `ENABLE_MY_DAY`; without
+  it the fields stay `null`. Migration v12 adds the columns and the `list_groups` table.
 - Sync API: lists in the change feed carry `sync` (`todo` | `reference`); `list.update` accepts
   `sync`; `GET /api/v1/lists/excluded` lists the excluded lists by sid. Task, My Day, step and
   link mutations that touch an excluded list are rejected with `list_excluded`.
@@ -56,6 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `filename*`, as RFC 5987 requires; a `'` in a filename could end the charset prefix early.
 - A `/download` filename longer than 255 characters that ended in an emoji, or that held a lone
   surrogate, made the response fail; the name is now cut by character and made well-formed.
+- **Uploads over the inline limit no longer report a failure for a file that attached.**
+  Graph can answer the last chunk of an upload session with a 500 after it has stored the
+  attachment (seen with a 6 MB PDF). The upload page then said the file failed, and a retry
+  said "duplicate". The server now looks for a new attachment of that name before reporting
+  an error.
+- **Uploads at or under the inline limit (3 MiB by default) attach again.** Graph has been
+  answering every inline attachment POST with 500 `generalException` and storing nothing, so
+  every small file on the upload page, and every small attachment `move_task` copies, failed
+  with `graph_500`. After an inline 5xx the server now checks whether the file landed and, if
+  not, sends it through an upload session instead.
 - `set_list_config` no longer clears the `archive` list, and `set_list_alias` no longer clears
   every pin and the `archive` list.
 - A list excluded while the sync cycle was fetching it is no longer filled back in and
