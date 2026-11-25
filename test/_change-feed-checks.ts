@@ -169,6 +169,7 @@ export function runManyListFilterChecks(c: IndexCore) {
   return {
     "query filters by 151 lists": ok(() => c.query({ lists: many } as never)) && c.query({ lists: many } as never).rows.some((r) => r.task_id === "MT"),
     "search filters by 151 lists": ok(() => c.search({ query: "needle", lists: many } as never)),
+    "search with steps filters by 151 lists": ok(() => c.search({ query: "needle", lists: many, include_checklist: true } as never)),
     "step search filters by 151 lists": ok(() => c.searchChecklistItems({ query: "x", lists: many } as never)),
     "the step backfill skips 151 lists": ok(() => c.selectDueChecklistTasks(10, many.slice(1), many.slice(1))),
     "a skipped list's tasks stay out of the backfill": !c.selectDueChecklistTasks(10, many, []).some((t) => t.task_id === "MT"),
