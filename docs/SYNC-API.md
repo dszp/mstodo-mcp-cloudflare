@@ -1572,7 +1572,6 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 - 2026-11-25: sections 5.2 and 10.4: `list.update` takes `theme` and `group_id`, and
   `list.reorder` moves a list in the sidebar. Groups stay read-only.
-
 - 2026-11-25: section 5.2: `step.reorder` gives a task's unordered steps order values in
   their shown order before the move, instead of failing with `reference_has_no_order`.
 - 2026-11-25: section 4.7 added: `GET /api/v1/link-rules` and `link_rules_rev` in
