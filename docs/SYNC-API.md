@@ -1098,12 +1098,14 @@ are ISO 8601 instants but not all in one form: some carry milliseconds
 (`2026-11-23T23:45:45.623Z`) and some don't (`2026-11-23T23:45:47Z`). Parse them as
 instants before comparing; comparing the strings puts some in the wrong order.
 
-What isn't known yet:
+**Sidebar order.** A later `sort_key` is nearer the top, the same direction as tasks.
+Groups and top-level lists share one ordering, and lists inside a group are ordered the
+same way within it. The default list (`sort_key` `null`) isn't part of this order: To Do
+shows it at the top with the smart lists. Confirmed on 2026-11-24 against the To Do web
+sidebar of a test account: a group keyed `…45:49.248Z` sat above a group keyed
+`…45:45.623Z`, which sat above a list keyed 2026-05-19.
 
-- The full set of theme names.
-- Whether a higher or lower `sort_key` is nearer the top. For tasks, a later
-  `OrderDateTime` is nearer the top. Groups and lists appear to share one ordering
-  across the sidebar; a reorder test on a live account confirms both.
+The full set of theme names isn't known yet.
 
 Collapsed or expanded state isn't stored by Microsoft. The app keeps it locally.
 
@@ -1450,6 +1452,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-25: section 10.4's open question on sidebar order closed: a later
+  `sort_key` is nearer the top, groups and lists sharing one ordering.
 - 2026-11-24: section 10.4 built read-only. Lists in the feed carry `group_id`,
   `sort_key` and `theme`; a new `list_group` kind; `capabilities.list_appearance`.
 - 2026-11-24: section 8.1 rewritten for what is built: the server-side Access check on
