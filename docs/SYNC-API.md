@@ -548,8 +548,8 @@ The owner's link rules turn text in a task into the task's link: a ticket number
 title becomes a link to the ticket. The server applies them after every write that
 changes a title or body through this server, from a sync mutation or an MCP tool, and
 the resulting link reaches the app in the feed like any other. An edit made in
-Microsoft To Do itself doesn't run them. This route lets the app also mark matches in titles and notes as the person
-types, before that link exists.
+Microsoft To Do itself doesn't run them. This route lets the app also mark matches in
+titles and notes as the person types, before that link exists.
 
 ```json
 {
@@ -592,7 +592,7 @@ it has. A server without the field predates this route.
   match becomes the link. Every other match only gets a highlight in the app.
 - A task that already has a link, including the link Outlook adds to a flagged email,
   gets no new one.
-- The server matches only the first 8 KB of a note.
+- The server matches only the first 8,192 characters of a note.
 
 **Running the patterns on Apple platforms.** `NSRegularExpression` (ICU) accepts the
 syntax these rules use, including lookahead, lookbehind and named groups. Where it
