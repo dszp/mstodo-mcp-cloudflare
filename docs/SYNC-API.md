@@ -692,8 +692,11 @@ value: `null` and `""` are rejected with `invalid_field:theme`. `group_id` is a 
 the list's own container: for a list in a group, another list in that group; for a
 top-level list, another top-level list or a group. Any other reference is `rejected` with
 `reference_not_sibling`. The default list can't be grouped or moved (`default_list`).
-These need `capabilities.list_appearance`; without it they are `rejected` with
-`list_appearance_unavailable`.
+These need `capabilities.list_appearance_write`; without it they are `rejected` with
+`list_appearance_unavailable`, or, on a server older than these writes, with an
+unknown field or op. A server that reports `list_appearance` but not
+`list_appearance_write` sends groups, order and theme in the feed and accepts none of
+these edits.
 
 `position` is `{ "before": sid }`, `{ "after": sid }`, `{ "top": true }` or
 `{ "bottom": true }`. The server converts it to an order value with the existing
@@ -1340,7 +1343,8 @@ to build now:
     "account": { "name": "David (work)", "email_hint": "d…@…" },
     "version": "0.18.0",
     "capabilities": { "my_day": true, "step_order": true, "sub_resources": true,
-                      "list_appearance": true, "attachment_download": true,
+                      "list_appearance": true, "list_appearance_write": true,
+                      "attachment_download": true,
                       "push": "websocket",
                       "source": "graph" },
     "link_rules_rev": "9f2c4e01a7b3d5e6"
@@ -1352,7 +1356,8 @@ to build now:
   account's local data by it, so re-adding the same server is recognized.
   `capabilities` tells the app what this server supports: a deployment without the
   Exchange Online scope has no My Day, no step order and no list appearance
-  (`list_appearance`: sidebar groups, order and theme, section 10.4), and a deployment whose
+  (`list_appearance`: sidebar groups, order and theme in the feed, section 10.4;
+  `list_appearance_write`: changing them, section 5.2), and a deployment whose
   Microsoft account can't receive Graph change notifications has slower push. The
   app hides or degrades features per account instead of assuming every server is the
   same.
@@ -1571,7 +1576,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 ## Revisions
 
 - 2026-11-25: sections 5.2 and 10.4: `list.update` takes `theme` and `group_id`, and
-  `list.reorder` moves a list in the sidebar. Groups stay read-only.
+  `list.reorder` moves a list in the sidebar. Groups stay read-only. New
+  `capabilities.list_appearance_write` says the server accepts these edits.
 - 2026-11-25: section 5.2: `step.reorder` gives a task's unordered steps order values in
   their shown order before the move, instead of failing with `reference_has_no_order`.
 - 2026-11-25: section 4.7 added: `GET /api/v1/link-rules` and `link_rules_rev` in

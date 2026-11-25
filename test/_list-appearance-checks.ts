@@ -310,6 +310,7 @@ export async function runListAppearanceCycleChecks(
         m.folderQueries?.[0] === "$select=Id,OrderDateTime,ParentFolderGroupId,ThemeColor,ThemeBackground",
       "every Substrate call is a GET": m.substrate.every((p) => p.startsWith("GET ")),
       "list_appearance is on while Substrate works": info.capabilities.list_appearance === true,
+      "list_appearance_write is on while Substrate works": info.capabilities.list_appearance_write === true,
       "the next cycle within the interval doesn't read again": afterSecond === afterFirst,
       "a new list makes the next cycle read": afterNewList === afterSecond + 2 && c.getList("C3")?.theme_color === "purple",
       "a read a sync interval old is repeated": afterInterval === afterNewList + 2,
@@ -326,6 +327,7 @@ export async function runListAppearanceCycleChecks(
       "a 403 doesn't fail the cycle": !deniedCycleThrew,
       "after a 403 the sidebar isn't read again": reads(m) === beforeDenied,
       "after a 403 list_appearance is off": infoDenied.capabilities.list_appearance === false,
+      "after a 403 list_appearance_write is off": infoDenied.capabilities.list_appearance_write === false,
       "a 403 on the sidebar leaves My Day on": exoToken === "EXO" && myDayCallsAfter > myDayCallsBefore,
     };
   } finally {
@@ -352,6 +354,7 @@ export async function runListAppearanceRefusedChecks(c: IndexCore, env: AppEnv) 
       "the appearance columns stay null": row?.theme_color == null && row?.order_datetime == null && row?.group_id == null,
       "the feed sends null appearance": feed?.data.theme.color === null && feed.data.sort_key === null && feed.data.group_id === null,
       "list_appearance is off": info.capabilities.list_appearance === false,
+      "list_appearance_write is off": info.capabilities.list_appearance_write === false,
     };
   } finally {
     vi.unstubAllGlobals();

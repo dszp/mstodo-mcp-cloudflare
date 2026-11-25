@@ -88,7 +88,9 @@ describe("list appearance: My Day off (node)", () => {
       await c.runSyncCycle();
       expect(urls.some((u) => u.includes("substrate.office.com"))).toBe(false);
       expect(c.getList("N1")?.theme_color ?? null).toBeNull();
-      expect((await c.syncInfo()).capabilities.list_appearance).toBe(false);
+      const caps = (await c.syncInfo()).capabilities;
+      expect(caps.list_appearance).toBe(false);
+      expect(caps.list_appearance_write).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }

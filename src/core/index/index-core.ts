@@ -2187,6 +2187,7 @@ export class IndexCore implements TokenProvider {
       step_order: boolean;
       sub_resources: boolean;
       list_appearance: boolean;
+      list_appearance_write: boolean;
       attachment_download: boolean;
       push: "none" | "websocket";
       source: "graph";
@@ -2198,6 +2199,7 @@ export class IndexCore implements TokenProvider {
       await this.#state.put("sync:server_id", serverId);
     }
     const myDay = myDayEnabled(this.#env);
+    const appearance = myDay && !this.#substrateUnavailable && !this.#appearanceUnavailable;
     return {
       server_id: serverId,
       cursor: currentCursor(this.#sql),
@@ -2213,7 +2215,12 @@ export class IndexCore implements TokenProvider {
         sub_resources: checklistCacheEnabled(this.#env),
         // Sidebar groups, order and theme are read from Substrate (section
         // 10.4). Off when the Exchange Online scope is missing or refused.
-        list_appearance: myDay && !this.#substrateUnavailable && !this.#appearanceUnavailable,
+        list_appearance: appearance,
+        // list.update theme/group_id and list.reorder (section 5.2). A flag of
+        // its own because servers that read appearance predate the writes: an
+        // app gating writes on list_appearance would send them to a server
+        // that rejects them.
+        list_appearance_write: appearance,
         // GET /api/v1/attachments/{sid} streams an attachment's bytes.
         attachment_download: true,
         push: "websocket",
