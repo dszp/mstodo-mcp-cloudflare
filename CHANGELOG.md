@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports `capabilities.attachment_download`.
 
 ### Fixed
+- `create_upload_link` returns `task_not_found` for a task that isn't in the named list,
+  instead of minting a link whose upload fails after the person has picked files. A task the
+  index already holds in that list is not checked again; any other task costs one Graph read.
 - **Moving a step relative to one that was never dragged works.** Steps get no order value
   until someone drags one, so `reorder_checklist_item` and the sync API's `step.reorder`
   failed with `reference_has_no_order` on most tasks (the app's "Add Step Below", and drag to

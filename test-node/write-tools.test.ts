@@ -36,7 +36,7 @@ function task(id: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-async function harness(opts: { myDay?: boolean; routes: Route[] }) {
+async function harness(opts: { myDay?: boolean; routes: Route[]; vars?: Record<string, string> }) {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(NOW);
   const db: DatabaseSync = openDatabase(":memory:");
@@ -48,6 +48,7 @@ async function harness(opts: { myDay?: boolean; routes: Route[] }) {
     OWNER_EMAIL: "test-owner@example.com",
     ENABLE_MY_DAY: opts.myDay ? "true" : "false",
     ENABLE_CHECKLIST_CACHE: "true",
+    ...opts.vars,
   });
   await storeTokens(env, { access_token: "a", refresh_token: "r", expires_at: NOW + 3_600_000, scope: SCOPES, obtained_at: NOW });
   const calls: Call[] = [];
@@ -523,5 +524,44 @@ describe("error mapping at the tool boundary", () => {
     });
     const r = await h.call("remove_from_my_day", { task_id: "T1", list: "L1" });
     expect(r).toMatchObject({ isError: true, result: { ok: false, reason: "write_busy" } });
+  });
+});
+
+describe("create_upload_link", () => {
+  const vars = { SERVICE_BASE_URL: "https://todo.test" };
+  const live = (m: string, u: string) =>
+    m === "GET" && u === `${G}/L1/tasks/T2` ? json({ id: "T2", title: "fresh task" }) : undefined;
+  const gone = (m: string, u: string) => (m === "GET" && u === `${G}/L1/tasks/NOPE` ? notFound() : undefined);
+
+  it("mints from the index without asking Graph when the task is mirrored in that list", async () => {
+    const h = await harness({ routes: [], vars });
+    h.core.upsertTask(task("T1") as never, "L1");
+    const r = await h.call("create_upload_link", { list: "L1", task_id: "T1" });
+    expect(r.isError).toBe(false);
+    expect(r.result.task_title).toBe("title T1");
+    expect(String(r.result.upload_url)).toMatch(/^https:\/\/todo\.test\/upload\?t=/);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("checks a task the index doesn't hold and labels the link with its live title", async () => {
+    const h = await harness({ routes: [live], vars });
+    const r = await h.call("create_upload_link", { list: "L1", task_id: "T2" });
+    expect(r.isError).toBe(false);
+    expect(r.result.task_title).toBe("fresh task");
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("refuses a task that doesn't exist in the named list", async () => {
+    const h = await harness({ routes: [gone], vars });
+    const r = await h.call("create_upload_link", { list: "L1", task_id: "NOPE" });
+    expect(r.isError).toBe(true);
+    expect(r.result.reason).toBe("task_not_found");
+  });
+
+  it("checks live when the index has the task in a different list", async () => {
+    const h = await harness({ routes: [gone], vars });
+    h.core.upsertTask(task("NOPE") as never, "L9");
+    const r = await h.call("create_upload_link", { list: "L1", task_id: "NOPE" });
+    expect(r.result.reason).toBe("task_not_found");
   });
 });
