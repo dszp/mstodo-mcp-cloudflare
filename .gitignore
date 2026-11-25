@@ -2,6 +2,10 @@
 .claude/local.settings.json
 n8n-workflows/
 
+# The native client's own repository, checked out here so both can be worked
+# on side by side. It is versioned separately.
+/wiederlist/
+
 # Local working copy of the canonical plan — owner reference only, never publish.
 PLAN.md
 
