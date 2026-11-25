@@ -843,10 +843,13 @@ Server → client messages:
 
 - On connect: `{"type":"hello","cursor":"k3v9.18460"}`. The app pulls if its cursor is
   older.
-- After any change: `{"type":"changed","cursor":"k3v9.18461"}`. One edit can send more
-  than one: the write itself, then values the server learns a second or two later
-  (Substrate's manual order, the first fetch of a new task's steps and links). The app
-  pulls on the first and coalesces any that arrive while a pull is running.
+- After any change: `{"type":"changed","cursor":"k3v9.18461"}`. The first change after
+  a quiet spell is sent at once. Changes in the next 3 seconds are held and sent as one
+  message with the newest cursor when the 3 seconds end, so a burst sends at most one
+  message every 3 seconds. One edit can still send two: the write itself, then values
+  the server learns a second or two later (Substrate's manual order, the first fetch of
+  a new task's steps and links). The app pulls on each and coalesces any that arrive
+  while a pull is running.
 - Before closing for token expiry or revocation: `{"type":"reauth"}`.
 
 The app sends nothing except WebSocket pings. A `ping` text message gets `pong`
@@ -1594,6 +1597,9 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-25: section 7.1: `changed` messages are coalesced: one at once, then at most
+  one per 3 seconds while changes keep coming. Measured on the Servant Voice server, a
+  `task.create` went from three messages to two.
 - 2026-11-25: sections 5.2 and 10.4: `list_group.create`, `list_group.update`,
   `list_group.reorder` and `list_group.delete`; groups are no longer read-only.
 - 2026-11-25: sections 5.2 and 10.4: `list.update` takes `theme` and `group_id`, and

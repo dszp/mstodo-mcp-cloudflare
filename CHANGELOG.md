@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **The push socket coalesces `changed` messages** (docs/SYNC-API.md section 7.1). The
+  first change after a quiet spell is sent at once; changes in the next 3 seconds are sent
+  as one message with the newest cursor. A `task.create` through the sync API now sends
+  two messages instead of three, and a baseline sends one every 3 seconds instead of one
+  per page.
 - **A list's class is now its sync setting** (docs/SYNC-API.md section 1.2). `todo` and
   unclassified lists sync as before, with a Graph subscription. `reference` lists sync after
   every todo list in each cycle, get no subscription, and have steps, links and attachments

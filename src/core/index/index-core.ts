@@ -6,6 +6,7 @@ import {
   type TodoTask,
   type TodoTaskList,
 } from "../graph/types";
+import { coalescing } from "../sync/coalesce";
 import {
   loadTokens,
   refreshTokensForScope,
@@ -298,7 +299,8 @@ export class IndexCore implements TokenProvider {
     env: AppEnv;
     notifier?: ChangeNotifier;
   }) {
-    this.#notifier = deps.notifier ?? null;
+    // One message per burst of changes, not one per write (sync/coalesce.ts).
+    this.#notifier = deps.notifier ? coalescing(deps.notifier) : null;
     this.#sql = deps.sql;
     this.#transact = deps.transact;
     this.#state = deps.state;
