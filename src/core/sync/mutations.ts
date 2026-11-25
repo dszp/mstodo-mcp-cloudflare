@@ -14,16 +14,16 @@ export const MUTATION_LEASE_MS = 60_000;
 
 export const OPS = [
   "list.create", "list.update", "list.delete", "list.reorder",
+  "list_group.create", "list_group.update", "list_group.delete", "list_group.reorder",
   "task.create", "task.update", "task.delete", "task.move", "task.reorder",
   "myday.add", "myday.remove", "myday.reorder",
   "step.create", "step.update", "step.delete", "step.reorder",
   "link.create", "link.update", "link.delete",
 ] as const;
 export type MutationOp = (typeof OPS)[number];
-export type EntityKind = "list" | "task" | "step" | "link";
-// What a mutation can name: an entity, or a sidebar group (list.update's
-// group_id), which the app reads but can't create or edit.
-export type RefKind = EntityKind | "list_group";
+export type EntityKind = "list" | "task" | "step" | "link" | "list_group";
+// What a mutation can name.
+export type RefKind = EntityKind;
 
 export type Position = { before: string } | { after: string } | { top: true } | { bottom: true };
 
@@ -52,6 +52,8 @@ export const UPDATABLE: Record<string, readonly string[]> = {
   // `theme` and `group_id` are the list's sidebar appearance (section 10.4),
   // written to Substrate.
   "list.update": ["name", "sync", "theme", "group_id"],
+  // A sidebar list group (section 10.4), written to Substrate.
+  "list_group.update": ["name"],
   "step.update": ["title", "checked"],
   "link.update": ["url", "title"],
 };
@@ -67,6 +69,10 @@ export const ALLOWED_FIELDS: Record<MutationOp, readonly string[]> = {
   "list.create": ["name"],
   "list.delete": [],
   "list.reorder": [],
+  "list_group.create": ["name"],
+  "list_group.update": UPDATABLE["list_group.update"],
+  "list_group.delete": [],
+  "list_group.reorder": [],
   "task.create": ["list_id", ...TASK_FIELDS],
   "task.delete": [],
   "task.move": ["list_id"],
@@ -216,9 +222,9 @@ export function refsOf(m: MutationIn): SidRef[] {
   if (typeof f.list_id === "string") refs.push({ kind: "list", sid: normalizeSid(f.list_id) });
   if (typeof f.task_id === "string") refs.push({ kind: "task", sid: normalizeSid(f.task_id) });
   if (m.op === "list.update" && typeof f.group_id === "string") refs.push({ kind: "list_group", sid: normalizeSid(f.group_id) });
-  // A list.reorder neighbour can be a list or a group; the executor resolves
-  // it against the sidebar itself.
-  if (m.op === "list.reorder") return refs;
+  // A top-level sidebar neighbour (list.reorder, and a group's position) can
+  // be a list or a group; the executor resolves it against the sidebar itself.
+  if (m.op === "list.reorder" || m.op.startsWith("list_group.")) return refs;
   const p = m.position as Record<string, unknown> | undefined;
   for (const k of ["before", "after"]) if (typeof p?.[k] === "string") refs.push({ kind, sid: normalizeSid(p[k] as string) });
   return refs;

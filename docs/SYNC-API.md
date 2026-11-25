@@ -656,6 +656,10 @@ Content-Type: application/json
 | `list.update` | any subset of: `name`, `sync`, `theme`, `group_id` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. `theme`, `group_id`: Substrate `PATCH taskfolders/{id}` (section 10.4). Allowed on an excluded list. |
 | `list.delete` | — | Graph `DELETE` |
 | `list.reorder` | `position` | Substrate `OrderDateTime` on the folder (section 10.4) |
+| `list_group.create` | `name`, optional `position` | Substrate `POST foldergroups` (section 10.4); without a `position` the group goes to the top |
+| `list_group.update` | `name` | Substrate `PATCH foldergroups/{id}` |
+| `list_group.reorder` | `position` | Substrate `OrderDateTime` on the group |
+| `list_group.delete` | — | Each list in the group is moved out (Substrate `PATCH taskfolders/{id}`), then Substrate `DELETE foldergroups/{id}`. The lists stay. |
 | `task.create` | `list_id`, any task field | Graph `POST`, then any Substrate fields |
 | `task.update` | any subset of: `title`, `body`, `status`, `completed_at`, `importance`, `due`, `start`, `reminder`, `categories`, `recurrence` | Graph `PATCH` with only those fields |
 | `task.delete` | — | Graph `DELETE` |
@@ -697,7 +701,8 @@ theme at best, so any other name, a `background`, `null` or `""` is rejected wit
 the list's own container: for a list in a group, another list in that group; for a
 top-level list, another top-level list or a group. Any other reference is `rejected` with
 `reference_not_sibling`. The default list can't be grouped or moved (`default_list`).
-These need `capabilities.list_appearance_write`; without it they are `rejected` with
+A group's `name` is any non-empty text. These ops, and the `list_group` ops, need
+`capabilities.list_appearance_write`; without it they are `rejected` with
 `list_appearance_unavailable`, or, on a server older than these writes, with an
 unknown field or op. A server that reports `list_appearance` but not
 `list_appearance_write` sends groups, order and theme in the feed and accepts none of
@@ -1171,9 +1176,11 @@ Already solved by section 2: the `sid` is the primary key in both modes.
 **Built in Graph mode.** Graph exposes neither groups nor sidebar order. Substrate does
 (see the spike results), so the server mirrors them from Substrate and serves them in
 the change feed. The app changes a list's theme and group with `list.update` and its
-position with `list.reorder` (section 5.2). Each writes the folder in Substrate, and the
-server stores the folder as Substrate returns it, so the change is in the feed at once.
-Groups themselves are read-only: no mutation creates, renames, moves or deletes one.
+position with `list.reorder` (section 5.2), and creates, renames, moves and deletes
+groups with the `list_group` ops. Each writes the folder or group in Substrate, and the
+server stores it as Substrate returns it, so the change is in the feed at once. A
+group's `position` is among the top-level lists and the other groups, like a top-level
+list's; the reference is a list or a group sid.
 
 Observed on the Servant Voice account (2026-11-25): Substrate accepted `ThemeColor`,
 `ThemeBackground`, `ParentFolderGroupId` (a group's `Id`, or `null` to ungroup) and
@@ -1184,6 +1191,13 @@ whole seconds and refuses a move with `order_precision_exhausted` when no whole 
 lies between the neighbors. Moving a list into a group
 through Substrate leaves its `OrderDateTime` unchanged, unlike a drag in To Do, which
 gives it a new one; send a `list.reorder` after the `list.update` to place it.
+`POST foldergroups` with `Name` and `OrderDateTime` made a group with both, and `PATCH
+foldergroups/{id}` changed either. `DELETE foldergroups/{id}` deleted an empty group
+and refused one that still held a list with a 400, so `list_group.delete` moves the
+lists out first, reading the group's lists from Substrate rather than the mirror, which
+can lag a move made in To Do. A list moved out keeps its `OrderDateTime` and lands
+among the top-level lists by it. A rename made in To Do carries no field clock, so a
+queued `list_group.update` older than it still applies.
 
 **What the server reads.** One read is two Substrate GETs:
 
@@ -1580,8 +1594,10 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-25: sections 5.2 and 10.4: `list_group.create`, `list_group.update`,
+  `list_group.reorder` and `list_group.delete`; groups are no longer read-only.
 - 2026-11-25: sections 5.2 and 10.4: `list.update` takes `theme` and `group_id`, and
-  `list.reorder` moves a list in the sidebar. Groups stay read-only. New
+  `list.reorder` moves a list in the sidebar. New
   `capabilities.list_appearance_write` says the server accepts these edits. A theme write
   sets the color only, from the names To Do renders (`blue`, `purple` and the 14 iOS swatches).
 - 2026-11-25: section 5.2: `step.reorder` gives a task's unordered steps order values in

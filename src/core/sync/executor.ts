@@ -15,7 +15,21 @@ import { GraphError } from "../graph/client";
 import { SubstrateError } from "../graph/substrate-client";
 import { bestEffort, type OpsContext } from "../ops/context";
 import { createLink, deleteLink, findCreatedLinks, updateLink } from "../ops/links";
-import { createList, deleteList, findCreatedLists, reorderList, setListAppearance, setListSync, updateList } from "../ops/lists";
+import {
+  adoptCreatedListGroup,
+  createList,
+  createListGroup,
+  deleteList,
+  deleteListGroup,
+  findCreatedListGroups,
+  findCreatedLists,
+  renameListGroup,
+  reorderList,
+  reorderListGroup,
+  setListAppearance,
+  setListSync,
+  updateList,
+} from "../ops/lists";
 import { LIST_SYNC_VALUES, type ListSync } from "../config/sync-policy";
 import { addToMyDay, removeFromMyDay, reorderMyDayTask, todayInTimeZone } from "../ops/my-day";
 import type { ReorderPosition } from "../ops/position";
@@ -177,21 +191,46 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
     case "list.reorder": {
       if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
       if (!input.position) invalid("position");
-      const p = input.position!;
-      let position: Parameters<typeof reorderList>[1]["position"];
-      if ("top" in p) position = { kind: "top" };
-      else if ("bottom" in p) position = { kind: "bottom" };
-      else {
-        // The neighbour is a list or a group; applyBatch left it to us.
-        const kind = "before" in p ? "before" : "after";
-        const sid = normalizeSid("before" in p ? p.before : p.after);
-        const r = await ctx.index.resolveSids([{ kind: "list", sid }, { kind: "list_group", sid }]);
-        const hit = [r[`list:${sid}`], r[`list_group:${sid}`]].find((x) => x?.graph_id && x.live);
-        if (!hit?.graph_id) return rejected("unknown_reference");
-        position = { kind, reference_id: hit.graph_id };
-      }
+      const position = await sidebarPosition(ctx, input.position!);
+      if (!position) return rejected("unknown_reference");
       const r = await reorderList(ctx, { list_id: graphId, position });
       return r.ok ? applied(graphId) : rejected(r.reason);
+    }
+
+    case "list_group.create": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      const name = requiredText(fields, "name");
+      if (input.priorAttemptMs !== undefined) {
+        // An earlier attempt may have made it (section 5.4).
+        const found = await findCreatedListGroups(ctx, { name, since_ms: input.priorAttemptMs });
+        if (found.length > 1) return rejected("ambiguous_create");
+        if (found.length === 1) {
+          await adoptCreatedListGroup(ctx, found[0], input.sid);
+          return applied(found[0].Id);
+        }
+      }
+      const position = input.position ? await sidebarPosition(ctx, input.position) : undefined;
+      if (position === null) return rejected("unknown_reference");
+      const r = await createListGroup(ctx, { name, sid: input.sid, position });
+      return r.ok ? applied(r.value.group_id) : rejected(r.reason);
+    }
+    case "list_group.update": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      const r = await renameListGroup(ctx, { group_id: graphId, name: requiredText(fields, "name") });
+      return r.ok ? applied(graphId) : rejected(r.reason);
+    }
+    case "list_group.reorder": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      if (!input.position) invalid("position");
+      const position = await sidebarPosition(ctx, input.position!);
+      if (!position) return rejected("unknown_reference");
+      const r = await reorderListGroup(ctx, { group_id: graphId, position });
+      return r.ok ? applied(graphId) : rejected(r.reason);
+    }
+    case "list_group.delete": {
+      if (!myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
+      const r = await deleteListGroup(ctx, { group_id: graphId });
+      return deleted(r, graphId, "list_group_not_found");
     }
     case "list.delete": {
       const r = await deleteList(ctx, { list_id: graphId });
@@ -443,6 +482,21 @@ function deleted(r: ToolResult<unknown>, graphId: string, notFound: string): Exe
 
 async function listOfTask(ctx: OpsContext, taskId: string): Promise<string | null> {
   return (await ctx.index.findListForTask(taskId))?.list_id ?? null;
+}
+
+// A sidebar position. A before/after neighbour is a list or a group, which
+// applyBatch leaves to the executor; null when it names neither.
+async function sidebarPosition(
+  ctx: OpsContext,
+  p: Position,
+): Promise<{ kind: "top" | "bottom" } | { kind: "before" | "after"; reference_id: string } | null> {
+  if ("top" in p) return { kind: "top" };
+  if ("bottom" in p) return { kind: "bottom" };
+  const kind = "before" in p ? "before" : "after";
+  const sid = normalizeSid("before" in p ? p.before : p.after);
+  const r = await ctx.index.resolveSids([{ kind: "list", sid }, { kind: "list_group", sid }]);
+  const hit = [r[`list:${sid}`], r[`list_group:${sid}`]].find((x) => x?.graph_id && x.live);
+  return hit?.graph_id ? { kind, reference_id: hit.graph_id } : null;
 }
 
 // ---- field translation -----------------------------------------------------

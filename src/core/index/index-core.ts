@@ -2136,13 +2136,15 @@ export class IndexCore implements TokenProvider {
         this.#sql.exec("DELETE FROM sync_log WHERE kind = ? AND sid = ?", k, s);
         this.#sql.exec("INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms) VALUES (?, ?, ?, ?, ?)", k, s, deleted, listSid, now);
       };
-      if (kind === "task" || kind === "list") {
+      // A list group is logged on its own, like a list. A group just made has
+      // no lists, so none needs logging again.
+      if (kind === "task" || kind === "list" || kind === "list_group") {
         const logged = this.#sql
           .exec<{ list_sid: string | null }>("SELECT list_sid FROM sync_log WHERE kind = ? AND sid = ?", kind, minted.sid)
           .toArray()[0];
         if (!logged) return true;
         relog(kind, minted.sid, 1, logged.list_sid);
-        relog(kind, sid, 0, kind === "list" ? sid : logged.list_sid);
+        relog(kind, sid, 0, kind === "list" ? sid : kind === "list_group" ? null : logged.list_sid);
         return true;
       }
       // A step or link: log its task again, so a client that pulled the task
@@ -3183,6 +3185,26 @@ export class IndexCore implements TokenProvider {
       folder.ParentFolderGroupId ?? null, folder.OrderDateTime ?? null,
       rawAppearance(folder.ThemeColor), rawAppearance(folder.ThemeBackground), folder.Id,
     );
+  }
+
+  // Stores one list group as a write returned it (ops/lists.ts), the same
+  // columns a sidebar read sets. The insert trigger logs it; on a create the
+  // caller has reserved the app's sid first, so none is minted.
+  storeFolderGroup(group: SubstrateFolderGroup): void {
+    this.#sql.exec(
+      `INSERT INTO list_groups (group_id, name, order_datetime) VALUES (?, ?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, order_datetime = excluded.order_datetime`,
+      group.Id, group.Name ?? null, group.OrderDateTime ?? null,
+    );
+  }
+
+  // Drops a deleted group the way a sidebar read does: its lists are
+  // ungrouped first, so each is logged again with group_id null.
+  removeFolderGroup(groupId: string): void {
+    this.#transact(() => {
+      this.#sql.exec("UPDATE lists SET group_id = NULL WHERE group_id = ?", groupId);
+      this.#sql.exec("DELETE FROM list_groups WHERE group_id = ?", groupId);
+    });
   }
 
   // Budgeted background My Day Substrate scan. Substrate has no delta, so each

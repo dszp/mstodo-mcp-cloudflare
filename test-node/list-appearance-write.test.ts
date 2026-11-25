@@ -3,7 +3,7 @@
 // runs against a fake index and a fake Substrate client, so each test pins the
 // folder PATCH body and the outcome.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SubstrateError, type SubstrateFolder } from "../src/core/graph/substrate-client";
+import { SubstrateError, type SubstrateFolder, type SubstrateFolderGroup } from "../src/core/graph/substrate-client";
 import type { OpsContext } from "../src/core/ops/context";
 import { syncExecutor } from "../src/core/sync/executor";
 import { wholeSecondOrder } from "../src/core/ops/lists";
@@ -33,9 +33,23 @@ const SIDS: Record<string, { kind: string; id: string }> = {
 };
 const sidOf = (id: string) => Object.keys(SIDS).find((s) => SIDS[s].id === id)!;
 
-function harness(opts: { myDay?: boolean; patchError?: unknown } = {}) {
+function harness(
+  opts: {
+    myDay?: boolean;
+    patchError?: unknown;
+    deleteError?: unknown;
+    // What Substrate holds, where it differs from the mirror's LISTS / GROUPS.
+    folders?: Array<{ Id: string; ParentFolderGroupId: string | null }>;
+    substrateGroups?: SubstrateFolderGroup[];
+    seen?: Record<string, { first_seen_ms: number; app_owned: boolean }>;
+  } = {},
+) {
   const patches: Array<{ id: string; body: Record<string, unknown> }> = [];
   const stored: SubstrateFolder[] = [];
+  const groupCalls: Array<{ call: string; id?: string; body?: Record<string, unknown> }> = [];
+  const storedGroups: SubstrateFolderGroup[] = [];
+  const removedGroups: string[] = [];
+  const reserved: Array<{ kind: string; sid: string; graphId: string }> = [];
   const markMyDayUnavailable = vi.fn(async () => {});
   const ctx = {
     env: { TIMEZONE: "UTC", ENABLE_MY_DAY: opts.myDay === false ? "false" : "true" },
@@ -44,6 +58,11 @@ function harness(opts: { myDay?: boolean; patchError?: unknown } = {}) {
       markMyDayUnavailable,
       sidebar: async () => ({ lists: LISTS, groups: GROUPS }),
       storeFolderAppearance: async (f: SubstrateFolder) => void stored.push(f),
+      storeFolderGroup: async (g: SubstrateFolderGroup) => void storedGroups.push(g),
+      removeFolderGroup: async (id: string) => void removedGroups.push(id),
+      reserveSid: async (kind: string, sid: string, graphId: string) => (reserved.push({ kind, sid, graphId }), true),
+      createCandidates: async (_kind: string, ids: string[]) =>
+        Object.fromEntries(ids.filter((id) => opts.seen?.[id]).map((id) => [id, opts.seen![id]])),
       resolveSids: async (refs: Array<{ kind: string; sid: string }>) =>
         Object.fromEntries(
           refs.map((r) => {
@@ -58,11 +77,28 @@ function harness(opts: { myDay?: boolean; patchError?: unknown } = {}) {
         patches.push({ id, body });
         return { Id: id, ...body } as SubstrateFolder;
       },
+      listFolders: async () =>
+        opts.folders ?? LISTS.map((l) => ({ Id: l.list_id, ParentFolderGroupId: l.group_id })),
+      listFolderGroups: async () => opts.substrateGroups ?? [],
+      createFolderGroup: async (body: Record<string, unknown>) => {
+        if (opts.patchError) throw opts.patchError;
+        groupCalls.push({ call: "create", body });
+        return { Id: "Gnew", ...body } as SubstrateFolderGroup;
+      },
+      patchFolderGroup: async (id: string, body: Record<string, unknown>) => {
+        if (opts.patchError) throw opts.patchError;
+        groupCalls.push({ call: "patch", id, body });
+        return { Id: id, ...body } as SubstrateFolderGroup;
+      },
+      deleteFolderGroup: async (id: string) => {
+        if (opts.deleteError) throw opts.deleteError;
+        groupCalls.push({ call: "delete", id });
+      },
     }),
     accessToken: async () => "t",
     writes: { run: (fn: () => Promise<unknown>) => fn() },
   } as unknown as OpsContext;
-  return { exec: syncExecutor(ctx), patches, stored, markMyDayUnavailable };
+  return { exec: syncExecutor(ctx), patches, stored, markMyDayUnavailable, groupCalls, storedGroups, removedGroups, reserved };
 }
 
 const S = "0190a1b2c3d47e5f8a9b0000000000ff";
@@ -224,5 +260,105 @@ describe("wholeSecondOrder (Substrate keeps a list's order to the second)", () =
   });
   it("refuses a whole second a neighbor already holds", () => {
     expect(wholeSecondOrder("2026-11-23T23:45:49.500Z", [t("2026-11-23T23:45:50Z"), t("2026-11-23T23:45:49Z")])).toBeNull();
+  });
+});
+
+describe("list groups", () => {
+  const G1 = sidOf("G1");
+  const op = (o: ExecInput["op"], graphId: string | null, fields: Record<string, unknown> = {}, position?: ExecInput["position"]): ExecInput => ({
+    op: o, sid: S, graphId, fields, position, ids: {},
+  });
+
+  it("creates a group at the top, under the app's sid", async () => {
+    const h = harness();
+    expect(await h.exec(op("list_group.create", null, { name: "Work" }))).toEqual({ ok: true, graphId: "Gnew" });
+    // A minute above G2 (…49.248Z), the top item. Groups keep milliseconds.
+    expect(h.groupCalls).toEqual([{ call: "create", body: { Name: "Work", OrderDateTime: "2026-11-23T23:46:49.248Z" } }]);
+    expect(h.reserved).toEqual([{ kind: "list_group", sid: S, graphId: "Gnew" }]);
+    expect(h.storedGroups.map((g) => g.Id)).toEqual(["Gnew"]);
+  });
+
+  it("creates a group at a position among the top-level items", async () => {
+    const h = harness();
+    await h.exec(op("list_group.create", null, { name: "Work" }, { after: sidOf("Lb") }));
+    // Between Lb (…47Z) and G1 (…45.623Z).
+    expect(h.groupCalls[0].body?.OrderDateTime).toBe("2026-11-23T23:45:46.311Z");
+  });
+
+  it("on a retried create, adopts the one group with that name the first attempt made", async () => {
+    const h = harness({
+      substrateGroups: [{ Id: "Gold", Name: "Work" }, { Id: "Gmade", Name: "Work" }, { Id: "Gx", Name: "Home" }],
+      seen: { Gold: { first_seen_ms: 1, app_owned: false } },
+    });
+    const r = await h.exec({ ...op("list_group.create", null, { name: "Work" }), priorAttemptMs: 1_000 });
+    expect(r).toEqual({ ok: true, graphId: "Gmade" });
+    expect(h.groupCalls).toEqual([]);
+    expect(h.reserved).toEqual([{ kind: "list_group", sid: S, graphId: "Gmade" }]);
+  });
+
+  it("renames a group", async () => {
+    const h = harness();
+    expect(await h.exec(op("list_group.update", "G1", { name: "Home" }))).toEqual({ ok: true, graphId: "G1" });
+    expect(h.groupCalls).toEqual([{ call: "patch", id: "G1", body: { Name: "Home" } }]);
+  });
+
+  it("refuses an empty name", async () => {
+    const h = harness();
+    expect(await h.exec(op("list_group.update", "G1", { name: " " }))).toEqual(rejected("invalid_field:name"));
+    expect(h.groupCalls).toEqual([]);
+  });
+
+  it("moves a group among the top-level lists and the other groups", async () => {
+    const h = harness();
+    await h.exec(op("list_group.reorder", "G1", {}, { before: sidOf("Lb") }));
+    // Between G2 (…49.248Z) and Lb (…47Z); G1 itself doesn't count.
+    expect(h.groupCalls).toEqual([{ call: "patch", id: "G1", body: { OrderDateTime: "2026-11-23T23:45:48.124Z" } }]);
+  });
+
+  it("refuses a reference inside a group", async () => {
+    const h = harness();
+    expect(await h.exec(op("list_group.reorder", "G1", {}, { before: sidOf("Lg2") }))).toEqual(rejected("reference_not_sibling"));
+    expect(h.groupCalls).toEqual([]);
+  });
+
+  it("deletes a group after moving its lists out, by Substrate's membership", async () => {
+    // The mirror has Lg1 and Lg2 in G1; Substrate also has La there.
+    const h = harness({
+      folders: [
+        { Id: "La", ParentFolderGroupId: "G1" },
+        { Id: "Lg1", ParentFolderGroupId: "G1" },
+        { Id: "Lg2", ParentFolderGroupId: null },
+      ],
+    });
+    expect(await h.exec(op("list_group.delete", "G1"))).toEqual({ ok: true, graphId: "G1" });
+    expect(h.patches).toEqual([
+      { id: "La", body: { ParentFolderGroupId: null } },
+      { id: "Lg1", body: { ParentFolderGroupId: null } },
+    ]);
+    expect(h.groupCalls).toEqual([{ call: "delete", id: "G1" }]);
+    expect(h.removedGroups).toEqual(["G1"]);
+  });
+
+  it("a group already gone counts as deleted and leaves the mirror", async () => {
+    const h = harness({ deleteError: new SubstrateError(404, "gone") });
+    expect(await h.exec(op("list_group.delete", "G2"))).toEqual({ ok: true, graphId: "G2" });
+    expect(h.removedGroups).toEqual(["G2"]);
+  });
+
+  it.each([
+    ["create", op("list_group.create", null, { name: "Work" })],
+    ["rename", op("list_group.update", "G1", { name: "Home" })],
+    ["reorder", op("list_group.reorder", "G1", {}, { top: true })],
+    ["delete", op("list_group.delete", "G1")],
+  ])("refuses %s when ENABLE_MY_DAY is off", async (_label, input) => {
+    const h = harness({ myDay: false });
+    expect(await h.exec(input)).toEqual(rejected("list_appearance_unavailable"));
+    expect(h.groupCalls).toEqual([]);
+  });
+
+  it("names only the group itself; a neighbour may be a list", () => {
+    expect(refsOf({ id: "m", at: "2026-11-25T00:00:00Z", op: "list_group.reorder", sid: G1, position: { before: sidOf("Lb") } })).toEqual([
+      { kind: "list_group", sid: G1 },
+    ]);
   });
 });
