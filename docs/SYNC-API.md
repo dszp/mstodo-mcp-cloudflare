@@ -677,6 +677,12 @@ reference (`list_id`, `task_id`) on anything but a create or `task.move`, makes 
 mutation `rejected` with `unknown_fields:<names>`. The server finds the parent of an
 existing step or link from its `sid`.
 
+Steps nobody has dragged have no order value (`order: null` in the feed), and the app
+shows them oldest first, below any ordered steps. Before a `step.reorder`, the server
+gives every other unordered step of that task an order value in that shown order, so
+the move has neighbors and nothing else appears to move. It costs one Substrate write
+per unordered step, once per task.
+
 `position` is `{ "before": sid }`, `{ "after": sid }`, `{ "top": true }` or
 `{ "bottom": true }`. The server converts it to an order value with the existing
 reorder math, using its own view of the neighbors. Sending neighbors rather than raw
@@ -1540,6 +1546,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-25: section 5.2: `step.reorder` gives a task's unordered steps order values in
+  their shown order before the move, instead of failing with `reference_has_no_order`.
 - 2026-11-25: section 4.7 added: `GET /api/v1/link-rules` and `link_rules_rev` in
   `/sync/info`, so the app can mark link-rule matches before the server makes the link.
 - 2026-11-25: section 5.2's table split into one row per op, with the fields the server

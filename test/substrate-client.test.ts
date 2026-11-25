@@ -47,6 +47,13 @@ afterEach(() => {
 });
 
 describe("compareOrderDateTimeDesc (shared manual-order sort)", () => {
+  it("compares instants, not strings, when milliseconds are present on only some values", () => {
+    // As strings "…45Z" sorts above "…45.623Z" ('Z' > '.'); as instants it's earlier.
+    expect(["2026-11-23T23:45:45Z", "2026-11-23T23:45:45.623Z"].sort(compareOrderDateTimeDesc)).toEqual([
+      "2026-11-23T23:45:45.623Z",
+      "2026-11-23T23:45:45Z",
+    ]);
+  });
   it("sorts later OrderDateTime first (descending = nearer the top)", () => {
     const arr = ["2026-01-01T00:00:00Z", "2026-03-01T00:00:00Z", "2026-02-01T00:00:00Z"];
     expect([...arr].sort(compareOrderDateTimeDesc)).toEqual([
