@@ -408,6 +408,10 @@ export class IndexCore implements TokenProvider {
   // refresh so a refresh that resolves AFTER the switch can detect it and refuse
   // to persist the prior account's tokens over the new identity's (H4).
   #identityGeneration = 0;
+  // Bumped by every sidebar store from a write (storeFolderAppearance,
+  // storeFolderGroup, removeFolderGroup). A sidebar read that sees it change
+  // between its GETs and its apply may predate the write, so it is dropped.
+  #sidebarWriteGen = 0;
 
   // Returns a valid access token, refreshing only if the stored one is within
   // REFRESH_SKEW_MS of expiry. The agent already gates on freshness before
@@ -3055,6 +3059,7 @@ export class IndexCore implements TokenProvider {
     // An owner switch during the reads (resetIdentity) makes them the old
     // account's sidebar: nothing from them is written.
     const gen = this.#identityGeneration;
+    const writeGen = this.#sidebarWriteGen;
     try {
       const sub = await this.#substrateForScan();
       // Both reads before any write, so a failed second read changes nothing.
@@ -3063,6 +3068,12 @@ export class IndexCore implements TokenProvider {
       const folders = await sub.listFolders({ fast: true });
       const groups = await sub.listFolderGroups({ fast: true });
       if (gen !== this.#identityGeneration) return;
+      if (writeGen !== this.#sidebarWriteGen) {
+        // A write stored during the GETs may be missing from them; applying
+        // them would undo it. last_synced_at stays, so the next cycle reads again.
+        log.info("list_appearance_read_superseded", {});
+        return;
+      }
       const r = this.applyListAppearance(folders, groups, listIds, now);
       this.#setSyncState(APPEARANCE_STATE_KEY, { last_synced_at: now, status: "idle", last_error: null });
       if (backoff) await this.#state.delete(APPEARANCE_BACKOFF_KEY);
@@ -3176,10 +3187,16 @@ export class IndexCore implements TokenProvider {
     };
   }
 
+  // When the last sidebar read succeeded, or null if none has.
+  sidebarReadAt(): number | null {
+    return this.#getSyncState(APPEARANCE_STATE_KEY)?.last_synced_at ?? null;
+  }
+
   // Stores one folder as a write returned it (ops setListAppearance), the
   // same columns a sidebar read sets. A group the mirror hasn't read yet is
   // stored as named; the next sidebar read adds the group itself.
   storeFolderAppearance(folder: SubstrateFolder): void {
+    this.#sidebarWriteGen++;
     this.#sql.exec(
       `UPDATE lists SET group_id = ?, order_datetime = ?, theme_color = ?, theme_background = ? WHERE list_id = ?`,
       folder.ParentFolderGroupId ?? null, folder.OrderDateTime ?? null,
@@ -3191,6 +3208,7 @@ export class IndexCore implements TokenProvider {
   // columns a sidebar read sets. The insert trigger logs it; on a create the
   // caller has reserved the app's sid first, so none is minted.
   storeFolderGroup(group: SubstrateFolderGroup): void {
+    this.#sidebarWriteGen++;
     this.#sql.exec(
       `INSERT INTO list_groups (group_id, name, order_datetime) VALUES (?, ?, ?)
        ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, order_datetime = excluded.order_datetime`,
@@ -3201,6 +3219,7 @@ export class IndexCore implements TokenProvider {
   // Drops a deleted group the way a sidebar read does: its lists are
   // ungrouped first, so each is logged again with group_id null.
   removeFolderGroup(groupId: string): void {
+    this.#sidebarWriteGen++;
     this.#transact(() => {
       this.#sql.exec("UPDATE lists SET group_id = NULL WHERE group_id = ?", groupId);
       this.#sql.exec("DELETE FROM list_groups WHERE group_id = ?", groupId);

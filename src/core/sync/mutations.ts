@@ -232,6 +232,20 @@ export function refsOf(m: MutationIn): SidRef[] {
 
 const key = (r: SidRef) => `${r.kind}:${r.sid}`;
 
+// The sidebar neighbours refsOf leaves to the executor (list.reorder and the
+// list_group ops), under both kinds a neighbour can be, so applyBatch can skip
+// a mutation whose neighbour's create in this batch didn't apply.
+function sidebarNeighbourKeys(m: MutationIn): string[] {
+  if (m.op !== "list.reorder" && !m.op.startsWith("list_group.")) return [];
+  const p = m.position as Record<string, unknown> | undefined;
+  return ["before", "after"].flatMap((k) => {
+    const v = p?.[k];
+    if (typeof v !== "string") return [];
+    const sid = normalizeSid(v);
+    return (["list", "list_group"] as const).map((kind) => key({ kind, sid }));
+  });
+}
+
 export async function applyBatch(
   store: MutationStore,
   exec: Executor,
@@ -260,7 +274,8 @@ export async function applyBatch(
     const m = v;
     const self: SidRef = { kind: kindOf(m.op), sid: m.sid };
     const others = refsOf(m).slice(1);
-    if (blocked.has(key(self)) || others.some((r) => uncreated.has(key(r))) || now() > deadline) {
+    const waits = others.some((r) => uncreated.has(key(r))) || sidebarNeighbourKeys(m).some((k) => uncreated.has(k));
+    if (blocked.has(key(self)) || waits || now() > deadline) {
       blocked.add(key(self));
       if (isCreate(m.op)) uncreated.add(key(self));
       results.push({ id: m.id, status: "skipped" });

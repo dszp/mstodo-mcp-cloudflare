@@ -439,3 +439,41 @@ export async function runListAppearanceIdentityChecks(c: IndexCore, env: AppEnv,
     vi.unstubAllGlobals();
   }
 }
+
+// A write stores sidebar values while a read is in flight: the read may
+// predate the write, so nothing from it is applied, and the next cycle reads
+// again. `sql` is the same database, to inspect the mirror.
+export async function runListAppearanceSupersededChecks(c: IndexCore, env: AppEnv, sql: SqlDb) {
+  await signIn(env);
+  const m: FakeMicrosoft = {
+    roster: ["W1"],
+    folders: [{ Id: "W1", ThemeColor: "blue", OrderDateTime: "2026-11-01T00:00:00Z" }],
+    groups: [],
+    substrate: [],
+  };
+  try {
+    stubMicrosoft(m);
+    m.onFolders = async () => {
+      m.onFolders = undefined;
+      // The list must exist for the write's UPDATE to land.
+      sql.exec("INSERT OR IGNORE INTO lists (list_id, display_name) VALUES ('W1', 'W1')");
+      c.storeFolderGroup({ Id: "WG", Name: "new", OrderDateTime: "2026-11-05T00:00:00.123Z" });
+      c.storeFolderAppearance({ Id: "W1", ThemeColor: "dark_red", OrderDateTime: "2026-11-01T00:00:00Z", ParentFolderGroupId: "WG" });
+    };
+    await c.runSyncCycle();
+    const afterRace = c.getList("W1");
+    const groupKept = sql.exec<{ n: number }>("SELECT count(*) n FROM list_groups WHERE group_id = 'WG'").one().n === 1;
+    const readsBefore = reads(m);
+    m.folders = [{ Id: "W1", ThemeColor: "dark_red", OrderDateTime: "2026-11-01T00:00:00Z", ParentFolderGroupId: "WG" }];
+    m.groups = [{ Id: "WG", Name: "new", OrderDateTime: "2026-11-05T00:00:00.123Z" }];
+    await c.runSyncCycle();
+    const afterNext = c.getList("W1");
+    return {
+      "the write's theme survives the stale read": afterRace?.theme_color === "dark_red",
+      "the write's group survives the stale read": groupKept && afterRace?.group_id === "WG",
+      "the next cycle reads again and marks the list read": reads(m) > readsBefore && afterNext?.appearance_synced_at != null,
+    };
+  } finally {
+    vi.unstubAllGlobals();
+  }
+}

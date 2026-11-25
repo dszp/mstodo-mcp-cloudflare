@@ -112,6 +112,7 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   sidebar() { return this.#core.sidebar(); }
   storeFolderGroup(...a: Parameters<IndexCore["storeFolderGroup"]>) { return this.#core.storeFolderGroup(...a); }
   removeFolderGroup(...a: Parameters<IndexCore["removeFolderGroup"]>) { return this.#core.removeFolderGroup(...a); }
+  sidebarReadAt() { return this.#core.sidebarReadAt(); }
   fieldClocks(...a: Parameters<IndexCore["fieldClocks"]>) { return this.#core.fieldClocks(...a); }
   mutationAbandon(...a: Parameters<IndexCore["mutationAbandon"]>) { return this.#core.mutationAbandon(...a); }
   mutationBegin(...a: Parameters<IndexCore["mutationBegin"]>) { return this.#core.mutationBegin(...a); }

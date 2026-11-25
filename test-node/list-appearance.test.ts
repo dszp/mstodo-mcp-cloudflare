@@ -10,6 +10,7 @@ import {
   runListAppearanceIdentityChecks,
   runListAppearanceMigrationChecks,
   runListAppearanceRefusedChecks,
+  runListAppearanceSupersededChecks,
 } from "../test/_list-appearance-checks";
 
 function memoryKv() {
@@ -58,6 +59,12 @@ describe("list appearance: sync cycle (node)", async () => {
 describe("list appearance: owner change during the read (node)", async () => {
   const { c, env, sql } = core();
   const r = await runListAppearanceIdentityChecks(c, env, sql);
+  for (const [name, ok] of Object.entries(r)) it(name, () => expect(ok).toBe(true));
+});
+
+describe("list appearance: a write during the read (node)", async () => {
+  const { c, env, sql } = core();
+  const r = await runListAppearanceSupersededChecks(c, env, sql);
   for (const [name, ok] of Object.entries(r)) it(name, () => expect(ok).toBe(true));
 });
 

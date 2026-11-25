@@ -37,7 +37,11 @@ function harness(
   opts: {
     myDay?: boolean;
     patchError?: unknown;
+    // A folder PATCH error for one list only.
+    patchErrorFor?: Record<string, unknown>;
     deleteError?: unknown;
+    // When the last sidebar read succeeded; null if none has.
+    sidebarReadAt?: number | null;
     // What Substrate holds, where it differs from the mirror's LISTS / GROUPS.
     folders?: Array<{ Id: string; ParentFolderGroupId: string | null }>;
     substrateGroups?: SubstrateFolderGroup[];
@@ -60,6 +64,7 @@ function harness(
       storeFolderAppearance: async (f: SubstrateFolder) => void stored.push(f),
       storeFolderGroup: async (g: SubstrateFolderGroup) => void storedGroups.push(g),
       removeFolderGroup: async (id: string) => void removedGroups.push(id),
+      sidebarReadAt: async () => (opts.sidebarReadAt === undefined ? 1 : opts.sidebarReadAt),
       reserveSid: async (kind: string, sid: string, graphId: string) => (reserved.push({ kind, sid, graphId }), true),
       createCandidates: async (_kind: string, ids: string[]) =>
         Object.fromEntries(ids.filter((id) => opts.seen?.[id]).map((id) => [id, opts.seen![id]])),
@@ -74,6 +79,7 @@ function harness(
     substrate: async () => ({
       patchFolder: async (id: string, body: Record<string, unknown>) => {
         if (opts.patchError) throw opts.patchError;
+        if (opts.patchErrorFor?.[id]) throw opts.patchErrorFor[id];
         patches.push({ id, body });
         return { Id: id, ...body } as SubstrateFolder;
       },
@@ -296,6 +302,15 @@ describe("list groups", () => {
     expect(h.reserved).toEqual([{ kind: "list_group", sid: S, graphId: "Gmade" }]);
   });
 
+  it("on a retried create before any sidebar read, refuses rather than guess", async () => {
+    // Every existing group is unseen until the first read, so "Work" may predate the attempt.
+    const h = harness({ substrateGroups: [{ Id: "Gold", Name: "Work" }], sidebarReadAt: null });
+    const r = await h.exec({ ...op("list_group.create", null, { name: "Work" }), priorAttemptMs: 1_000 });
+    expect(r).toEqual(rejected("ambiguous_create"));
+    expect(h.groupCalls).toEqual([]);
+    expect(h.reserved).toEqual([]);
+  });
+
   it("renames a group", async () => {
     const h = harness();
     expect(await h.exec(op("list_group.update", "G1", { name: "Home" }))).toEqual({ ok: true, graphId: "G1" });
@@ -335,6 +350,20 @@ describe("list groups", () => {
       { id: "La", body: { ParentFolderGroupId: null } },
       { id: "Lg1", body: { ParentFolderGroupId: null } },
     ]);
+    expect(h.groupCalls).toEqual([{ call: "delete", id: "G1" }]);
+    expect(h.removedGroups).toEqual(["G1"]);
+  });
+
+  it("skips a member list deleted since the read and still deletes the group", async () => {
+    const h = harness({
+      folders: [
+        { Id: "Lgone", ParentFolderGroupId: "G1" },
+        { Id: "Lg1", ParentFolderGroupId: "G1" },
+      ],
+      patchErrorFor: { Lgone: new SubstrateError(404, "gone") },
+    });
+    expect(await h.exec(op("list_group.delete", "G1"))).toEqual({ ok: true, graphId: "G1" });
+    expect(h.patches).toEqual([{ id: "Lg1", body: { ParentFolderGroupId: null } }]);
     expect(h.groupCalls).toEqual([{ call: "delete", id: "G1" }]);
     expect(h.removedGroups).toEqual(["G1"]);
   });

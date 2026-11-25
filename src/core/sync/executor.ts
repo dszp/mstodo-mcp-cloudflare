@@ -203,7 +203,7 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       if (input.priorAttemptMs !== undefined) {
         // An earlier attempt may have made it (section 5.4).
         const found = await findCreatedListGroups(ctx, { name, since_ms: input.priorAttemptMs });
-        if (found.length > 1) return rejected("ambiguous_create");
+        if (found === "unknown" || found.length > 1) return rejected("ambiguous_create");
         if (found.length === 1) {
           await adoptCreatedListGroup(ctx, found[0], input.sid);
           return applied(found[0].Id);

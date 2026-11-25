@@ -212,14 +212,18 @@ export function createListGroup(
 
 // A create retried after an ambiguous failure (section 5.4): groups with this
 // name the mirror hadn't seen before the first attempt and that no other
-// mutation made.
+// mutation made. A group the mirror has never seen counts only once a sidebar
+// read has succeeded: before that, every existing group is unseen, and one
+// already named this would be mistaken for the attempt's. "unknown" then.
 export async function findCreatedListGroups(
   ctx: OpsContext,
   input: { name: string; since_ms: number },
-): Promise<SubstrateFolderGroup[]> {
+): Promise<SubstrateFolderGroup[] | "unknown"> {
   const sub = await ctx.substrate();
   const named = (await sub.listFolderGroups()).filter((g) => g.Name === input.name);
   const seen = await ctx.index.createCandidates("list_group", named.map((g) => g.Id));
+  const unseen = named.filter((g) => !seen[g.Id]);
+  if (unseen.length > 0 && (await ctx.index.sidebarReadAt()) === null) return "unknown";
   return named.filter((g) => {
     const c = seen[g.Id];
     return !c || (!c.app_owned && c.first_seen_ms >= input.since_ms);
@@ -258,7 +262,14 @@ export function deleteListGroup(ctx: OpsContext, input: { group_id: string }): P
     const sub = await ctx.substrate();
     try {
       for (const f of (await sub.listFolders()).filter((f) => f.ParentFolderGroupId === group_id)) {
-        const out = await sub.patchFolder(f.Id, { ParentFolderGroupId: null });
+        let out;
+        try {
+          out = await sub.patchFolder(f.Id, { ParentFolderGroupId: null });
+        } catch (e) {
+          // A member list deleted since the read is no longer in the group.
+          if (e instanceof SubstrateError && e.status === 404) continue;
+          throw e;
+        }
         await bestEffort("index_store_folder_failed", { list_id: f.Id }, () => ctx.index.storeFolderAppearance(out));
       }
       await sub.deleteFolderGroup(group_id);
