@@ -152,3 +152,26 @@ export function runLargePageChecks(c: IndexCore) {
     "every task carries its list's sid": tasks.every((x) => x.kind === "task" && !x.deleted && typeof x.data.list_id === "string"),
   };
 }
+
+// List-id filters longer than Durable Object SQLite's 100 bound parameters.
+export function runManyListFilterChecks(c: IndexCore) {
+  c.upsertList({ id: "M0", displayName: "M0" } as never);
+  c.upsertTask(task("MT", "needle"), "M0");
+  const many = ["M0", ...Array.from({ length: 150 }, (_, i) => `X${i}`)];
+  const ok = (fn: () => unknown) => {
+    try {
+      fn();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return {
+    "query filters by 151 lists": ok(() => c.query({ lists: many } as never)) && c.query({ lists: many } as never).rows.some((r) => r.task_id === "MT"),
+    "search filters by 151 lists": ok(() => c.search({ query: "needle", lists: many } as never)),
+    "step search filters by 151 lists": ok(() => c.searchChecklistItems({ query: "x", lists: many } as never)),
+    "the step backfill skips 151 lists": ok(() => c.selectDueChecklistTasks(10, many.slice(1), many.slice(1))),
+    "a skipped list's tasks stay out of the backfill": !c.selectDueChecklistTasks(10, many, []).some((t) => t.task_id === "MT"),
+    "an unskipped list's tasks are in it": c.selectDueChecklistTasks(10, many.slice(1), []).some((t) => t.task_id === "MT"),
+  };
+}
