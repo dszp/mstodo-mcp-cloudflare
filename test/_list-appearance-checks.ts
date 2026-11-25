@@ -468,7 +468,9 @@ export async function runListAppearanceSupersededChecks(c: IndexCore, env: AppEn
     m.groups = [{ Id: "WG", Name: "new", OrderDateTime: "2026-11-05T00:00:00.123Z" }];
     await c.runSyncCycle();
     const afterNext = c.getList("W1");
+    const firstRead = await c.sidebarFirstReadAt();
     return {
+      "the dropped read doesn't count as the first read; the next one does": firstRead !== null,
       "the write's theme survives the stale read": afterRace?.theme_color === "dark_red",
       "the write's group survives the stale read": groupKept && afterRace?.group_id === "WG",
       "the next cycle reads again and marks the list read": reads(m) > readsBefore && afterNext?.appearance_synced_at != null,

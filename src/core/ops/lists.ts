@@ -212,9 +212,10 @@ export function createListGroup(
 
 // A create retried after an ambiguous failure (section 5.4): groups with this
 // name the mirror hadn't seen before the first attempt and that no other
-// mutation made. A group the mirror has never seen counts only once a sidebar
-// read has succeeded: before that, every existing group is unseen, and one
-// already named this would be mistaken for the attempt's. "unknown" then.
+// mutation made. The mirror first sees every existing group at its first
+// sidebar read, so "hadn't seen before the attempt" means something only for
+// an attempt made after that read: before it, a group the person already had
+// would look new. "unknown" then, if any group could match.
 export async function findCreatedListGroups(
   ctx: OpsContext,
   input: { name: string; since_ms: number },
@@ -222,12 +223,13 @@ export async function findCreatedListGroups(
   const sub = await ctx.substrate();
   const named = (await sub.listFolderGroups()).filter((g) => g.Name === input.name);
   const seen = await ctx.index.createCandidates("list_group", named.map((g) => g.Id));
-  const unseen = named.filter((g) => !seen[g.Id]);
-  if (unseen.length > 0 && (await ctx.index.sidebarReadAt()) === null) return "unknown";
-  return named.filter((g) => {
+  const found = named.filter((g) => {
     const c = seen[g.Id];
     return !c || (!c.app_owned && c.first_seen_ms >= input.since_ms);
   });
+  if (found.length === 0) return found;
+  const firstRead = await ctx.index.sidebarFirstReadAt();
+  return firstRead === null || firstRead >= input.since_ms ? "unknown" : found;
 }
 
 // Records a group an earlier attempt made under the app's sid.

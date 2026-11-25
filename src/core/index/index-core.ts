@@ -185,6 +185,10 @@ const WEBHOOK_HEALTH_KEY = "meta:webhook";
 const APPEARANCE_STATE_KEY = "meta:appearance";
 // StateStore key for the read's backoff after failures, and its ceiling.
 const APPEARANCE_BACKOFF_KEY = "appearance:backoff";
+// When the first sidebar read succeeded (ms). Every group existing then got a
+// row stamped with that time, so a retried group create can tell old groups
+// from new only for an attempt made after it (ops/lists.ts).
+const APPEARANCE_FIRST_READ_KEY = "appearance:first_read_at";
 const APPEARANCE_BACKOFF_MAX_MS = 6 * 3_600_000;
 interface AppearanceBackoff {
   failures: number;
@@ -3075,6 +3079,9 @@ export class IndexCore implements TokenProvider {
         return;
       }
       const r = this.applyListAppearance(folders, groups, listIds, now);
+      if ((await this.#state.get<number>(APPEARANCE_FIRST_READ_KEY)) === undefined) {
+        await this.#state.put(APPEARANCE_FIRST_READ_KEY, now);
+      }
       this.#setSyncState(APPEARANCE_STATE_KEY, { last_synced_at: now, status: "idle", last_error: null });
       if (backoff) await this.#state.delete(APPEARANCE_BACKOFF_KEY);
       log.info("list_appearance_synced", r);
@@ -3187,9 +3194,9 @@ export class IndexCore implements TokenProvider {
     };
   }
 
-  // When the last sidebar read succeeded, or null if none has.
-  sidebarReadAt(): number | null {
-    return this.#getSyncState(APPEARANCE_STATE_KEY)?.last_synced_at ?? null;
+  // When the first sidebar read succeeded, or null if none has.
+  async sidebarFirstReadAt(): Promise<number | null> {
+    return (await this.#state.get<number>(APPEARANCE_FIRST_READ_KEY)) ?? null;
   }
 
   // Stores one folder as a write returned it (ops setListAppearance), the

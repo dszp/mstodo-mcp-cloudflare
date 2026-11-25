@@ -40,8 +40,8 @@ function harness(
     // A folder PATCH error for one list only.
     patchErrorFor?: Record<string, unknown>;
     deleteError?: unknown;
-    // When the last sidebar read succeeded; null if none has.
-    sidebarReadAt?: number | null;
+    // When the first sidebar read succeeded; null if none has.
+    sidebarFirstReadAt?: number | null;
     // What Substrate holds, where it differs from the mirror's LISTS / GROUPS.
     folders?: Array<{ Id: string; ParentFolderGroupId: string | null }>;
     substrateGroups?: SubstrateFolderGroup[];
@@ -64,7 +64,7 @@ function harness(
       storeFolderAppearance: async (f: SubstrateFolder) => void stored.push(f),
       storeFolderGroup: async (g: SubstrateFolderGroup) => void storedGroups.push(g),
       removeFolderGroup: async (id: string) => void removedGroups.push(id),
-      sidebarReadAt: async () => (opts.sidebarReadAt === undefined ? 1 : opts.sidebarReadAt),
+      sidebarFirstReadAt: async () => (opts.sidebarFirstReadAt === undefined ? 1 : opts.sidebarFirstReadAt),
       reserveSid: async (kind: string, sid: string, graphId: string) => (reserved.push({ kind, sid, graphId }), true),
       createCandidates: async (_kind: string, ids: string[]) =>
         Object.fromEntries(ids.filter((id) => opts.seen?.[id]).map((id) => [id, opts.seen![id]])),
@@ -304,11 +304,29 @@ describe("list groups", () => {
 
   it("on a retried create before any sidebar read, refuses rather than guess", async () => {
     // Every existing group is unseen until the first read, so "Work" may predate the attempt.
-    const h = harness({ substrateGroups: [{ Id: "Gold", Name: "Work" }], sidebarReadAt: null });
+    const h = harness({ substrateGroups: [{ Id: "Gold", Name: "Work" }], sidebarFirstReadAt: null });
     const r = await h.exec({ ...op("list_group.create", null, { name: "Work" }), priorAttemptMs: 1_000 });
     expect(r).toEqual(rejected("ambiguous_create"));
     expect(h.groupCalls).toEqual([]);
     expect(h.reserved).toEqual([]);
+  });
+
+  it("on a retried create whose attempt came before the first sidebar read, refuses", async () => {
+    // The first read (at 2 000) stamped the person's own "Work" as first seen after the attempt (1 000).
+    const h = harness({
+      substrateGroups: [{ Id: "Gold", Name: "Work" }],
+      seen: { Gold: { first_seen_ms: 2_000, app_owned: false } },
+      sidebarFirstReadAt: 2_000,
+    });
+    const r = await h.exec({ ...op("list_group.create", null, { name: "Work" }), priorAttemptMs: 1_000 });
+    expect(r).toEqual(rejected("ambiguous_create"));
+    expect(h.reserved).toEqual([]);
+  });
+
+  it("on a retried create with no matching group, creates it even before any sidebar read", async () => {
+    const h = harness({ substrateGroups: [{ Id: "Gx", Name: "Home" }], sidebarFirstReadAt: null });
+    const r = await h.exec({ ...op("list_group.create", null, { name: "Work" }), priorAttemptMs: 1_000 });
+    expect(r).toEqual({ ok: true, graphId: "Gnew" });
   });
 
   it("renames a group", async () => {
