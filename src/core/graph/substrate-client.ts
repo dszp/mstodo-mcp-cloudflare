@@ -459,6 +459,39 @@ export class SubstrateClient {
     return out;
   }
 
+  // PATCH a task folder (list): its theme, sidebar position or group. Returns
+  // the folder as Substrate stores it after the write, so the mirror records
+  // what Microsoft kept rather than what was asked for.
+  async patchFolder(folderId: string, body: Record<string, unknown>): Promise<SubstrateFolder> {
+    const res = await this.#fetchWithRetry(
+      `${SUBSTRATE_BASE}/taskfolders/${encodeURIComponent(folderId)}`,
+      "PATCH",
+      JSON.stringify(body),
+    );
+    return SubstrateFolderSchema.parse((await res.json()) as unknown);
+  }
+
+  // Create, change or delete a sidebar list group (docs/SYNC-API.md section
+  // 10.4). Graph has no groups; To Do keeps them as Substrate folder groups.
+  // Create and PATCH return the group as Substrate stores it.
+  async createFolderGroup(body: Record<string, unknown>): Promise<SubstrateFolderGroup> {
+    const res = await this.#fetchWithRetry(`${SUBSTRATE_BASE}/foldergroups`, "POST", JSON.stringify(body));
+    return SubstrateFolderGroupSchema.parse((await res.json()) as unknown);
+  }
+
+  async patchFolderGroup(groupId: string, body: Record<string, unknown>): Promise<SubstrateFolderGroup> {
+    const res = await this.#fetchWithRetry(
+      `${SUBSTRATE_BASE}/foldergroups/${encodeURIComponent(groupId)}`,
+      "PATCH",
+      JSON.stringify(body),
+    );
+    return SubstrateFolderGroupSchema.parse((await res.json()) as unknown);
+  }
+
+  async deleteFolderGroup(groupId: string): Promise<void> {
+    await this.#fetchWithRetry(`${SUBSTRATE_BASE}/foldergroups/${encodeURIComponent(groupId)}`, "DELETE");
+  }
+
   // PATCH a subtask. Used by reorder_checklist_item to set OrderDateTime
   // (manual-order position). Returns the updated subtask for confirmation. Keeps
   // the full 429 budget — this is a user-requested write, not optional.

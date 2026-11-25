@@ -61,7 +61,7 @@ export function isGraphNotFound(e: unknown): e is GraphError {
 // The sync API's create path: the sid the app chose, recorded for the new
 // Graph ID before the op writes the entity to the mirror, so the mirror never
 // mints one of its own. A failure leaves applyBatch's adoptSid to fix it up.
-export async function reserveSid(ctx: OpsContext, kind: "list" | "task" | "step" | "link", sid: string | undefined, graphId: string): Promise<void> {
+export async function reserveSid(ctx: OpsContext, kind: "list" | "task" | "step" | "link" | "list_group", sid: string | undefined, graphId: string): Promise<void> {
   if (!sid) return;
   await bestEffort("index_reserve_sid_failed", { kind, graph_id: graphId }, () => ctx.index.reserveSid(kind, sid, graphId));
 }

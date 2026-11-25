@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since My Day tasks in them (flagged emails, for one) are missing from it.
 
 ### Added
+- **The sync API writes a list's sidebar appearance** (docs/SYNC-API.md sections 5.2 and
+  10.4). `list.update` takes `theme` (`{ color, background }`, To Do's preset names) and
+  `group_id` (a group's sid, or `null` to ungroup), and the new `list.reorder` op moves a
+  list among its siblings: the lists in its group, or the top-level lists and groups. Each
+  writes the folder through Substrate and stores what Substrate returns, so the feed has
+  the change at once. The `list_group.create`, `list_group.update`, `list_group.reorder` and
+  `list_group.delete` ops create, rename, move and delete sidebar groups; deleting a group
+  moves its lists out first and keeps them.
 - **`GET /api/v1/link-rules`** (docs/SYNC-API.md section 4.7): the owner's enabled link rules
   whose URL template is `http` or `https`, without `external_id_template`, so the app can mark
   matches in titles and notes before the server makes the link. `/sync/info` carries
@@ -67,6 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports `capabilities.attachment_download`.
 
 ### Fixed
+- `create_upload_link` returns `task_not_found` for a task that isn't in the named list,
+  instead of minting a link whose upload fails after the person has picked files. A task the
+  index already holds in that list is not checked again; any other task costs one Graph read.
 - **Moving a step relative to one that was never dragged works.** Steps get no order value
   until someone drags one, so `reorder_checklist_item` and the sync API's `step.reorder`
   failed with `reference_has_no_order` on most tasks (the app's "Add Step Below", and drag to
@@ -104,6 +115,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   completed tasks, which the sub-resource scan skips.
 - A queued app edit of a list's `sync` older than a change made through `set_list_config` no
   longer overrides it.
+
+### Security
+- **Dependencies updated past open advisories.** The Node host bundles `hono` 4.13.21 and
+  `@hono/node-server` 2.1.11 (path-separator and mount bypasses, an `ECONNRESET` crash during
+  a WebSocket upgrade), and the MCP SDK's `express` stack now resolves `body-parser` 2.4.0
+  and `qs` 6.17.1 (both denial of service). The Worker bundle's only affected package was
+  `fast-uri` 3.1.9, pulled in by `ajv` for tool input schemas. `vitest` 4.1.12 fixes
+  `@vitest/mocker` (test runs only). `undici` and `sharp` were already patched through
+  `wrangler`'s `miniflare`.
 
 ## [0.17.1] – 2026-10-17
 

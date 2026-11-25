@@ -41,3 +41,28 @@ describe("time budget", () => {
     expect(r.results.map((x) => x.status)).toEqual(["skipped", "skipped"]);
   });
 });
+
+describe("sidebar neighbours", () => {
+  it("skips a reorder or group op whose neighbour's create in the batch didn't apply", async () => {
+    const c = core();
+    const G = "0190a1b2c3d47e5f8a9b0000000000e1";
+    const L = "0190a1b2c3d47e5f8a9b0000000000e2";
+    const ran: string[] = [];
+    const exec = async (input: { op: string }) => {
+      ran.push(input.op);
+      return { ok: false as const, error: "substrate_503", retry: true };
+    };
+    const at = "2026-11-24T00:00:00Z";
+    const r = await applyBatch(storeOf(c), exec as never, {
+      mutations: [
+        { id: "a", at, op: "list_group.create", sid: G, fields: { name: "Work" } },
+        { id: "b", at, op: "list.reorder", sid: "0190a1b2c3d47e5f8a9b0000000000e3", position: { after: G } },
+        { id: "c", at, op: "list_group.reorder", sid: "0190a1b2c3d47e5f8a9b0000000000e4", position: { before: G } },
+        { id: "d", at, op: "list.create", sid: L, fields: { name: "L" } },
+        { id: "e", at, op: "list_group.create", sid: "0190a1b2c3d47e5f8a9b0000000000e5", fields: { name: "X" }, position: { after: L } },
+      ],
+    }, "p");
+    expect(r.results.map((x) => x.status)).toEqual(["failed", "skipped", "skipped", "failed", "skipped"]);
+    expect(ran).toEqual(["list_group.create", "list.create"]);
+  });
+});
