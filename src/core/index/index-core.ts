@@ -1889,6 +1889,34 @@ export class IndexCore implements TokenProvider {
     return taskBySid(this.#sql, sid, this.#env.TIMEZONE);
   }
 
+  // One attachment by sid: the Graph IDs needed to fetch its bytes, plus the
+  // metadata the download's headers come from. Null when the sid is unknown,
+  // the attachment is no longer in the mirror, or its list is excluded (an
+  // excluded list isn't mirrored, so its attachments are not served, the same
+  // as GET /tasks/{sid}).
+  syncAttachment(sid: string): {
+    list_id: string;
+    task_id: string;
+    attachment_id: string;
+    name: string | null;
+    content_type: string | null;
+    kind: string | null;
+  } | null {
+    const row = this.#sql
+      .exec<{ list_id: string; task_id: string; attachment_id: string; name: string | null; content_type: string | null; kind: string | null }>(
+        // The task's list, not attachments.list_id: that one is stale after a
+        // move until the sub-resource scan reaches the task again.
+        `SELECT COALESCE(t.list_id, a.list_id) AS list_id, a.task_id, a.attachment_id, a.name, a.content_type, a.kind
+           FROM entity_map m JOIN attachments a ON a.attachment_id = m.graph_id
+           LEFT JOIN tasks t ON t.task_id = a.task_id
+          WHERE m.kind = 'attachment' AND m.sid = ?`,
+        sid,
+      )
+      .toArray()[0];
+    if (!row || this.#isExcluded(row.list_id)) return null;
+    return row;
+  }
+
   // FTS search answered with feed-shaped tasks, in one call (one RPC on
   // Cloudflare instead of one per hit).
   syncSearch(query: string, limit: number): NonNullable<ReturnType<typeof taskBySid>>[] {
@@ -2156,6 +2184,7 @@ export class IndexCore implements TokenProvider {
       step_order: boolean;
       sub_resources: boolean;
       list_appearance: boolean;
+      attachment_download: boolean;
       push: "none" | "websocket";
       source: "graph";
     };
@@ -2182,6 +2211,8 @@ export class IndexCore implements TokenProvider {
         // Sidebar groups, order and theme are read from Substrate (section
         // 10.4). Off when the Exchange Online scope is missing or refused.
         list_appearance: myDay && !this.#substrateUnavailable && !this.#appearanceUnavailable,
+        // GET /api/v1/attachments/{sid} streams an attachment's bytes.
+        attachment_download: true,
         push: "websocket",
         source: "graph",
       },

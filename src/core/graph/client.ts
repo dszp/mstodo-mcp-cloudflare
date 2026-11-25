@@ -183,6 +183,18 @@ export class GraphClient {
     return schema.parse(json);
   }
 
+  // GET a non-JSON resource (a `$value` media stream) and hand back the
+  // response unread, so the caller can stream its body. Same host pin, token,
+  // 401-refresh and 429 handling as every other call; a non-2xx throws
+  // GraphError. It asks for the bytes uncompressed: fetch() decompresses a
+  // compressed body, which leaves Graph's Content-Length describing bytes the
+  // caller never sees.
+  async getStream(url: string): Promise<Response> {
+    const res = await this.fetchWithRetry(url, { "accept-encoding": "identity" });
+    if (res.status === 304) throw new GraphError(304, "unexpected_304_for_unconditional_get");
+    return res;
+  }
+
   // DELETE a resource. Expects 204 No Content; throws GraphError on any other status.
   // Supply `ifMatch` to send an If-Match header for optimistic concurrency.
   async deleteResource(url: string, opts: { ifMatch?: string } = {}): Promise<void> {

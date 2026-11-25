@@ -9,6 +9,7 @@ import { ownerIndex } from "../owner-index";
 import type { AppEnv } from "../ports";
 import type { Props } from "../types";
 import { VERSION } from "../version";
+import { attachmentBySid } from "./attachments";
 import { syncMutations, type BackgroundWork } from "./mutations";
 import { json } from "./respond";
 
@@ -72,6 +73,8 @@ function matchRoute(path: string): Route | null {
   if (path === "/lists/excluded") return excludedLists;
   const task = /^\/tasks\/([^/]+)$/.exec(path);
   if (task) return (_url, env) => taskBySid(task[1], env);
+  const attachment = /^\/attachments\/([^/]+)$/.exec(path);
+  if (attachment) return (_url, env) => attachmentBySid(attachment[1], env);
   return null;
 }
 

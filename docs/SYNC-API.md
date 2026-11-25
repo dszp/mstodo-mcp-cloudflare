@@ -436,8 +436,8 @@ Rules:
   group before the lists a read moves into it, but a later rename moves the group
   after them, so the app must not depend on the order (section 4.3).
 - Attachment bytes aren't in the feed. The app fetches them with
-  `GET /api/v1/attachments/{sid}`, which streams through the server the same way
-  `/download` does today (section 10.2).
+  `GET /api/v1/attachments/{sid}`, which streams them through the server from Graph
+  (section 4.6).
 
 ### 4.3 Client rules
 
@@ -496,6 +496,46 @@ serves the bytes either way.
 `complete` (unreadable while the phone is locked), and signing out deletes it. On the
 Mac it relies on FileVault. These are app requirements, listed here because they're
 the other half of the scope decision.
+
+### 4.6 Downloading an attachment
+
+```
+GET /api/v1/attachments/{sid}
+Authorization: Bearer <access token>
+```
+
+The server returns the attachment's bytes. `{sid}` is the `id` of an entry in a task's
+`attachments` array in the feed. The token must be an `/api/v1` token; an `/mcp` token
+gets `401`.
+
+While Graph is the source, the server fetches the file from Graph
+(`/attachments/{id}/$value`) and streams it to the app without storing it. A To Do
+attachment is at most 25 MB.
+
+A successful response carries these headers:
+
+| Header | Value |
+| --- | --- |
+| `Content-Type` | The attachment's `content_type` from the mirror, or `application/octet-stream` when it has none or it isn't a valid media type. |
+| `Content-Length` | Graph's length, when Graph sends one for an uncompressed body. Graph doesn't send one for `$value` today, so the app must not rely on it. |
+| `Content-Disposition` | `attachment`, with an ASCII `filename` and the real name in `filename*=UTF-8''…`. Control characters are removed and the name is cut to 255 characters. |
+| `Cache-Control` | `private, no-store` |
+| `X-Content-Type-Options` | `nosniff` |
+
+Errors are JSON, like every other `/api/v1` error. `retry: true` means the same request
+can succeed later.
+
+| Status | Body | Meaning |
+| --- | --- | --- |
+| 404 | `{"error":"not_found"}` | The sid is unknown, the attachment was deleted, its list is excluded (section 1.2), or Graph no longer has it. The app drops it on its next pull. |
+| 409 | `{"error":"not_a_file"}` | A reference attachment: a link, with no bytes to download. |
+| 502 | `{"error":"graph_unavailable","retry":true}` | Graph answered 5xx, or the network failed. |
+| 502 | `{"error":"graph_<status>","retry":false}` | Graph refused the request for another reason, such as `graph_403`. |
+| 503 | `{"error":"graph_throttled","retry":true}` | Graph throttled the request (429) after the server's one retry. |
+| 503 | `{"error":"reauth_required","retry":true}` | The owner must sign in to Microsoft again before the server can reach Graph. |
+
+`GET /api/v1/sync/info` reports `capabilities.attachment_download: true` on servers
+that have this route.
 
 ---
 
@@ -906,8 +946,8 @@ recurring tasks" gets built, since each completed instance stays a row.
 ### 10.2 Attachment storage
 
 A new `BlobStore` port in `ports.ts`: R2 on Cloudflare, a directory on Node. In Graph
-mode it is unused; `GET /api/v1/attachments/{sid}` streams bytes from Graph the way
-`/download` does. Migration before the switch copies every attachment's bytes into the
+mode it is unused; `GET /api/v1/attachments/{sid}` streams bytes from Graph
+(section 4.6). Migration before the switch copies every attachment's bytes into the
 store. The volume is unknown — a `SUM(size)` over the new `attachments` table will
 give it once the backfill runs.
 
@@ -1083,7 +1123,8 @@ to build now:
     "account": { "name": "David (work)", "email_hint": "d…@…" },
     "version": "0.18.0",
     "capabilities": { "my_day": true, "step_order": true, "sub_resources": true,
-                      "list_appearance": true, "push": "websocket",
+                      "list_appearance": true, "attachment_download": true,
+                      "push": "websocket",
                       "source": "graph" }
   }
   ```
