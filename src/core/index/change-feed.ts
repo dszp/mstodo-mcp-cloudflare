@@ -164,8 +164,8 @@ const TASK_FEED_COLUMNS = [
 // Every sid of `kind` for the given Graph IDs, in one query.
 function sidsFor(sql: SqlDb, kind: string, graphIds: string[]): Map<string, string> {
   const out = new Map<string, string>();
-  for (let i = 0; i < graphIds.length; i += 200) {
-    const chunk = graphIds.slice(i, i + 200);
+  for (let i = 0; i < graphIds.length; i += IN_CHUNK) {
+    const chunk = graphIds.slice(i, i + IN_CHUNK);
     const rows = sql
       .exec<{ graph_id: string; sid: string }>(
         `SELECT graph_id, sid FROM entity_map WHERE kind = ? AND graph_id IN (${chunk.map(() => "?").join(",")})`,
@@ -177,6 +177,11 @@ function sidsFor(sql: SqlDb, kind: string, graphIds: string[]): Map<string, stri
   }
   return out;
 }
+
+// Durable Object SQLite allows 100 bound parameters per statement (node's
+// SQLite allows far more, so only the DO tests catch this). The entity_map
+// read binds one more than the chunk.
+const IN_CHUNK = 90;
 
 function inPlaceholders(n: number): string {
   return Array.from({ length: n }, () => "?").join(",");
@@ -192,8 +197,8 @@ export function buildTasks(sql: SqlDb, taskIds: string[], timeZone: string): Map
   const steps: Row[] = [];
   const links: Row[] = [];
   const atts: Row[] = [];
-  for (let i = 0; i < taskIds.length; i += 200) {
-    const chunk = taskIds.slice(i, i + 200);
+  for (let i = 0; i < taskIds.length; i += IN_CHUNK) {
+    const chunk = taskIds.slice(i, i + IN_CHUNK);
     const ph = inPlaceholders(chunk.length);
     tasks.push(...sql.exec(`SELECT ${TASK_FEED_COLUMNS} FROM tasks WHERE task_id IN (${ph})`, ...chunk).toArray());
     steps.push(...sql.exec(`SELECT * FROM checklist_items WHERE task_id IN (${ph}) ORDER BY created_at, item_id`, ...chunk).toArray());
@@ -257,8 +262,8 @@ export function buildTasks(sql: SqlDb, taskIds: string[], timeZone: string): Map
 
   const clocks = new Map<string, Record<string, number>>();
   const sids = [...taskSids.values()];
-  for (let i = 0; i < sids.length; i += 200) {
-    const chunk = sids.slice(i, i + 200);
+  for (let i = 0; i < sids.length; i += IN_CHUNK) {
+    const chunk = sids.slice(i, i + IN_CHUNK);
     const rows = sql
       .exec<{ sid: string; field: string; at_ms: number }>(
         `SELECT sid, field, at_ms FROM field_clock WHERE kind = 'task' AND sid IN (${inPlaceholders(chunk.length)})`,
@@ -306,8 +311,8 @@ export function buildTasks(sql: SqlDb, taskIds: string[], timeZone: string): Map
 
 function buildLists(sql: SqlDb, listIds: string[]): Map<string, FeedList> {
   const out = new Map<string, FeedList>();
-  for (let i = 0; i < listIds.length; i += 200) {
-    const chunk = listIds.slice(i, i + 200);
+  for (let i = 0; i < listIds.length; i += IN_CHUNK) {
+    const chunk = listIds.slice(i, i + IN_CHUNK);
     // The group's sid, only while the group is mirrored: a list naming a
     // group the last read didn't return goes out ungrouped.
     const rows = sql
@@ -344,8 +349,8 @@ function buildLists(sql: SqlDb, listIds: string[]): Map<string, FeedList> {
 
 function buildGroups(sql: SqlDb, groupIds: string[]): Map<string, FeedListGroup> {
   const out = new Map<string, FeedListGroup>();
-  for (let i = 0; i < groupIds.length; i += 200) {
-    const chunk = groupIds.slice(i, i + 200);
+  for (let i = 0; i < groupIds.length; i += IN_CHUNK) {
+    const chunk = groupIds.slice(i, i + IN_CHUNK);
     const rows = sql
       .exec(`SELECT * FROM list_groups WHERE group_id IN (${inPlaceholders(chunk.length)})`, ...chunk)
       .toArray();

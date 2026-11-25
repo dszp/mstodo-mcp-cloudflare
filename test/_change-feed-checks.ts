@@ -139,3 +139,16 @@ export async function runChangeFeedChecks(c: IndexCore) {
     "server_id is created once": /^[0-9a-f-]{36}$/.test(info1.server_id) && info1.server_id === info2.server_id,
   };
 }
+
+// A page larger than Durable Object SQLite's 100 bound parameters per
+// statement: the feed's IN-list reads must split below it.
+export function runLargePageChecks(c: IndexCore) {
+  c.upsertList({ id: "LB", displayName: "Big" } as never);
+  for (let i = 0; i < 250; i++) c.upsertTask(task(`B${i}`, `big ${i}`), "LB");
+  const { all } = walk(c, null, "all", 1000);
+  const tasks = all.filter((x) => x.kind === "task" && !x.deleted);
+  return {
+    "a 1000-row page returns every task": tasks.length === 250,
+    "every task carries its list's sid": tasks.every((x) => x.kind === "task" && !x.deleted && typeof x.data.list_id === "string"),
+  };
+}
