@@ -175,6 +175,9 @@ async function sessionAttach(
   args: AttachArgs,
 ): Promise<UploadResult> {
   const total = args.bytes.byteLength;
+  // Same-name attachments already on the task, so a commit that Graph reports
+  // as a failure can be told apart from what was there before (see below).
+  const before = await sameNameIds(graph, args);
   const session = await graph.postJson(
     `${attachmentsUrl(args.listId, args.taskId)}/createUploadSession`,
     { attachmentInfo: { attachmentType: "file", name: args.name, size: total } },
@@ -228,6 +231,17 @@ async function sessionAttach(
     }
     // Anything else: release the session and surface a typed error.
     const detail = await res.text().catch(() => "");
+    // Graph can answer the final chunk with a 5xx after it has committed the
+    // attachment (seen live, 2026-11-24: a 6 MB PDF, generalException, file
+    // attached). Look for a new attachment of this name before calling it a
+    // failure, so the person isn't told an attached file failed.
+    if (end + 1 === total && res.status >= 500 && before !== null) {
+      const id = await findCommitted(graph, args, before);
+      if (id !== null) {
+        log.warn("upload_session_commit_after_error", { status: res.status, task_id: args.taskId });
+        return { attachment_id: id, name: args.name, size: total, content_type: args.contentType, via: "session" };
+      }
+    }
     await cancelSession(session.uploadUrl, accessToken);
     throw new GraphError(res.status, `graph_${res.status}`, detail.slice(0, 500));
   }
@@ -235,6 +249,33 @@ async function sessionAttach(
   // Ran out of bytes without a 201 Created — Graph never finalized.
   await cancelSession(session.uploadUrl, accessToken);
   throw new GraphError(0, "upload_session_incomplete");
+}
+
+// Waits before each look for an attachment Graph committed despite an error.
+const COMMIT_CHECK_DELAYS_MS = [0, 1000, 2000];
+
+async function sameNameIds(graph: GraphClient, args: AttachArgs): Promise<Set<string> | null> {
+  try {
+    const all = await listExistingFileAttachments(graph, args.listId, args.taskId);
+    return new Set(all.filter((a) => a.name === args.name).map((a) => a.id));
+  } catch (e) {
+    log.warn("upload_session_snapshot_failed", { task_id: args.taskId, error: String(e) });
+    return null;
+  }
+}
+
+async function findCommitted(graph: GraphClient, args: AttachArgs, before: Set<string>): Promise<string | null> {
+  for (const ms of COMMIT_CHECK_DELAYS_MS) {
+    if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+    try {
+      const all = await listExistingFileAttachments(graph, args.listId, args.taskId);
+      const hit = all.find((a) => a.name === args.name && !before.has(a.id));
+      if (hit) return hit.id;
+    } catch (e) {
+      log.warn("upload_session_commit_check_failed", { task_id: args.taskId, error: String(e) });
+    }
+  }
+  return null;
 }
 
 async function cancelSession(uploadUrl: string, accessToken: string): Promise<void> {
