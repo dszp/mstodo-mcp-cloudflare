@@ -4,6 +4,8 @@
 // Workers, the in-process IndexCore on Node). Run by
 // test/api-routes.test.ts and test-node/api-routes.test.ts.
 import { expect } from "vitest";
+import { storeLinkRules } from "../src/core/config/loader";
+import { LinkRulesConfigSchema } from "../src/core/config/schemas";
 import { ownerIndex } from "../src/core/owner-index";
 import type { AppEnv } from "../src/core/ports";
 import { VERSION } from "../src/core/version";
@@ -34,7 +36,7 @@ export async function runApiRouteChecks(env: AppEnv, fetchFn: (req: Request) => 
   const probe = await check("info without token", await get("/api/v1/sync/info"), 200);
   const probeBody = (await probe.json()) as Record<string, unknown>;
   expect(Object.keys(probeBody)).toEqual(["server_id"]);
-  for (const path of ["/api/v1/sync/changes", "/api/v1/tasks/x", "/api/v1/search?q=x", "/api/v1/nope"]) {
+  for (const path of ["/api/v1/sync/changes", "/api/v1/tasks/x", "/api/v1/search?q=x", "/api/v1/link-rules", "/api/v1/nope"]) {
     const res = await check(`${path} without token`, await get(path), 401);
     expect([path, res.headers.get("www-authenticate")]).toEqual([
       path,
@@ -57,6 +59,38 @@ export async function runApiRouteChecks(env: AppEnv, fetchFn: (req: Request) => 
     capabilities: { source: "graph" },
   });
   expect(JSON.stringify(info)).not.toContain("test-owner@");
+
+  // Link rules: the app's copy, and the rev /sync/info carries for it.
+  const rules = async () =>
+    (await (await check("link rules", await get("/api/v1/link-rules", token), 200)).json()) as {
+      rev: string;
+      rules: Array<{ id: string }>;
+    };
+  const none = await rules();
+  expect(none.rules).toEqual([]);
+  expect(info.link_rules_rev).toBe(none.rev);
+  await storeLinkRules(
+    env,
+    LinkRulesConfigSchema.parse({
+      rules: [
+        { id: "web", pattern: "(T\\d{8})", url_template: "https://example.com/$1" },
+        { id: "off", pattern: "x", url_template: "https://example.com/", enabled: false },
+        { id: "app", pattern: "(y)", url_template: "obsidian://$1" },
+      ],
+    }),
+  );
+  const some = await rules();
+  expect(some.rules.map((r) => r.id)).toEqual(["web"]);
+  expect(some.rev).not.toBe(none.rev);
+  const info2 = (await (await get("/api/v1/sync/info", token)).json()) as { link_rules_rev: string };
+  expect(info2.link_rules_rev).toBe(some.rev);
+  // Stored rules that don't parse: /sync/info still answers, with no rev.
+  await env.TODO_CACHE.put("config:link_rules", JSON.stringify({ rules: [{ id: 1 }] }));
+  const info3 = (await (await check("info with bad rules", await get("/api/v1/sync/info", token), 200)).json()) as {
+    link_rules_rev: string | null;
+  };
+  expect(info3.link_rules_rev).toBeNull();
+  await env.TODO_CACHE.delete("config:link_rules");
 
   // The feed, then the same cursor again: caught up.
   const page = (await (await check("changes", await get("/api/v1/sync/changes?scope=all", token), 200)).json()) as {

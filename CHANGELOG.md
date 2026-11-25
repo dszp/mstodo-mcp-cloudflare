@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since My Day tasks in them (flagged emails, for one) are missing from it.
 
 ### Added
+- **`GET /api/v1/link-rules`** (docs/SYNC-API.md section 4.7): the owner's enabled link rules
+  whose URL template is `http` or `https`, without `external_id_template`, so the app can mark
+  matches in titles and notes before the server makes the link. `/sync/info` carries
+  `link_rules_rev`, a digest of that response, so the app refetches only when it changes.
 - **List groups, sidebar order and theme in the sync feed** (docs/SYNC-API.md section 10.4),
   read-only from Substrate. Feed lists carry `group_id`, `sort_key` and `theme`; groups
   arrive as a new `list_group` kind; `/sync/info` reports `capabilities.list_appearance`.

@@ -10,6 +10,7 @@ import type { AppEnv } from "../ports";
 import type { Props } from "../types";
 import { VERSION } from "../version";
 import { attachmentBySid } from "./attachments";
+import { currentLinkRules, linkRulesRoute } from "./link-rules";
 import { syncMutations, type BackgroundWork } from "./mutations";
 import { json } from "./respond";
 
@@ -71,6 +72,7 @@ function matchRoute(path: string): Route | null {
   if (path === "/sync/info") return syncInfo;
   if (path === "/search") return search;
   if (path === "/lists/excluded") return excludedLists;
+  if (path === "/link-rules") return linkRulesRoute;
   const task = /^\/tasks\/([^/]+)$/.exec(path);
   if (task) return (_url, env) => taskBySid(task[1], env);
   const attachment = /^\/attachments\/([^/]+)$/.exec(path);
@@ -143,13 +145,20 @@ export function ftsTerms(text: string): string {
 // GET /api/v1/sync/info with a token: everything the app needs to set up and
 // label the account (section 14.1). The owner's address is sent as a hint.
 async function syncInfo(_url: URL, env: AppEnv): Promise<Response> {
-  const [info, identity] = await Promise.all([ownerIndex(env).syncInfo(), loadIdentity(env)]);
+  const [info, identity, linkRules] = await Promise.all([
+    ownerIndex(env).syncInfo(),
+    loadIdentity(env),
+    // Stored rules that no longer parse mustn't take /sync/info down with
+    // them; the app then keeps the rules it has (section 4.7).
+    currentLinkRules(env).catch(() => null),
+  ]);
   return json({
     server_id: info.server_id,
     cursor: info.cursor,
     account: { name: identity?.displayName ?? null, email_hint: emailHint(info.account.email) },
     version: VERSION,
     capabilities: info.capabilities,
+    link_rules_rev: linkRules?.rev ?? null,
   });
 }
 

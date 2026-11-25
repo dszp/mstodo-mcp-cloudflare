@@ -537,6 +537,82 @@ can succeed later.
 `GET /api/v1/sync/info` reports `capabilities.attachment_download: true` on servers
 that have this route.
 
+### 4.7 Link rules
+
+```
+GET /api/v1/link-rules
+Authorization: Bearer <access token>
+```
+
+The owner's link rules turn text in a task into the task's link: a ticket number in a
+title becomes a link to the ticket. The server applies them after every write that
+changes a title or body through this server, from a sync mutation or an MCP tool, and
+the resulting link reaches the app in the feed like any other. An edit made in
+Microsoft To Do itself doesn't run them. This route lets the app also mark matches in
+titles and notes as the person types, before that link exists.
+
+```json
+{
+  "rev": "9f2c4e01a7b3d5e6",
+  "rules": [
+    {
+      "id": "autotask-ticket",
+      "pattern": "(T\\d{8}\\.\\d{4}(?:\\.\\d{3})?)",
+      "flags": "",
+      "fields": "both",
+      "url_template": "https://example.autotask.net/…&TicketNumber=$1",
+      "display_template": "Ticket $1",
+      "application_name": "Autotask"
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `rev` | Changes whenever the returned rules change. `GET /api/v1/sync/info` carries the same value as `link_rules_rev`. |
+| `pattern`, `flags` | A JavaScript regular expression, without delimiters. |
+| `fields` | Where the rule looks: `title`, `body` (the task's note) or `both`. |
+| `url_template`, `display_template` | `$1`, `$2`, … are replaced with the match's capture groups; a group that didn't take part becomes empty. A `display_template` of `null` means the matched text itself. |
+| `application_name` | The name the link shows, as in "Open in Autotask". |
+
+The route returns only rules that are enabled and whose `url_template` starts with
+`http://` or `https://`. The server's dedupe template (`external_id_template`) isn't
+sent; the app has no use for it.
+
+**When to fetch.** Read `link_rules_rev` from `/sync/info` when the app starts and
+after it reconnects, and fetch the rules when the value differs from the stored one.
+`link_rules_rev` is `null` when the stored rules can't be read; the app keeps the copy
+it has. A server without the field predates this route.
+
+**How the server applies them, which the app must not contradict:**
+
+- A task has at most one link while Microsoft To Do is the source. The server tries
+  rules in array order, the title before the body for a `both` rule, and the first
+  match becomes the link. Every other match only gets a highlight in the app.
+- A task that already has a link, including the link Outlook adds to a flagged email,
+  gets no new one.
+- The server matches only the first 8,192 characters of a note.
+
+**Running the patterns on Apple platforms.** `NSRegularExpression` (ICU) accepts the
+syntax these rules use, including lookahead, lookbehind and named groups. Where it
+differs:
+
+- Flags: map `i` to `.caseInsensitive`, `m` to `.anchorsMatchLines` and `s` to
+  `.dotMatchesLineSeparators`, and ignore `g`. Skip a rule whose flags include `u`, `y`,
+  `d` or `v`.
+- `\d` and `\w` match only ASCII in JavaScript but any Unicode digit or letter in ICU,
+  so the app can mark a match the server won't link. The server's result is the one
+  that counts.
+- Skip a rule whose pattern fails to compile, rather than failing the whole set.
+
+**What the app does with a match.** It builds the URL from `url_template` and opens it
+only when the result is an `http` or `https` URL. A highlight looks different from the
+task's real link and doesn't offer to edit or delete a link.
+
+More than one link per task waits until the server is the source of record
+(section 10); the feed's `links` array won't change shape.
+
 ---
 
 ## 5. Sending edits
@@ -1236,7 +1312,8 @@ to build now:
     "capabilities": { "my_day": true, "step_order": true, "sub_resources": true,
                       "list_appearance": true, "attachment_download": true,
                       "push": "websocket",
-                      "source": "graph" }
+                      "source": "graph" },
+    "link_rules_rev": "9f2c4e01a7b3d5e6"
   }
   ```
 
@@ -1463,6 +1540,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-25: section 4.7 added: `GET /api/v1/link-rules` and `link_rules_rev` in
+  `/sync/info`, so the app can mark link-rule matches before the server makes the link.
 - 2026-11-25: section 5.2's table split into one row per op, with the fields the server
   accepts. The shared rows had implied that `step.update`, `step.delete`, `link.update`
   and `link.delete` take `task_id`; the server rejects it. `myday.remove` ignores
