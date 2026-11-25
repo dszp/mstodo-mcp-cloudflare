@@ -2644,6 +2644,7 @@ export class IndexCore implements TokenProvider {
     this.#substrateUnavailable = false;
     this.#appearanceUnavailable = false;
     await this.#state.delete(APPEARANCE_BACKOFF_KEY);
+    await this.#state.delete(APPEARANCE_FIRST_READ_KEY);
     // Kill every MCP grant paired with the outgoing account; the new account's
     // grant is issued under the fresh epoch right after this wipe.
     await this.#newEpoch();
@@ -3080,7 +3081,9 @@ export class IndexCore implements TokenProvider {
       }
       const r = this.applyListAppearance(folders, groups, listIds, now);
       if ((await this.#state.get<number>(APPEARANCE_FIRST_READ_KEY)) === undefined) {
-        await this.#state.put(APPEARANCE_FIRST_READ_KEY, now);
+        // The apply's time, not the read's start: the groups' entity_map rows
+        // are stamped as they are inserted, after the GETs.
+        await this.#state.put(APPEARANCE_FIRST_READ_KEY, Date.now());
       }
       this.#setSyncState(APPEARANCE_STATE_KEY, { last_synced_at: now, status: "idle", last_error: null });
       if (backoff) await this.#state.delete(APPEARANCE_BACKOFF_KEY);

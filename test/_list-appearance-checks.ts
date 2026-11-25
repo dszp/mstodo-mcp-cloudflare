@@ -462,6 +462,7 @@ export async function runListAppearanceSupersededChecks(c: IndexCore, env: AppEn
     };
     await c.runSyncCycle();
     const afterRace = c.getList("W1");
+    const firstReadAfterDrop = await c.sidebarFirstReadAt();
     const groupKept = sql.exec<{ n: number }>("SELECT count(*) n FROM list_groups WHERE group_id = 'WG'").one().n === 1;
     const readsBefore = reads(m);
     m.folders = [{ Id: "W1", ThemeColor: "dark_red", OrderDateTime: "2026-11-01T00:00:00Z", ParentFolderGroupId: "WG" }];
@@ -469,8 +470,12 @@ export async function runListAppearanceSupersededChecks(c: IndexCore, env: AppEn
     await c.runSyncCycle();
     const afterNext = c.getList("W1");
     const firstRead = await c.sidebarFirstReadAt();
+    await c.resetIdentity();
+    const afterReset = await c.sidebarFirstReadAt();
     return {
-      "the dropped read doesn't count as the first read; the next one does": firstRead !== null,
+      "the dropped read doesn't count as the first read": firstReadAfterDrop === null,
+      "the next read counts as the first": firstRead !== null,
+      "an owner switch forgets the first read": afterReset === null,
       "the write's theme survives the stale read": afterRace?.theme_color === "dark_red",
       "the write's group survives the stale read": groupKept && afterRace?.group_id === "WG",
       "the next cycle reads again and marks the list read": reads(m) > readsBefore && afterNext?.appearance_synced_at != null,
