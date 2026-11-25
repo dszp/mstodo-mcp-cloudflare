@@ -1730,7 +1730,9 @@ class ToDoTools implements TokenProvider {
           // checked live, so the person isn't sent to a page whose upload fails
           // after they've picked files.
           if (meta?.list_id !== list_id) {
-            const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}?$select=id,title`;
+            // No $select: Graph answers `$select` on a To Do task with 400
+            // RequestBroker--ParseUri (observed 2026-11-25), even for a real id.
+            const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}`;
             try {
               const live = await graph.getJson(url, TodoTaskSchema);
               if (live.title) scope.task_title = live.title;

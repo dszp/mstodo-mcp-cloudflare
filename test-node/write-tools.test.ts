@@ -530,8 +530,8 @@ describe("error mapping at the tool boundary", () => {
 describe("create_upload_link", () => {
   const vars = { SERVICE_BASE_URL: "https://todo.test" };
   const live = (m: string, u: string) =>
-    m === "GET" && u.startsWith(`${G}/L1/tasks/T2?`) ? json({ id: "T2", title: "fresh task" }) : undefined;
-  const gone = (m: string, u: string) => (m === "GET" && u.startsWith(`${G}/L1/tasks/NOPE?`) ? notFound() : undefined);
+    m === "GET" && u === `${G}/L1/tasks/T2` ? json({ id: "T2", title: "fresh task" }) : undefined;
+  const gone = (m: string, u: string) => (m === "GET" && u === `${G}/L1/tasks/NOPE` ? notFound() : undefined);
 
   it("mints from the index without asking Graph when the task is mirrored in that list", async () => {
     const h = await harness({ routes: [], vars });
