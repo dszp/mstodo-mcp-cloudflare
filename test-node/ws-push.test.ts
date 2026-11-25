@@ -1,6 +1,6 @@
 // Push over WebSocket on the Node host (docs/SYNC-API.md section 7.3), and
 // IndexCore's announce rules, which both hosts share.
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket from "ws";
@@ -10,6 +10,7 @@ import { stateStore } from "../src/hosts/node/state-store";
 import { IndexCore, announcing } from "../src/core/index/index-core";
 import { SocketHub, SOCKET_PATH, type SocketGrant } from "../src/hosts/node/ws-push";
 import type { ChangeNotifier } from "../src/core/ports";
+import { COALESCE_WINDOW_MS } from "../src/core/sync/coalesce";
 
 function core(notifier: ChangeNotifier) {
   const db = openDatabase(":memory:");
@@ -22,15 +23,26 @@ const task = (id: string, title: string, at = "2026-11-24T10:00:00Z") =>
   ({ id, title, status: "notStarted", lastModifiedDateTime: at }) as never;
 
 describe("announce", () => {
-  it("announces once per write that moved the log, with the new cursor", async () => {
-    const sent: string[] = [];
-    const c = core({ announce: (x) => sent.push(x), closeAll: () => {}, sweep: () => {} });
-    c.upsertList({ id: "L1", displayName: "One" } as never);
-    c.upsertTask(task("T1", "a"), "L1");
-    c.upsertTask(task("T1", "a"), "L1"); // identical: nothing logged
-    c.getList("L1"); // read
-    expect(sent.length).toBe(2);
-    expect(sent[1]).toBe(c.syncCursor());
+  it("announces a write that moved the log at once, and holds the next ones for the window", async () => {
+    vi.useFakeTimers();
+    try {
+      const sent: string[] = [];
+      const c = core({ announce: (x) => sent.push(x), closeAll: () => {}, sweep: () => {} });
+      c.upsertList({ id: "L1", displayName: "One" } as never);
+      expect(sent.length).toBe(1);
+      c.upsertTask(task("T1", "a"), "L1");
+      c.upsertTask(task("T1", "a"), "L1"); // identical: nothing logged
+      c.getList("L1"); // read
+      c.upsertTask(task("T2", "b"), "L1");
+      expect(sent.length).toBe(1);
+      vi.advanceTimersByTime(COALESCE_WINDOW_MS);
+      // The writes inside the window arrive as one message, with the newest cursor.
+      expect(sent).toEqual([sent[0], c.syncCursor()]);
+      vi.advanceTimersByTime(COALESCE_WINDOW_MS * 2);
+      expect(sent.length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("closes every socket on revoke", async () => {
