@@ -62,6 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports `capabilities.attachment_download`.
 
 ### Fixed
+- **Moving a step relative to one that was never dragged works.** Steps get no order value
+  until someone drags one, so `reorder_checklist_item` and the sync API's `step.reorder`
+  failed with `reference_has_no_order` on most tasks (the app's "Add Step Below", and drag to
+  reorder), and `bottom` landed above the unordered steps. The server now first gives the
+  task's other unordered steps order values in their shown order (oldest first, below any
+  ordered ones), one Substrate write each, then makes the move.
+- Manual-order sorts compare `OrderDateTime` as instants: Substrate sends some values without
+  milliseconds, and string order put `…45Z` above `…45.623Z`.
 - The `/download` link's `Content-Disposition` now percent-encodes `'`, `(`, `)`, `*` and `!`
   in `filename*`, as RFC 5987 requires; a `'` in a filename could end the charset prefix early.
 - A `/download` filename longer than 255 characters that ended in an emoji, or that held a lone

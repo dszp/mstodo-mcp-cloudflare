@@ -3,6 +3,7 @@ import { ChecklistItemSchema, type ChecklistItem } from "../graph/types";
 import { createChecklistItem, listChecklistItems } from "../graph/todo-resources";
 import { bestEffort, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { computeOrder, orderValues, type ReorderPosition } from "./position";
+import { msToOrder, ORDER_NUDGE_MS, orderToMs } from "./reorder";
 import { err, ok, type ToolResult } from "./result";
 
 // step.create / step.update / step.delete / step.reorder (docs/SYNC-API.md
@@ -128,6 +129,7 @@ export function reorderStep(
     const sub = await ctx.substrate();
     // Full 429 budget — this is a write.
     const subtasks = await sub.listSubtasks(list_id, task_id);
+    if (position.kind !== "set") await seedStepOrder(ctx, sub, task_id, item_id, subtasks);
     const computed = await computeOrder(position, {
       neighbors: () => orderValues(subtasks.filter((s) => s.Id !== item_id).map((s) => s.OrderDateTime)),
       reference: async (id) => {
@@ -160,4 +162,35 @@ export function reorderStep(
       .sort((a, b) => compareOrderDateTimeDesc(a.order_datetime, b.order_datetime));
     return ok({ list_id, task_id, item_id, order_datetime: newOrder, ordered_items });
   });
+}
+
+// Steps nobody has dragged have no OrderDateTime, and there is nothing to
+// place a step before, after or below among them: a move relative to one
+// failed with reference_has_no_order, and "bottom" landed above them. Give
+// every other unordered step a value first, in the order they show now
+// (ordered steps, then unordered ones oldest first), each below the last, so
+// the list looks the same and the move then has neighbors. One PATCH per
+// unordered step, once per task. A failure part-way keeps the displayed order:
+// the seeded steps sit below every ordered one, in display order, and the rest
+// stay unordered below them. Mutates `subtasks` to the seeded values.
+async function seedStepOrder(
+  ctx: OpsContext,
+  sub: Awaited<ReturnType<OpsContext["substrate"]>>,
+  task_id: string,
+  moving_id: string,
+  subtasks: Array<{ Id?: string; OrderDateTime?: string | null; CreatedDateTime?: string | null }>,
+): Promise<void> {
+  const unordered = subtasks
+    .filter((s) => s.Id && s.Id !== moving_id && orderToMs(s.OrderDateTime) === null)
+    .sort((a, b) => (orderToMs(a.CreatedDateTime) ?? 0) - (orderToMs(b.CreatedDateTime) ?? 0) || (a.Id! < b.Id! ? -1 : 1));
+  if (!unordered.length) return;
+  const ordered = orderValues(subtasks.filter((s) => s.Id !== moving_id).map((s) => s.OrderDateTime));
+  let next = (ordered.length ? Math.min(...ordered) : Date.now()) - ORDER_NUDGE_MS;
+  for (const s of unordered) {
+    const order = msToOrder(next);
+    await sub.patchSubtask(task_id, s.Id!, { OrderDateTime: order });
+    s.OrderDateTime = order;
+    await bestEffort("index_update_step_order_failed", { task_id }, () => ctx.index.setStepOrder(task_id, s.Id!, order));
+    next -= ORDER_NUDGE_MS;
+  }
 }

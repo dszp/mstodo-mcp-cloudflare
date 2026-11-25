@@ -411,6 +411,59 @@ describe("My Day and manual-order write tools", () => {
     expect(h.calls).toMatchSnapshot();
   });
 
+  it("reorder_checklist_item seeds unordered steps in their shown order before a relative move", async () => {
+    // To Do leaves OrderDateTime null until a step is dragged; inserting below
+    // one of those used to fail with reference_has_no_order.
+    const h = await harness({
+      myDay: true,
+      routes: [
+        on("GET", `${S}/taskfolders/L1/tasks/T1?$select=*`, () =>
+          json({ Id: "T1", Subtasks: [
+            { Id: "s2", Subject: "two", OrderDateTime: null, CreatedDateTime: "2026-11-02T00:00:00Z" },
+            { Id: "s1", Subject: "one", OrderDateTime: null, CreatedDateTime: "2026-11-01T00:00:00Z" },
+            { Id: "new", Subject: "one-a", OrderDateTime: null, CreatedDateTime: "2026-11-03T00:00:00Z" },
+          ] }),
+        ),
+        on("PATCH", `${S}/tasks/T1/subtasks/s1`, (b) => json({ Id: "s1", ...(b as object) })),
+        on("PATCH", `${S}/tasks/T1/subtasks/s2`, (b) => json({ Id: "s2", ...(b as object) })),
+        on("PATCH", `${S}/tasks/T1/subtasks/new`, (b) => json({ Id: "new", ...(b as object) })),
+      ],
+    });
+    const r = (await h.call("reorder_checklist_item", { task_id: "T1", list: "L1", item_id: "new", position: "after", reference_item_id: "s1" })) as unknown as {
+      isError: boolean;
+      result: { ordered_items: Array<{ item_id: string; order_datetime: string }> };
+    };
+    expect(r.isError).toBe(false);
+    expect(r.result.ordered_items.map((i) => i.item_id)).toEqual(["s1", "new", "s2"]);
+    const patches = h.calls.filter((c) => c.method === "PATCH");
+    // Oldest unordered step first, the mover last.
+    expect(patches.map((c) => c.url.split("/").pop())).toEqual(["s1", "s2", "new"]);
+    const ms = Object.fromEntries(patches.map((c) => [c.url.split("/").pop(), Date.parse((c.body as { OrderDateTime: string }).OrderDateTime)]));
+    expect([ms.s1 > ms.new, ms.new > ms.s2]).toEqual([true, true]);
+  });
+
+  it("reorder_checklist_item sends bottom below unordered steps, and leaves an all-ordered task alone", async () => {
+    const h = await harness({
+      myDay: true,
+      routes: [
+        on("GET", `${S}/taskfolders/L1/tasks/T1?$select=*`, () =>
+          json({ Id: "T1", Subtasks: [
+            { Id: "a", OrderDateTime: "2026-11-03T00:00:00Z" },
+            { Id: "b", OrderDateTime: null, CreatedDateTime: "2026-11-01T00:00:00Z" },
+          ] }),
+        ),
+        on("PATCH", `${S}/tasks/T1/subtasks/a`, (x) => json({ Id: "a", ...(x as object) })),
+        on("PATCH", `${S}/tasks/T1/subtasks/b`, (x) => json({ Id: "b", ...(x as object) })),
+      ],
+    });
+    const r = (await h.call("reorder_checklist_item", { task_id: "T1", list: "L1", item_id: "a", position: "bottom" })) as unknown as {
+      result: { ordered_items: Array<{ item_id: string }> };
+    };
+    expect(r.result.ordered_items.map((i) => i.item_id)).toEqual(["b", "a"]);
+    // b is seeded first (a is the one moving), then a goes below it.
+    expect(h.calls.filter((c) => c.method === "PATCH").map((c) => c.url.split("/").pop())).toEqual(["b", "a"]);
+  });
+
   it("reorder_my_day_task orders against the cached day", async () => {
     const h = await harness({
       myDay: true,

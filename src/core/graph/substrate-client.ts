@@ -157,10 +157,16 @@ export interface SubstrateTaskDetails {
 // Shared by every surface that mirrors the app's manual order (the My Day
 // aggregation, list_tasks_by_manual_order). String compare is sound because the
 // app's OrderDateTime values are same-zone ISO 8601 (lexicographic == chrono).
+// Substrate sends these instants with and without milliseconds
+// ("…45.623Z", "…47Z"), so compare them as instants: as strings the second
+// sorts first. Unparseable values fall back to string order.
 export function compareOrderDateTimeDesc(a: string | null, b: string | null): number {
   if (a === b) return 0;
   if (a === null) return 1;
   if (b === null) return -1;
+  const am = Date.parse(a);
+  const bm = Date.parse(b);
+  if (!Number.isNaN(am) && !Number.isNaN(bm) && am !== bm) return am < bm ? 1 : -1;
   return a < b ? 1 : -1;
 }
 
