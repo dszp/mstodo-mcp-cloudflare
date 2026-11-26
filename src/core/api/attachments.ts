@@ -1,12 +1,14 @@
-// GET /api/v1/attachments/{sid} — one attachment's bytes, streamed from Graph
-// (docs/SYNC-API.md sections 4.2 and 10.2). The feed carries only an
-// attachment's metadata; the app fetches the file here with its /api/v1 token.
-// While Graph is the source the bytes are never stored: Graph's `$value`
-// response body is passed through unread, so a 25 MB file is never held in
-// memory. The handler is reached only through handleApiRequest, after the
-// resource server and the grant gate.
+// GET /api/v1/attachments/{sid} — one attachment's bytes (docs/SYNC-API.md
+// sections 4.2 and 4.6). The feed carries only an attachment's metadata; the
+// app fetches the file here with its /api/v1 token. With a blob store the
+// bytes are served from its copy, made on the first download (an attachment
+// can't be edited, so a sid always names the same bytes). Without one,
+// Graph's `$value` body is passed through unread, so a 25 MB file is never
+// held in memory. The handler is reached only through handleApiRequest, after
+// the resource server and the grant gate.
 import { isReauthRequired } from "../auth/reauth";
 import { GraphClient, GraphError } from "../graph/client";
+import { attachmentBlobKey } from "../blobs";
 import { log } from "../log";
 import { ownerIndex } from "../owner-index";
 import type { AppEnv } from "../ports";
@@ -43,6 +45,14 @@ export async function attachmentBySid(rawSid: string, env: AppEnv): Promise<Resp
     "x-content-type-options": "nosniff",
   };
 
+  if (env.BLOBS) {
+    const stored = await env.BLOBS.get(attachmentBlobKey(sid)).catch((e: unknown) => {
+      log.warn("blob_get_failed", { attachment: sid, error: String(e) });
+      return null;
+    });
+    if (stored) return new Response(stored.body, { status: 200, headers: { ...headers, "content-length": String(stored.size) } });
+  }
+
   const graph = new GraphClient({
     getAccessToken: () => index.getAccessToken(),
     forceRefresh: () => index.refreshToken(),
@@ -54,6 +64,21 @@ export async function attachmentBySid(rawSid: string, env: AppEnv): Promise<Resp
     upstream = await openAttachmentStream(graph, att.list_id, att.task_id, att.attachment_id);
   } catch (e) {
     return graphFailure(e, att.attachment_id);
+  }
+
+  // Kept for next time: buffered (at most 25 MB), since a store write needs
+  // the length, which Graph doesn't send. A failed write still serves the file.
+  if (env.BLOBS) {
+    let bytes: ArrayBuffer;
+    try {
+      bytes = await upstream.arrayBuffer();
+    } catch {
+      return json({ error: "graph_unavailable", retry: true }, 502);
+    }
+    await env.BLOBS.put(attachmentBlobKey(sid), bytes, { httpMetadata: { contentType: headers["content-type"] } }).catch((e: unknown) =>
+      log.warn("blob_put_failed", { attachment: sid, error: String(e) }),
+    );
+    return new Response(bytes, { status: 200, headers: { ...headers, "content-length": String(bytes.byteLength) } });
   }
 
   // Graph's length, not the mirror's size: the mirror can lag an edit, and a
@@ -81,7 +106,7 @@ export function safeContentType(stored: string | null): string {
 
 // Graph refused or failed. `retry` tells the app whether trying again later
 // can succeed, the same flag a failed mutation carries (section 5.3).
-function graphFailure(e: unknown, attachmentId: string): Response {
+export function graphFailure(e: unknown, attachmentId: string, event = "attachment_download"): Response {
   const message = e instanceof Error ? e.message : String(e);
   if (isReauthRequired(e) || message.includes("not_authenticated") || (e instanceof GraphError && e.status === 401)) {
     return json({ error: "reauth_required", retry: true }, 503);
@@ -92,13 +117,13 @@ function graphFailure(e: unknown, attachmentId: string): Response {
     if (e.status === 404 || (e.status === 400 && (e.detail ?? "").includes("ErrorInvalidIdMalformed"))) {
       return json({ error: "not_found" }, 404);
     }
-    log.warn("attachment_download_graph_error", { attachment_id: attachmentId, status: e.status });
+    log.warn(`${event}_graph_error`, { attachment_id: attachmentId, status: e.status });
     if (e.status === 429) return json({ error: "graph_throttled", retry: true }, 503);
     if (e.status >= 500) return json({ error: "graph_unavailable", retry: true }, 502);
     return json({ error: `graph_${e.status}`, retry: false }, 502);
   }
   // fetch() rejects with a TypeError when the network fails.
   if (e instanceof TypeError) return json({ error: "graph_unavailable", retry: true }, 502);
-  log.error("attachment_download_failed", { attachment_id: attachmentId, error: message });
+  log.error(`${event}_failed`, { attachment_id: attachmentId, error: message });
   return json({ error: "internal_error", retry: true }, 500);
 }

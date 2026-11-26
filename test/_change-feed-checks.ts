@@ -105,11 +105,11 @@ export async function runChangeFeedChecks(c: IndexCore) {
   const info2 = await c.syncInfo();
 
   return {
-    "full sync sends two lists and three live tasks, no deletion records":
-      JSON.stringify(ids(full.all)) === JSON.stringify(["list:+", "list:+", "task:+", "task:+", "task:+"]),
+    "full sync sends the app settings, two lists and three live tasks, no deletion records":
+      JSON.stringify(ids(full.all)) === JSON.stringify(["app_settings:+", "list:+", "list:+", "task:+", "task:+", "task:+"]),
     "full sync ends caught up with an epoch.seq cursor": /^[0-9a-f]+\.\d+$/.test(full.cursor),
     "paging one at a time returns the same entities, no deletion records":
-      JSON.stringify(ids(paged.all)) === JSON.stringify(ids(full.all)) && paged.pages === 5,
+      JSON.stringify(ids(paged.all)) === JSON.stringify(ids(full.all)) && paged.pages === 6,
     "a full sync's intermediate cursors are marked as a walk": pagedCursors.slice(0, -1).every((x) => /\.f\d+$/.test(x)) && !/\.f/.test(pagedCursors[pagedCursors.length - 1]),
     "task references its list by sid": !!t1d && !!l1 && t1d.list_id === l1.id,
     "due goes out as a bare date": t1d?.due === "2026-11-25",

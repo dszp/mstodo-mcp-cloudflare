@@ -43,8 +43,11 @@ import {
   type QueryFilter,
   type SyncStatusReport,
 } from "./sql";
-import { applyMigrations } from "./migrations";
-import { changesSince, currentCursor, taskBySid, taskSids, type FeedResult } from "./change-feed";
+import { applyMigrations, seedAppSettings } from "./migrations";
+import {
+  appSettingsData, changesSince, currentCursor, taskBySid, taskSids, themeImageData,
+  type FeedResult, type FeedThemeImage, type ImageStyle, type SmartList, type SmartListTheme,
+} from "./change-feed";
 import { loadListsConfig, storeListsConfig } from "../config/loader";
 import { ListsConfigSchema, type ListsConfig } from "../config/schemas";
 import {
@@ -825,6 +828,23 @@ export class IndexCore implements TokenProvider {
         Number.isNaN(modified) ? null : modified,
       );
     }
+  }
+
+  // One attachment this server just attached through Graph (an app upload,
+  // section 5.6), recorded at once so the feed carries it before the next
+  // sub-resource scan.
+  putAttachment(taskId: string, listId: string, a: { id: string; name: string; size: number; content_type: string }): void {
+    if (this.#isExcluded(listId)) return;
+    this.#sql.exec(
+      `INSERT INTO attachments (attachment_id, task_id, list_id, name, size, content_type, kind, modified_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'file', ?)
+       ON CONFLICT(attachment_id) DO NOTHING`,
+      a.id, taskId, listId, a.name, a.size, a.content_type, Date.now(),
+    );
+  }
+
+  deleteAttachment(attachmentId: string): void {
+    this.#sql.exec("DELETE FROM attachments WHERE attachment_id = ?", attachmentId);
   }
 
   // Mark a task's checklist stale so the next budgeted scan re-fetches it. The
@@ -1928,6 +1948,153 @@ export class IndexCore implements TokenProvider {
     return row;
   }
 
+  // ── App-owned appearance (docs/SYNC-API.md section 4.8) ──────────────────
+
+  themeImage(id: string): (FeedThemeImage & { id: string }) | null {
+    const row = this.#sql.exec("SELECT * FROM theme_images WHERE image_id = ?", id).toArray()[0];
+    return row ? { id, ...themeImageData(row) } : null;
+  }
+
+  // Records an uploaded image whose bytes are already in the blob store. The
+  // same bytes uploaded again keep the stored row, dimensions included.
+  putThemeImage(img: { image_id: string; content_type: string; size: number; width: number; height: number; brightness: number | null }): {
+    created: boolean;
+    image: FeedThemeImage & { id: string };
+  } {
+    const existing = this.themeImage(img.image_id);
+    if (existing) return { created: false, image: existing };
+    this.#sql.exec(
+      `INSERT INTO theme_images (image_id, content_type, size, width, height, brightness, created_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      img.image_id, img.content_type, img.size, img.width, img.height, img.brightness, Date.now(),
+    );
+    return { created: true, image: this.themeImage(img.image_id)! };
+  }
+
+  #themeImageInUse(id: string): boolean {
+    if (this.#sql.exec("SELECT 1 FROM list_images WHERE image_id = ? LIMIT 1", id).toArray().length) return true;
+    const settings = appSettingsData(this.#sql).smart_lists;
+    return Object.values(settings).some((t) => t?.image_id === id);
+  }
+
+  // The row only; the caller deletes the bytes. A failed byte delete leaves
+  // an object the sweep removes, since the table no longer has it.
+  deleteThemeImage(id: string): "deleted" | "in_use" | "not_found" {
+    return this.#transact(() => {
+      if (!this.#sql.exec("SELECT 1 FROM theme_images WHERE image_id = ?", id).toArray().length) return "not_found";
+      if (this.#themeImageInUse(id)) return "in_use";
+      this.#sql.exec("DELETE FROM theme_images WHERE image_id = ?", id);
+      return "deleted";
+    });
+  }
+
+  // Sets a list's image and/or its style; a field left undefined keeps its
+  // value, null clears it. A list with neither has no row.
+  setListImage(
+    listId: string,
+    patch: { image_id?: string | null; image_style?: ImageStyle | null },
+  ): "ok" | "unknown_list" | "unknown_theme_image" {
+    return this.#transact(() => {
+      if (!this.#sql.exec("SELECT 1 FROM lists WHERE list_id = ?", listId).toArray().length) return "unknown_list";
+      const imageId = patch.image_id;
+      if (imageId && !this.#sql.exec("SELECT 1 FROM theme_images WHERE image_id = ?", imageId).toArray().length) {
+        return "unknown_theme_image";
+      }
+      const cur = this.#sql
+        .exec<{ image_id: string | null; style_json: string | null }>("SELECT image_id, style_json FROM list_images WHERE list_id = ?", listId)
+        .toArray()[0];
+      const nextImage = imageId === undefined ? (cur?.image_id ?? null) : imageId;
+      const nextStyle =
+        patch.image_style === undefined ? (cur?.style_json ?? null) : patch.image_style === null ? null : JSON.stringify(patch.image_style);
+      if (nextImage === null && nextStyle === null) {
+        this.#sql.exec("DELETE FROM list_images WHERE list_id = ?", listId);
+        return "ok";
+      }
+      this.#sql.exec(
+        `INSERT INTO list_images (list_id, image_id, style_json) VALUES (?, ?, ?)
+         ON CONFLICT(list_id) DO UPDATE SET image_id = excluded.image_id, style_json = excluded.style_json`,
+        listId, nextImage, nextStyle,
+      );
+      if (imageId) this.#sql.exec("UPDATE theme_images SET unreferenced_since = NULL WHERE image_id = ?", imageId);
+      return "ok";
+    });
+  }
+
+  // Replaces the themes of the smart lists named; null returns one to the
+  // app's default. All or nothing: one unknown image refuses the whole call.
+  setSmartListThemes(values: Partial<Record<SmartList, SmartListTheme | null>>): "ok" | "unknown_theme_image" {
+    return this.#transact(() => {
+      const images = Object.values(values).flatMap((v) => (v?.image_id ? [v.image_id] : []));
+      for (const id of images) {
+        if (!this.#sql.exec("SELECT 1 FROM theme_images WHERE image_id = ?", id).toArray().length) return "unknown_theme_image";
+      }
+      for (const [key, v] of Object.entries(values)) {
+        if (v === null || v === undefined) this.#sql.exec("DELETE FROM app_settings WHERE key = ?", key);
+        else {
+          this.#sql.exec(
+            "INSERT INTO app_settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            key, JSON.stringify({ color: v.color, image_id: v.image_id, image_style: v.image_style }),
+          );
+        }
+      }
+      for (const id of images) this.#sql.exec("UPDATE theme_images SET unreferenced_since = NULL WHERE image_id = ?", id);
+      return "ok";
+    });
+  }
+
+  // The blob sweep's index half (section 4.9). Marks each unused image with
+  // when the sweep first saw it unused, clears the mark on used ones, and
+  // deletes the rows of images unused for `idleMs`. Returns the deleted ids,
+  // whose bytes the caller removes.
+  sweepThemeImages(nowMs: number, idleMs: number): string[] {
+    return this.#transact(() => {
+      const used = new Set(
+        this.#sql
+          .exec<{ image_id: string }>("SELECT DISTINCT image_id FROM list_images WHERE image_id IS NOT NULL")
+          .toArray()
+          .map((r) => r.image_id),
+      );
+      for (const t of Object.values(appSettingsData(this.#sql).smart_lists)) if (t?.image_id) used.add(t.image_id);
+      const rows = this.#sql
+        .exec<{ image_id: string; unreferenced_since: number | null }>(
+          "SELECT image_id, unreferenced_since FROM theme_images",
+        )
+        .toArray();
+      const expired: string[] = [];
+      for (const r of rows) {
+        if (used.has(r.image_id)) {
+          if (r.unreferenced_since !== null) this.#sql.exec("UPDATE theme_images SET unreferenced_since = NULL WHERE image_id = ?", r.image_id);
+          continue;
+        }
+        // The idle time runs from the first sweep that saw it unused.
+        if (r.unreferenced_since === null) {
+          this.#sql.exec("UPDATE theme_images SET unreferenced_since = ? WHERE image_id = ?", nowMs, r.image_id);
+        } else if (nowMs - r.unreferenced_since >= idleMs) expired.push(r.image_id);
+      }
+      for (const id of expired) this.#sql.exec("DELETE FROM theme_images WHERE image_id = ?", id);
+      return expired;
+    });
+  }
+
+  // Of the given theme image ids and attachment sids (from a blob store
+  // listing), those the mirror still has. The sweep deletes the rest.
+  liveBlobIds(themeImageIds: string[], attachmentSids: string[]): { theme_images: string[]; attachments: string[] } {
+    const images = themeImageIds.filter(
+      (id) => this.#sql.exec("SELECT 1 FROM theme_images WHERE image_id = ?", id).toArray().length > 0,
+    );
+    const atts = attachmentSids.filter(
+      (sid) =>
+        this.#sql
+          .exec(
+            `SELECT 1 FROM entity_map m JOIN attachments a ON a.attachment_id = m.graph_id
+              WHERE m.kind = 'attachment' AND m.sid = ?`,
+            sid,
+          )
+          .toArray().length > 0,
+    );
+    return { theme_images: images, attachments: atts };
+  }
+
   // FTS search answered with feed-shaped tasks, in one call (one RPC on
   // Cloudflare instead of one per hit).
   syncSearch(query: string, limit: number): NonNullable<ReturnType<typeof taskBySid>>[] {
@@ -2042,9 +2209,20 @@ export class IndexCore implements TokenProvider {
       attachment: ["attachments", "attachment_id"],
       // A sidebar group: list.update's group_id and list.reorder's reference.
       list_group: ["list_groups", "group_id"],
+      // App-owned (section 4.8): an image's sid is its id.
+      theme_image: ["theme_images", "image_id"],
     };
     const out: Record<string, { graph_id: string | null; live: boolean; excluded?: true }> = {};
     for (const r of refs) {
+      // The app_settings entity always exists once its sid is minted; it has
+      // no row of its own until a smart list is themed.
+      if (r.kind === "app_settings") {
+        const m = this.#sql
+          .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = 'app_settings' AND sid = ?", r.sid)
+          .toArray()[0];
+        out[`${r.kind}:${r.sid}`] = { graph_id: m?.graph_id ?? null, live: !!m };
+        continue;
+      }
       const t = table[r.kind];
       if (!t) continue;
       const m = this.#sql
@@ -2055,7 +2233,8 @@ export class IndexCore implements TokenProvider {
         !!graphId && this.#sql.exec(`SELECT 1 FROM ${t[0]} WHERE ${t[1]} = ? LIMIT 1`, graphId).toArray().length > 0;
       let listId: string | null = null;
       if (graphId && r.kind === "list") listId = graphId;
-      else if (r.kind === "list_group") listId = null;
+      // Groups and theme images belong to no list.
+      else if (r.kind === "list_group" || r.kind === "theme_image") listId = null;
       else if (graphId && live) {
         listId = this.#sql.exec<{ l: string }>(`SELECT list_id l FROM ${t[0]} WHERE ${t[1]} = ?`, graphId).toArray()[0]?.l ?? null;
       } else if (r.kind === "task") {
@@ -2659,10 +2838,17 @@ export class IndexCore implements TokenProvider {
     // A different owner: no client may continue from a cursor into the old
     // owner's data. Drop the change log and stable IDs (the deletes above
     // logged tombstones) and replace the epoch.
-    for (const table of ["checklist_items", "linked_resources", "attachments", "list_groups", "sync_log", "entity_map"]) {
+    // The app-owned appearance (section 4.8) was the old owner's too. Its
+    // image bytes are left to the blob sweep, which deletes any image the
+    // table no longer has.
+    for (const table of [
+      "checklist_items", "linked_resources", "attachments", "list_groups",
+      "theme_images", "list_images", "app_settings", "field_clock", "sync_log", "entity_map",
+    ]) {
       this.#sql.exec(`DELETE FROM ${table}`);
     }
     this.#sql.exec("UPDATE sync_meta SET epoch = lower(hex(randomblob(8))) WHERE id = 1");
+    seedAppSettings(this.#sql);
     await this.#alarms.deleteAlarm();
   }
 

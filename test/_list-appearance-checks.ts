@@ -379,7 +379,7 @@ export function runListAppearanceMigrationChecks(sql: SqlDb) {
   sql.exec("INSERT INTO lists (list_id, display_name, sync) VALUES ('M1', 'kept', 'todo')");
   const top = () => sql.exec<{ s: number | null }>("SELECT max(seq) s FROM sync_log").one().s ?? 0;
   const before = top();
-  const { applied } = applyMigrations(sql);
+  const { applied } = applyMigrations(sql, 12);
   const cols = sql.exec<{ name: string }>("PRAGMA table_info(lists)").toArray().map((c) => c.name);
   const row = sql.exec<Record<string, SqlValue>>("SELECT * FROM lists WHERE list_id = 'M1'").toArray()[0];
   const afterMigration = top();

@@ -612,7 +612,125 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 13,
+    apply: (sql) => {
+      // App-owned appearance (docs/SYNC-API.md section 4.8): theme images,
+      // each list's image, and the smart lists' themes. To Do can't store any
+      // of it, so this server is the only copy; the image bytes are in the
+      // blob store under theme-images/<image_id>.
+      //
+      // theme_images: an image's id is derived from its bytes and is also its
+      // sid (the insert trigger maps it to itself), so the id the app computes
+      // offline is the id every device sees. unreferenced_since is the sweep's
+      // marker (section 4.9), not data, and logs nothing.
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS theme_images (
+          image_id           TEXT PRIMARY KEY,
+          content_type       TEXT NOT NULL,
+          size               INTEGER NOT NULL,
+          width              INTEGER NOT NULL,
+          height             INTEGER NOT NULL,
+          brightness         REAL,
+          created_ms         INTEGER NOT NULL,
+          unreferenced_since INTEGER
+        )
+      `);
+      // list_images: a list's background image and how to show it
+      // (image_style, JSON), keyed by the list's Graph ID (stable across
+      // renames and moves). Either can be set alone; a row with neither is
+      // deleted. A separate table, so no sync write to lists can drop it.
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS list_images (
+          list_id    TEXT PRIMARY KEY,
+          image_id   TEXT,
+          style_json TEXT
+        )
+      `);
+      // app_settings: one row per smart list key, its theme as JSON.
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key        TEXT PRIMARY KEY,
+          value_json TEXT NOT NULL
+        )
+      `);
+
+      const NOW = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+      const logImage = (ref: "new" | "old", deleted: 0 | 1) => `
+          DELETE FROM sync_log WHERE kind = 'theme_image' AND sid = ${ref}.image_id;
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            VALUES ('theme_image', ${ref}.image_id, ${deleted}, NULL, ${NOW});`;
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS theme_images_sync_ai AFTER INSERT ON theme_images BEGIN
+          INSERT OR IGNORE INTO entity_map (kind, sid, graph_id, created_ms)
+            VALUES ('theme_image', new.image_id, new.image_id, ${NOW});
+          ${logImage("new", 0)}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS theme_images_sync_au AFTER UPDATE ON theme_images
+          WHEN old.width IS NOT new.width OR old.height IS NOT new.height OR old.brightness IS NOT new.brightness BEGIN
+          ${logImage("new", 0)}
+        END
+      `);
+      sql.exec(`
+        CREATE TRIGGER IF NOT EXISTS theme_images_sync_ad AFTER DELETE ON theme_images BEGIN
+          ${logImage("old", 1)}
+        END
+      `);
+
+      // A list's image is a field of the list: setting or clearing it logs
+      // the list again, as v12's list trigger does for the theme.
+      const listSid = (ref: "new" | "old") =>
+        `(SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id = ${ref}.list_id)`;
+      const logList = (ref: "new" | "old") => `
+          DELETE FROM sync_log WHERE kind = 'list' AND sid = ${listSid(ref)};
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            SELECT 'list', ${listSid(ref)}, 0, ${listSid(ref)}, ${NOW}
+             WHERE ${listSid(ref)} IS NOT NULL
+               AND EXISTS (SELECT 1 FROM lists WHERE list_id = ${ref}.list_id);`;
+      sql.exec(`CREATE TRIGGER IF NOT EXISTS list_images_sync_ai AFTER INSERT ON list_images BEGIN ${logList("new")} END`);
+      sql.exec(`CREATE TRIGGER IF NOT EXISTS list_images_sync_au AFTER UPDATE ON list_images
+          WHEN old.image_id IS NOT new.image_id OR old.style_json IS NOT new.style_json BEGIN ${logList("new")} END`);
+      sql.exec(`CREATE TRIGGER IF NOT EXISTS list_images_sync_ad AFTER DELETE ON list_images BEGIN ${logList("old")} END`);
+      // A deleted list takes its image setting with it.
+      sql.exec(`CREATE TRIGGER IF NOT EXISTS lists_images_ad AFTER DELETE ON lists BEGIN
+          DELETE FROM list_images WHERE list_id = old.list_id;
+        END`);
+
+      // The app_settings entity: one sid for the server's lifetime, minted
+      // here, logged whenever any smart list's theme changes.
+      seedAppSettings(sql);
+      const settingsSid = "(SELECT sid FROM entity_map WHERE kind = 'app_settings')";
+      const logSettings = `
+          DELETE FROM sync_log WHERE kind = 'app_settings';
+          INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+            SELECT 'app_settings', ${settingsSid}, 0, NULL, ${NOW} WHERE ${settingsSid} IS NOT NULL;`;
+      sql.exec(`CREATE TRIGGER IF NOT EXISTS app_settings_sync_ai AFTER INSERT ON app_settings BEGIN ${logSettings} END`);
+      sql.exec(`CREATE TRIGGER IF NOT EXISTS app_settings_sync_au AFTER UPDATE ON app_settings
+          WHEN old.value_json IS NOT new.value_json BEGIN ${logSettings} END`);
+      sql.exec(`CREATE TRIGGER IF NOT EXISTS app_settings_sync_ad AFTER DELETE ON app_settings BEGIN ${logSettings} END`);
+    },
+  },
 ];
+
+// Gives the server its app_settings entity (section 4.8): a sid, and a row in
+// the change log so a full sync always carries it. Idempotent; resetIdentity
+// calls it again after wiping entity_map and the log.
+export function seedAppSettings(sql: SqlDb): void {
+  const now = Date.now();
+  sql.exec(
+    `INSERT INTO entity_map (kind, sid, graph_id, created_ms)
+       SELECT 'app_settings', lower(hex(randomblob(16))), 'app_settings', ?
+        WHERE NOT EXISTS (SELECT 1 FROM entity_map WHERE kind = 'app_settings')`,
+    now,
+  );
+  sql.exec(
+    `INSERT OR IGNORE INTO sync_log (kind, sid, deleted, list_sid, at_ms)
+       SELECT 'app_settings', sid, 0, NULL, ? FROM entity_map WHERE kind = 'app_settings'`,
+    now,
+  );
+}
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
 

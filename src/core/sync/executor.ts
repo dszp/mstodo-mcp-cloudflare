@@ -46,6 +46,8 @@ import {
   type UpdateTaskInput,
 } from "../ops/tasks";
 import { WriteBusyError } from "../ops/write-lease";
+import { attachmentBlobKey, THEME_IMAGE_ID, themeImageBlobKey } from "../blobs";
+import type { ImageStyle, SmartList, SmartListTheme } from "../index/change-feed";
 import { normalizeSid, type ExecInput, type ExecOutcome, type Executor, type Position } from "./mutations";
 
 // Graph requires an application name on a linked resource; the sync API has
@@ -55,6 +57,7 @@ export const SYNC_LINK_APPLICATION = "Microsoft To Do sync";
 const IMPORTANCE = ["low", "normal", "high"] as const;
 const STATUS = ["notStarted", "inProgress", "completed", "waitingOnOthers", "deferred"] as const;
 const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const SMART_COLOR = /^[a-z0-9_]{1,32}$/;
 
 // Ops that need Substrate, which is reachable only with My Day on.
 const NEEDS_MY_DAY = new Set(["task.reorder", "myday.add", "myday.remove", "myday.reorder", "step.reorder"]);
@@ -171,7 +174,16 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       const group_id =
         fields.group_id === undefined ? undefined : fields.group_id === null ? null : ref("group_id");
       const appearance = theme !== undefined || group_id !== undefined;
-      const name = fields.name !== undefined || (sync === undefined && !appearance) ? requiredText(fields, "name") : undefined;
+      // image_id: the app's background image, kept here (section 4.8).
+      // applyBatch already rejected an unknown image.
+      const image_id = fields.image_id === undefined ? undefined : themeImageRef(fields.image_id, "image_id");
+      const image_style = fields.image_style === undefined ? undefined : imageStyle(fields.image_style, "image_style");
+      const picture = image_id !== undefined || image_style !== undefined;
+      if (picture && !ctx.env.BLOBS) return rejected("theme_images_unavailable");
+      const name =
+        fields.name !== undefined || (sync === undefined && !appearance && !picture)
+          ? requiredText(fields, "name")
+          : undefined;
       if (sync !== undefined && !(LIST_SYNC_VALUES as readonly unknown[]).includes(sync)) invalid("sync");
       if (appearance && !myDayEnabled(ctx.env)) return rejected("list_appearance_unavailable");
       if (name !== undefined) {
@@ -185,6 +197,10 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       if (appearance) {
         const r = await setListAppearance(ctx, { list_id: graphId, theme, group_id });
         if (!r.ok) return rejected(r.reason);
+      }
+      if (picture) {
+        const r = await ctx.index.setListImage(graphId, { image_id, image_style });
+        if (r !== "ok") return rejected(r);
       }
       return applied(graphId);
     }
@@ -426,6 +442,40 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       });
       return r.ok ? applied(graphId) : rejected(r.reason);
     }
+    case "attachment.delete": {
+      const att = await ctx.index.syncAttachment(input.sid);
+      if (!att) return rejected("unknown_attachment");
+      const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(att.list_id)}/tasks/${encodeURIComponent(att.task_id)}/attachments/${encodeURIComponent(graphId)}`;
+      try {
+        await ctx.writes.run(() => ctx.graph.deleteResource(url));
+      } catch (e) {
+        // Already gone from Graph: the delete is done either way.
+        if (!(e instanceof GraphError && (e.status === 404 || (e.status === 400 && (e.detail ?? "").includes("ErrorInvalidIdMalformed"))))) throw e;
+      }
+      await ctx.index.deleteAttachment(graphId);
+      // The copy is removed now; one left by a failure here goes in the sweep.
+      await bestEffort("blob_delete_failed", { attachment: input.sid }, async () => {
+        await ctx.env.BLOBS?.delete(attachmentBlobKey(input.sid));
+      });
+      return applied(graphId);
+    }
+    case "theme_image.delete": {
+      if (!ctx.env.BLOBS) return rejected("theme_images_unavailable");
+      const r = await ctx.index.deleteThemeImage(graphId);
+      if (r === "in_use") return rejected("theme_image_in_use");
+      if (r === "not_found") return rejected("unknown_theme_image");
+      await bestEffort("blob_delete_failed", { theme_image: graphId }, async () => {
+        await ctx.env.BLOBS?.delete(themeImageBlobKey(graphId));
+      });
+      return applied(graphId);
+    }
+    case "settings.update": {
+      if (!ctx.env.BLOBS) return rejected("theme_images_unavailable");
+      const values: Partial<Record<SmartList, SmartListTheme | null>> = {};
+      for (const [key, v] of Object.entries(fields)) values[key as SmartList] = smartListTheme(v, key);
+      const r = await ctx.index.setSmartListThemes(values);
+      return r === "ok" ? applied(graphId) : rejected(r);
+    }
     case "link.delete": {
       const parent = await ctx.index.findParentOf("link", graphId);
       if (!parent) return rejected("unknown_link");
@@ -438,6 +488,52 @@ async function execute(ctx: OpsContext, input: ExecInput): Promise<ExecOutcome> 
       return deleted(r, graphId, "linked_resource_not_found");
     }
   }
+}
+
+// A theme image id (section 4.8), or null to clear.
+function themeImageRef(v: unknown, field: string): string | null {
+  if (v === null) return null;
+  if (typeof v !== "string" || !THEME_IMAGE_ID.test(v.toLowerCase())) return invalid(field);
+  return v.toLowerCase();
+}
+
+// How a picture is shown (section 4.8), or null for the app's default. Every
+// key is required and range-checked; any other key is refused.
+const STYLE_RANGES: Record<keyof ImageStyle, [number, number]> = {
+  focus_x: [0, 1],
+  focus_y: [0, 1],
+  zoom: [1, 4],
+  shade: [-1, 1],
+  blur: [0, 1],
+};
+function imageStyle(v: unknown, field: string): ImageStyle | null {
+  if (v === null) return null;
+  if (!v || typeof v !== "object" || Array.isArray(v)) return invalid(field);
+  const o = v as Record<string, unknown>;
+  const keys = Object.keys(STYLE_RANGES) as Array<keyof ImageStyle>;
+  if (Object.keys(o).length !== keys.length) return invalid(field);
+  const out = {} as ImageStyle;
+  for (const k of keys) {
+    const n = o[k];
+    const [lo, hi] = STYLE_RANGES[k];
+    if (typeof n !== "number" || !Number.isFinite(n) || n < lo || n > hi) return invalid(field);
+    out[k] = n;
+  }
+  return out;
+}
+
+// One smart list's theme: { color, image_id, image_style }, each nullable,
+// or null for the app's default. The color is the app's own name.
+function smartListTheme(v: unknown, field: string): SmartListTheme | null {
+  if (v === null) return null;
+  if (!v || typeof v !== "object" || Array.isArray(v)) return invalid(field);
+  const o = v as Record<string, unknown>;
+  if (Object.keys(o).some((k) => k !== "color" && k !== "image_id" && k !== "image_style")) return invalid(field);
+  const color = o.color ?? null;
+  if (color !== null && (typeof color !== "string" || !SMART_COLOR.test(color))) return invalid(field);
+  const image_id = o.image_id === undefined ? null : themeImageRef(o.image_id, field);
+  const image_style = o.image_style === undefined ? null : imageStyle(o.image_style, field);
+  return { color: color as string | null, image_id, image_style };
 }
 
 // A copy-and-delete move whose source delete failed: the copy exists, and the

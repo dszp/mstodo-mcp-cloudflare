@@ -384,7 +384,8 @@ Authorization: Bearer <access token>
       "data": { "name": "🧾INVOICING", "sync": "todo", "wellknown": null, "is_owner": true,
                 "is_shared": false, "group_id": "0190…",
                 "sort_key": "2026-11-20T10:00:00.0000000Z",
-                "theme": { "color": "…", "background": "…" }, "image_id": null } },
+                "theme": { "color": "…", "background": "…" }, "image_id": null,
+                "image_style": null } },
     { "kind": "task", "id": "0190…", "seq": 18002, "deleted": false,
       "data": {
         "list_id": "0190…", "title": "…", "status": "notStarted",
@@ -432,7 +433,8 @@ Rules:
   `null` on a server whose `capabilities.list_appearance` is `false`. `group_id` is
   the `id` of a `list_group` entity, or `null` for a list outside any group.
 - A list's `image_id` is the app's background image for it, a `theme_image` entity's
-  `id` or `null` (section 4.8). It is kept by this server, not To Do.
+  `id` or `null`, and `image_style` is how the app shows it (section 4.8). Both are
+  kept by this server, not To Do.
 - A `list_group` is a sidebar group: `{ name, sort_key }`. A deleted group arrives as
   a deletion record, and its lists arrive with `group_id: null`. The server logs a
   group before the lists a read moves into it, but a later rename moves the group
@@ -681,7 +683,24 @@ fetch one twice.
 **A list's image.** Every list in the feed carries `image_id`: a theme image's `id`, or
 `null`. The app sets it with `list.update { image_id }` (section 5.2). It is separate
 from `theme`, which is To Do's own color and background and keeps round-tripping
-unchanged; the app decides how to show both.
+unchanged. The app shows the list's To Do color behind the image, and alone when the
+image can't be shown.
+
+**Image style.** Each place an image is used has its own display settings, so one
+image can be cropped differently on two lists. The image itself never changes. A list
+carries them as `image_style`, set with `list.update { image_style }`, and a smart
+list's theme carries them beside its `image_id`. `null` means the app's defaults.
+
+| Key | Range | App default | Meaning |
+| --- | --- | --- | --- |
+| `focus_x`, `focus_y` | 0 to 1 | 0.5 | The point of the image kept in view when it is cropped to fill |
+| `zoom` | 1 to 4 | 1 | Magnification |
+| `shade` | -1 to 1 | 0 | A white wash when negative, a dark layer when positive |
+| `blur` | 0 to 1 | 0 | Blur strength |
+
+An `image_style` is all five keys, each a number in its range. Anything else, a
+missing key or an extra one, is `rejected` with `invalid_field:image_style` (for a
+smart list, `invalid_field:<key>`). A style can be set without an image.
 
 **Smart-list themes.** One `app_settings` entity in the feed holds the theme of each
 smart list. Its `id` is fixed for the server's lifetime, and it is always in a full
@@ -690,12 +709,15 @@ sync:
 ```json
 { "kind": "app_settings", "id": "a71c…", "seq": 18101, "deleted": false,
   "data": { "smart_lists": {
-    "my_day":    { "color": "dark_blue", "image_id": "3f9a…" },
-    "important": { "color": "dark_rose", "image_id": null },
-    "planned": null, "all": null, "completed": null, "tasks": null } } }
+    "my_day":    { "color": "dark_blue", "image_id": "3f9a…",
+                   "image_style": { "focus_x": 0.5, "focus_y": 0.3, "zoom": 1.2,
+                                    "shade": 0.25, "blur": 0 } },
+    "important": { "color": "dark_rose", "image_id": null, "image_style": null },
+    "planned": null, "all": null, "completed": null } } }
 ```
 
-Every key is present; `null` means the app's default. `color` is a name the app
+Every key is present; `null` means the app's default. Tasks isn't here: it is the
+default list (`wellknown: "defaultList"`), so its picture is that list's `image_id`. `color` is a name the app
 chooses (lowercase letters, digits and `_`, up to 32 characters); the server stores
 it without checking it against To Do's names. The app changes these with
 `settings.update` (section 5.2).
@@ -713,8 +735,7 @@ the binding, `capabilities.attachment_cache` and `capabilities.theme_images` are
 
 Once a day the server's cron sweeps the bucket. It deletes each attachment copy whose
 attachment is no longer in the mirror, and each theme image that no list or smart list
-has used for 30 days. The 30 days run from the image's upload, or from when its last
-use ended, as the sweep first sees it.
+has used for 30 days, counted from the first sweep that found it unused.
 
 ---
 
@@ -756,7 +777,7 @@ Content-Type: application/json
 | `op` | Fields | Write-through (today's code path) |
 |---|---|---|
 | `list.create` | `name` | Graph `POST /lists`, then the new list is pinned `todo` (section 1.2) |
-| `list.update` | any subset of: `name`, `sync`, `theme`, `group_id`, `image_id` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. `theme`, `group_id`: Substrate `PATCH taskfolders/{id}` (section 10.4). `image_id`: server only (section 4.8). Allowed on an excluded list. |
+| `list.update` | any subset of: `name`, `sync`, `theme`, `group_id`, `image_id`, `image_style` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. `theme`, `group_id`: Substrate `PATCH taskfolders/{id}` (section 10.4). `image_id`, `image_style`: server only (section 4.8). Allowed on an excluded list. |
 | `list.delete` | — | Graph `DELETE` |
 | `list.reorder` | `position` | Substrate `OrderDateTime` on the folder (section 10.4) |
 | `list_group.create` | `name`, optional `position` | Substrate `POST foldergroups` (section 10.4); without a `position` the group goes to the top |
@@ -780,7 +801,7 @@ Content-Type: application/json
 | `link.delete` | — | Graph `DELETE` |
 | `attachment.delete` | — | Graph `DELETE attachments/{id}`, then the mirror row and the blob-store copy (section 4.6) |
 | `theme_image.delete` | — | Server only (section 4.8): the image and its bytes. `rejected` with `theme_image_in_use` while a list or smart list uses it |
-| `settings.update` | any subset of: `my_day`, `important`, `planned`, `all`, `completed`, `tasks` | Server only (section 4.8). `sid` is the `app_settings` entity's `id` |
+| `settings.update` | any subset of: `my_day`, `important`, `planned`, `all`, `completed` | Server only (section 4.8). `sid` is the `app_settings` entity's `id` |
 
 `position` is a property of the mutation itself, beside `fields`; every other name in the
 Fields column goes in `fields`. A field that isn't listed for the op, including a parent
@@ -821,14 +842,15 @@ order values keeps To Do's descending-`OrderDateTime` encoding out of the app, s
 encoding can change after Graph without an app update.
 
 A list's `image_id` is a theme image's `id` (section 4.8), or `null` to remove the
-image. It is stored by this server and never sent to To Do, so it needs
-`capabilities.theme_images` rather than `list_appearance_write`; without it the field
-is `rejected` with `theme_images_unavailable`. An unknown or deleted image is
-`rejected` with `unknown_theme_image`. A `list.update` may combine `image_id` with any
-other field.
+image, and `image_style` is how it is shown (section 4.8). Each has its own field
+clock. They are stored by this server and never sent to To Do, so they need
+`capabilities.theme_images` rather than `list_appearance_write`; without it they are
+`rejected` with `theme_images_unavailable`. An unknown or deleted image is `rejected`
+with `unknown_theme_image`. A `list.update` may combine them with any other field.
 
 Each `settings.update` field is one smart list's theme, `{ "color": name or null,
-"image_id": id or null }`, or `null` for the app's default. The value replaces the
+"image_id": id or null, "image_style": style or null }` (a key left out is `null`), or
+`null` for the app's default. The value replaces the
 smart list's whole theme, and each smart list has its own field clock (section 6), so
 two devices that change different smart lists don't overwrite each other. A bad
 `color` or a value of another shape is `rejected` with `invalid_field:<key>`; an unknown
@@ -1757,7 +1779,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
   downloads are kept in it; `POST /api/v1/attachments` uploads a file and
   `attachment.delete` removes one. Theme images (`POST`/`GET /api/v1/theme-images`, the
   `theme_image` kind), a list's `image_id`, and smart-list themes in the
-  `app_settings` entity with `settings.update`. New capabilities `attachment_cache`,
+  `app_settings` entity with `settings.update`; `image_style` on lists and smart-list
+  themes. New capabilities `attachment_cache`,
   `attachment_upload` and `theme_images`.
 - 2026-11-25: section 7.1: `changed` messages are coalesced: one at once, then at most
   one per 3 seconds while changes keep coming. Measured on the Servant Voice server, a

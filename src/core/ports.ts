@@ -41,6 +41,24 @@ export interface ChangeNotifier {
   sweep(): void;
 }
 
+// The blob store (docs/SYNC-API.md section 4.9): attachment copies and theme
+// images. R2 on Cloudflare; the shape is the part of R2Bucket core uses.
+export interface BlobObject {
+  body: ReadableStream;
+  size: number;
+  httpMetadata?: { contentType?: string };
+}
+export interface BlobStore {
+  get(key: string): Promise<BlobObject | null>;
+  put(key: string, value: ArrayBuffer | Uint8Array, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
+  delete(keys: string | string[]): Promise<void>;
+  list(options: { prefix: string; cursor?: string; limit?: number }): Promise<{
+    objects: { key: string; uploaded: Date }[];
+    truncated: boolean;
+    cursor?: string;
+  }>;
+}
+
 export interface StateStore {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
@@ -92,6 +110,9 @@ export interface AppEnv {
   // https sign-in callback (section 8). Both set turns it on.
   APPLE_TEAM_ID?: string;
   APPLE_BUNDLE_IDS?: string;
+  // Optional: without it attachments stream from Graph and theme images are
+  // unavailable (section 4.9).
+  BLOBS?: BlobStore;
   TODO_CACHE: KeyValueStore;
   OAUTH_KV: KeyValueStore;
   // Host hook: how core reaches the singleton index (see core/owner-index.ts).
