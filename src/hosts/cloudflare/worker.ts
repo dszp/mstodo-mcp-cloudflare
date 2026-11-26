@@ -1,4 +1,4 @@
-import { MSToDoMCP } from "./mcp-agent";
+import { MSToDoSession } from "./mcp-agent";
 import { TodoIndex } from "./todo-index-do";
 import { ownerIndex } from "../../core/owner-index";
 import { appEnv } from "./env";
@@ -9,7 +9,7 @@ import { handleWebhook } from "../../core/subscriptions/webhook-handler";
 import { VERSION } from "../../core/version";
 import { handleAppleAssociation } from "../../core/auth/apple-association";
 
-export { MSToDoMCP, TodoIndex };
+export { MSToDoSession, TodoIndex };
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
