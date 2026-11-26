@@ -499,7 +499,9 @@ function themeImageRef(v: unknown, field: string): string | null {
 
 // How a picture is shown (section 4.8), or null for the app's default. Every
 // key is required and range-checked; any other key is refused.
-// shade_dark is the one optional key: missing or null means "use shade".
+// The keys after blur are optional: missing or null is stored as null, which
+// the app reads as its fallback (shade_dark → shade, card_opacity → 1,
+// card_opacity_dark → card_opacity).
 const STYLE_RANGES: Record<keyof ImageStyle, [number, number]> = {
   focus_x: [0, 1],
   focus_y: [0, 1],
@@ -507,8 +509,10 @@ const STYLE_RANGES: Record<keyof ImageStyle, [number, number]> = {
   shade: [-1, 1],
   blur: [0, 1],
   shade_dark: [-1, 1],
+  card_opacity: [0.2, 1],
+  card_opacity_dark: [0.2, 1],
 };
-const OPTIONAL_STYLE_KEYS = new Set<keyof ImageStyle>(["shade_dark"]);
+const OPTIONAL_STYLE_KEYS = new Set<keyof ImageStyle>(["shade_dark", "card_opacity", "card_opacity_dark"]);
 function imageStyle(v: unknown, field: string): ImageStyle | null {
   if (v === null) return null;
   if (!v || typeof v !== "object" || Array.isArray(v)) return invalid(field);

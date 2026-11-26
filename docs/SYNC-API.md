@@ -698,11 +698,16 @@ list's theme carries them beside its `image_id`. `null` means the app's defaults
 | `shade` | -1 to 1 | 0 | A white wash when negative, a dark layer when positive |
 | `blur` | 0 to 1 | 0 | Blur strength |
 | `shade_dark` | -1 to 1, or `null` | `null` | The shade in dark mode; `null` means use `shade` |
+| `card_opacity` | 0.2 to 1, or `null` | `null` | How opaque task cards are over the background in light mode; `null` means 1 (solid) |
+| `card_opacity_dark` | 0.2 to 1, or `null` | `null` | The same in dark mode; `null` means use `card_opacity` |
 
-An `image_style` has every key above, each a number in its range. `shade_dark` is the
-one optional key: missing or `null`, it is stored and sent as `null`. Anything else, a
-missing required key or an extra key, is `rejected` with `invalid_field:image_style` (for a
-smart list, `invalid_field:<key>`). A style can be set without an image.
+An `image_style` has every key above, each a number in its range. The first five are
+required. `shade_dark`, `card_opacity` and `card_opacity_dark` are optional: missing or
+`null`, each is stored and sent as `null`. Anything else, a missing required key or an
+extra key, is `rejected` with `invalid_field:image_style` (for a
+smart list, `invalid_field:<key>`). A style can be set without an image, on a list
+(`image_id: null`) or in a smart list's theme, so a color theme can carry card opacity
+too.
 
 **Smart-list themes.** One `app_settings` entity in the feed holds the theme of each
 smart list. Its `id` is fixed for the server's lifetime, and it is always in a full
@@ -713,7 +718,8 @@ sync:
   "data": { "smart_lists": {
     "my_day":    { "color": "dark_blue", "image_id": "3f9a…",
                    "image_style": { "focus_x": 0.5, "focus_y": 0.3, "zoom": 1.2,
-                                    "shade": 0.25, "blur": 0, "shade_dark": null } },
+                                    "shade": 0.25, "blur": 0, "shade_dark": null,
+                                    "card_opacity": 0.85, "card_opacity_dark": null } },
     "important": { "color": "dark_rose", "image_id": null, "image_style": null },
     "planned": null, "all": null, "completed": null } } }
 ```

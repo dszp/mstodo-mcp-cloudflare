@@ -114,6 +114,10 @@ export interface ImageStyle {
   blur: number;
   // The shade in dark mode; null means use `shade`.
   shade_dark: number | null;
+  // How opaque task cards are over the background, light mode; null means 1.
+  card_opacity: number | null;
+  // The same in dark mode; null means use `card_opacity`.
+  card_opacity_dark: number | null;
 }
 export type SmartListTheme = { color: string | null; image_id: string | null; image_style: ImageStyle | null };
 export interface FeedAppSettings {

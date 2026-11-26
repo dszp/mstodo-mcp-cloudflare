@@ -234,7 +234,9 @@ describe("image_style", () => {
     const t = setup();
     await t.send("settings.update", t.settingsSid, { planned: { color: null, image_id: null, image_style: STYLE } });
     const s = ofKind(t.feed().changes, "app_settings")[0] as Extract<FeedChange, { kind: "app_settings"; deleted: false }>;
-    expect(s.data.smart_lists.planned).toEqual({ color: null, image_id: null, image_style: STYLE });
+    expect(s.data.smart_lists.planned).toEqual({
+      color: null, image_id: null, image_style: { ...STYLE, card_opacity: null, card_opacity_dark: null },
+    });
   });
 
   it("refuses values out of range, missing keys and extra keys", async () => {
@@ -265,9 +267,45 @@ describe("image_style shade_dark", () => {
     const listData = () =>
       (ofKind(t.feed().changes, "list")[0] as Extract<FeedChange, { kind: "list"; deleted: false }>).data;
     expect(await t.send("list.update", list, { image_style: five })).toMatchObject({ status: "applied" });
-    expect(listData().image_style).toEqual({ ...five, shade_dark: null });
+    const unset = { shade_dark: null, card_opacity: null, card_opacity_dark: null };
+    expect(listData().image_style).toEqual({ ...five, ...unset });
     expect(await t.send("list.update", list, { image_style: { ...five, shade_dark: null } })).toMatchObject({ status: "applied" });
-    expect(listData().image_style).toEqual({ ...five, shade_dark: null });
+    expect(listData().image_style).toEqual({ ...five, ...unset });
+  });
+});
+
+describe("image_style card opacity", () => {
+  const FIVE = { focus_x: 0.5, focus_y: 0.5, zoom: 1, shade: 0, blur: 0 };
+
+  it("card_opacity and card_opacity_dark are optional and stored as null when missing", async () => {
+    const t = setup();
+    const list = t.sidOf("list", "L1");
+    expect(await t.send("list.update", list, { image_style: FIVE })).toMatchObject({ status: "applied" });
+    const data = (ofKind(t.feed().changes, "list")[0] as Extract<FeedChange, { kind: "list"; deleted: false }>).data;
+    expect(data.image_style).toEqual({ ...FIVE, shade_dark: null, card_opacity: null, card_opacity_dark: null });
+  });
+
+  it("a colour theme carries a style with no image, on a list and a smart list", async () => {
+    const t = setup();
+    const list = t.sidOf("list", "L1");
+    const style = { ...FIVE, shade_dark: null, card_opacity: 0.6, card_opacity_dark: 0.4 };
+    expect(await t.send("list.update", list, { image_id: null, image_style: style })).toMatchObject({ status: "applied" });
+    expect(await t.send("settings.update", t.settingsSid, { important: { color: "dark_rose", image_id: null, image_style: style } })).toMatchObject({
+      status: "applied",
+    });
+    const changes = t.feed().changes;
+    const l = (ofKind(changes, "list")[0] as Extract<FeedChange, { kind: "list"; deleted: false }>).data;
+    expect(l).toMatchObject({ image_id: null, image_style: style });
+    const s = (ofKind(changes, "app_settings")[0] as Extract<FeedChange, { kind: "app_settings"; deleted: false }>).data;
+    expect(s.smart_lists.important).toEqual({ color: "dark_rose", image_id: null, image_style: style });
+  });
+
+  it("refuses card opacity outside 0.2..1", async () => {
+    const t = setup();
+    const list = t.sidOf("list", "L1");
+    for (const bad of [{ card_opacity: 0.1 }, { card_opacity: 1.01 }, { card_opacity_dark: 0 }, { card_opacity: "1" }]) {
+      expect(await t.send("list.update", list, { image_style: { ...FIVE, ...bad } })).toMatchObject({ error: "invalid_field:image_style" });
+    }
   });
 });
 
