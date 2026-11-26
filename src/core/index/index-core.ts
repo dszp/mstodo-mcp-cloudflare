@@ -2381,6 +2381,9 @@ export class IndexCore implements TokenProvider {
       list_appearance: boolean;
       list_appearance_write: boolean;
       attachment_download: boolean;
+      attachment_upload: boolean;
+      attachment_cache: boolean;
+      theme_images: boolean;
       push: "none" | "websocket";
       source: "graph";
     };
@@ -2415,6 +2418,11 @@ export class IndexCore implements TokenProvider {
         list_appearance_write: appearance,
         // GET /api/v1/attachments/{sid} streams an attachment's bytes.
         attachment_download: true,
+        attachment_upload: true,
+        // The blob store (section 4.9) is a binding every host entry point
+        // shares, so the index sees the same one the routes use.
+        attachment_cache: !!this.#env.BLOBS,
+        theme_images: !!this.#env.BLOBS,
         push: "websocket",
         source: "graph",
       },

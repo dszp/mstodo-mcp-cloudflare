@@ -1546,7 +1546,8 @@ to build now:
     "version": "0.18.0",
     "capabilities": { "my_day": true, "step_order": true, "sub_resources": true,
                       "list_appearance": true, "list_appearance_write": true,
-                      "attachment_download": true,
+                      "attachment_download": true, "attachment_upload": true,
+                      "attachment_cache": true, "theme_images": true,
                       "push": "websocket",
                       "source": "graph" },
     "link_rules_rev": "9f2c4e01a7b3d5e6"

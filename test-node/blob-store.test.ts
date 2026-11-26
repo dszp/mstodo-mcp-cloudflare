@@ -431,3 +431,23 @@ describe("POST /api/v1/attachments", () => {
     expect(t.posts).toHaveLength(0);
   });
 });
+
+describe("capabilities", () => {
+  async function capabilities(env: Record<string, unknown>) {
+    const db = openDatabase(":memory:");
+    const state = stateStore(db);
+    const c = new IndexCore({ sql: sqlDb(db), transact: transactor(db), state, alarms: state, env: { TIMEZONE: "UTC", ...env } as never });
+    c.bootstrap();
+    return (await c.syncInfo()).capabilities;
+  }
+
+  it("reports the blob store's features when BLOBS is bound", async () => {
+    expect(await capabilities({ BLOBS: memoryBlobs().store })).toMatchObject({
+      attachment_upload: true, attachment_cache: true, theme_images: true,
+    });
+  });
+
+  it("reports them off without it, uploads still on", async () => {
+    expect(await capabilities({})).toMatchObject({ attachment_upload: true, attachment_cache: false, theme_images: false });
+  });
+});

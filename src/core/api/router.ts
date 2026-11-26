@@ -165,13 +165,7 @@ async function syncInfo(_url: URL, env: AppEnv): Promise<Response> {
     cursor: info.cursor,
     account: { name: identity?.displayName ?? null, email_hint: emailHint(info.account.email) },
     version: VERSION,
-    // The blob store is the Worker's binding, not the index's.
-    capabilities: {
-      ...info.capabilities,
-      attachment_upload: true,
-      attachment_cache: !!env.BLOBS,
-      theme_images: !!env.BLOBS,
-    },
+    capabilities: info.capabilities,
     link_rules_rev: linkRules?.rev ?? null,
   });
 }
