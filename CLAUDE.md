@@ -26,6 +26,23 @@ bash scripts/push-secrets.sh                    # push every secret from .dev.va
 
 **Tests need no real credentials or live config.** `vitest.config.ts` defines two projects. `workers` (`test/**`) points the Cloudflare pool at the committed `wrangler.example.jsonc` and supplies fake secrets via miniflare bindings; KV and DO bindings are simulated locally. `test/_test-worker.ts` re-exports only `TodoIndex` (the `MSToDoSession` agent DO is deliberately excluded — it pulls in the MCP SDK → ajv, which the pool can't resolve). `node` (`test-node/**`) runs on plain Node 24 with in-memory `node:sqlite` databases and fake `MS_*` values passed to `buildNodeEnv`; Microsoft endpoints are stubbed with `vi.stubGlobal("fetch")`. Node ≥ 24 is required for development (`node:sqlite`).
 
+## Test-driven development
+
+Work test-first. For a feature or a bug fix:
+
+1. Write the test that states the behaviour, run it, and watch it fail for the reason you
+   expect. A test that passes before the code exists proves nothing.
+2. Write the least code that makes it pass, then run the whole suite (`npm test`).
+3. Refactor with the suite green.
+
+A bug fix starts with a test that reproduces the bug. Behaviour shared by both hosts goes in
+a `test/_*-checks.ts` file that `test/` (workers) and `test-node/` (node) both run.
+
+`test-node/api-contract.test.ts` holds the code to `docs/SYNC-API.md`, the contract the app
+builds against: every feed field, mutation op, updatable field and capability must be
+documented there. When that test fails, update the doc in the same change, or fix the code
+if the doc is right.
+
 ## Architecture
 
 ### Request flow

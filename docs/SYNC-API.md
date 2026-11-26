@@ -399,7 +399,8 @@ Authorization: Bearer <access token>
         "subresources_complete": true,
         "steps": [ { "id": "0190…", "title": "…", "checked": false, "checked_at": null,
                      "created_at": "…", "order": null } ],
-        "links": [ { "id": "0190…", "url": "https://…", "title": "…", "app": "…" } ],
+        "links": [ { "id": "0190…", "url": "https://…", "title": "…", "app": "…",
+                     "external_id": null } ],
         "attachments": [ { "id": "0190…", "name": "invoice.pdf", "size": 48213,
                            "content_type": "application/pdf" } ]
       },
@@ -435,6 +436,8 @@ Rules:
   a deletion record, and its lists arrive with `group_id: null`. The server logs a
   group before the lists a read moves into it, but a later rename moves the group
   after them, so the app must not depend on the order (section 4.3).
+- A link's `external_id` is Graph's `externalId`: an ID its creator chose, or `null`.
+  The server sets it to the link's `sid` on every link the app creates (section 5.4).
 - Attachment bytes aren't in the feed. The app fetches them with
   `GET /api/v1/attachments/{sid}`, which streams them through the server from Graph
   (section 4.6).
