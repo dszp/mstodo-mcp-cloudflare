@@ -384,7 +384,7 @@ Authorization: Bearer <access token>
       "data": { "name": "🧾INVOICING", "sync": "todo", "wellknown": null, "is_owner": true,
                 "is_shared": false, "group_id": "0190…",
                 "sort_key": "2026-11-20T10:00:00.0000000Z",
-                "theme": { "color": "…", "background": "…" } } },
+                "theme": { "color": "…", "background": "…" }, "image_id": null } },
     { "kind": "task", "id": "0190…", "seq": 18002, "deleted": false,
       "data": {
         "list_id": "0190…", "title": "…", "status": "notStarted",
@@ -431,6 +431,8 @@ Rules:
   (section 10.4). They are `null` until the server first reads the sidebar, and always
   `null` on a server whose `capabilities.list_appearance` is `false`. `group_id` is
   the `id` of a `list_group` entity, or `null` for a list outside any group.
+- A list's `image_id` is the app's background image for it, a `theme_image` entity's
+  `id` or `null` (section 4.8). It is kept by this server, not To Do.
 - A `list_group` is a sidebar group: `{ name, sort_key }`. A deleted group arrives as
   a deletion record, and its lists arrive with `group_id: null`. The server logs a
   group before the lists a read moves into it, but a later rename moves the group
@@ -508,9 +510,15 @@ The server returns the attachment's bytes. `{sid}` is the `id` of an entry in a 
 `attachments` array in the feed. The token must be an `/api/v1` token; an `/mcp` token
 gets `401`.
 
-While Graph is the source, the server fetches the file from Graph
-(`/attachments/{id}/$value`) and streams it to the app without storing it. A To Do
-attachment is at most 25 MB.
+The server keeps a copy of each file attachment's bytes in R2 when the deployment has
+a blob store (`capabilities.attachment_cache: true`). The first download fetches the
+file from Graph (`/attachments/{id}/$value`), stores it under the attachment's `sid` and
+returns it; later downloads come from R2 without a Graph call. A file uploaded through
+this server (section 5.6) is stored at upload time. A To Do attachment can't be edited
+in place, so a `sid` always names the same bytes. When an attachment leaves the mirror
+(deleted in any app, or its list excluded), the daily sweep (section 4.9) removes its
+copy. Without a blob store the server streams every download from Graph and stores
+nothing. A To Do attachment is at most 25 MB.
 
 A successful response carries these headers:
 
@@ -520,6 +528,7 @@ A successful response carries these headers:
 | `Content-Length` | Graph's length, when Graph sends one for an uncompressed body. Graph doesn't send one for `$value` today, so the app must not rely on it. |
 | `Content-Disposition` | `attachment`, with an ASCII `filename` and the real name in `filename*=UTF-8''…`. Control characters are removed and the name is cut to 255 characters. |
 | `Cache-Control` | `private, no-store` |
+| `Content-Length` (from R2) | The stored size, on a download served from the blob store. |
 | `X-Content-Type-Options` | `nosniff` |
 
 Errors are JSON, like every other `/api/v1` error. `retry: true` means the same request
@@ -613,6 +622,100 @@ task's real link and doesn't offer to edit or delete a link.
 More than one link per task waits until the server is the source of record
 (section 10); the feed's `links` array won't change shape.
 
+### 4.8 Theme images and smart-list themes
+
+Microsoft To Do can't store a custom background image, and it has no place for a
+smart list's theme. The server keeps both for the app, so they sync between the app's
+devices. They never reach To Do. These features need a blob store
+(`capabilities.theme_images: true`).
+
+**Theme images.** An image is uploaded once and can then be used by any number of
+lists and smart lists.
+
+```
+POST /api/v1/theme-images?width=<px>&height=<px>[&brightness=<0..1>]
+Authorization: Bearer <access token>
+Content-Type: image/jpeg | image/png | image/heic
+<the image bytes>
+```
+
+- The body is the image itself, at most 15 MiB. The server checks that the bytes are
+  the type the `Content-Type` names and refuses anything else.
+- The server doesn't decode the image. `width` and `height` (whole pixels, 1 to 20,000)
+  and the optional `brightness` (0 for black to 1 for white, the app's measure) are
+  stored as the app sends them and returned to every device.
+- The `id` is derived from the bytes (the first 32 hex digits of their SHA-256), so it
+  never changes and the same image uploaded twice gets the same `id`. Uploading again
+  is safe: the second request returns the stored image.
+
+| Status | Body |
+| --- | --- |
+| 201 | The new image: `{ "id", "content_type", "size", "width", "height", "brightness", "created_at" }` |
+| 200 | Same body: these bytes were already stored. The stored `width`, `height` and `brightness` are kept. |
+| 400 | `{"error":"bad_dimensions"}` or `{"error":"bad_brightness"}` |
+| 413 | `{"error":"too_large"}` |
+| 415 | `{"error":"unsupported_type"}`: not JPEG, PNG or HEIC, or the bytes don't match `Content-Type` |
+| 501 | `{"error":"no_blob_store"}`: the deployment has no blob store |
+
+Each image is a `theme_image` entity in the change feed, so a new image reaches the
+app's other devices like any edit:
+
+```json
+{ "kind": "theme_image", "id": "3f9a…", "seq": 18100, "deleted": false,
+  "data": { "content_type": "image/jpeg", "size": 2381120, "width": 3024,
+            "height": 4032, "brightness": 0.42, "created_at": "2026-11-26T22:10:00Z" } }
+```
+
+The bytes come from:
+
+```
+GET /api/v1/theme-images/{id}
+Authorization: Bearer <access token>
+```
+
+The response carries the image's `Content-Type`, `Content-Length`, `ETag: "<id>"` and
+`Cache-Control: private, max-age=31536000, immutable`. An unknown or deleted `id` is a
+404 with `{"error":"not_found"}`. The app caches images by `id` and never needs to
+fetch one twice.
+
+**A list's image.** Every list in the feed carries `image_id`: a theme image's `id`, or
+`null`. The app sets it with `list.update { image_id }` (section 5.2). It is separate
+from `theme`, which is To Do's own color and background and keeps round-tripping
+unchanged; the app decides how to show both.
+
+**Smart-list themes.** One `app_settings` entity in the feed holds the theme of each
+smart list. Its `id` is fixed for the server's lifetime, and it is always in a full
+sync:
+
+```json
+{ "kind": "app_settings", "id": "a71c…", "seq": 18101, "deleted": false,
+  "data": { "smart_lists": {
+    "my_day":    { "color": "dark_blue", "image_id": "3f9a…" },
+    "important": { "color": "dark_rose", "image_id": null },
+    "planned": null, "all": null, "completed": null, "tasks": null } } }
+```
+
+Every key is present; `null` means the app's default. `color` is a name the app
+chooses (lowercase letters, digits and `_`, up to 32 characters); the server stores
+it without checking it against To Do's names. The app changes these with
+`settings.update` (section 5.2).
+
+**Deleting an image.** `theme_image.delete` removes an image nothing uses. One that a
+list or smart list still uses is rejected with `theme_image_in_use`. The daily sweep
+(section 4.9) also deletes an image nothing has used for 30 days.
+
+### 4.9 Blob store and sweep
+
+A deployment's blob store is one R2 bucket, bound as `BLOBS`. Attachment copies are
+stored under `attachments/<sid>` and theme images under `theme-images/<id>`. Without
+the binding, `capabilities.attachment_cache` and `capabilities.theme_images` are
+`false`, downloads stream from Graph and the theme-image routes answer 501.
+
+Once a day the server's cron sweeps the bucket. It deletes each attachment copy whose
+attachment is no longer in the mirror, and each theme image that no list or smart list
+has used for 30 days. The 30 days run from the image's upload, or from when its last
+use ended, as the sweep first sees it.
+
 ---
 
 ## 5. Sending edits
@@ -653,7 +756,7 @@ Content-Type: application/json
 | `op` | Fields | Write-through (today's code path) |
 |---|---|---|
 | `list.create` | `name` | Graph `POST /lists`, then the new list is pinned `todo` (section 1.2) |
-| `list.update` | any subset of: `name`, `sync`, `theme`, `group_id` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. `theme`, `group_id`: Substrate `PATCH taskfolders/{id}` (section 10.4). Allowed on an excluded list. |
+| `list.update` | any subset of: `name`, `sync`, `theme`, `group_id`, `image_id` (at least one) | `name`: Graph `PATCH`. `sync`: `config:lists`, applied to the mirror at once (section 1.2); nothing goes to Graph. `theme`, `group_id`: Substrate `PATCH taskfolders/{id}` (section 10.4). `image_id`: server only (section 4.8). Allowed on an excluded list. |
 | `list.delete` | — | Graph `DELETE` |
 | `list.reorder` | `position` | Substrate `OrderDateTime` on the folder (section 10.4) |
 | `list_group.create` | `name`, optional `position` | Substrate `POST foldergroups` (section 10.4); without a `position` the group goes to the top |
@@ -675,6 +778,9 @@ Content-Type: application/json
 | `link.create` | `task_id`, `url`, `title` | Graph `POST linkedResources` |
 | `link.update` | any subset of: `url`, `title` | Graph `PATCH` with only those fields |
 | `link.delete` | — | Graph `DELETE` |
+| `attachment.delete` | — | Graph `DELETE attachments/{id}`, then the mirror row and the blob-store copy (section 4.6) |
+| `theme_image.delete` | — | Server only (section 4.8): the image and its bytes. `rejected` with `theme_image_in_use` while a list or smart list uses it |
+| `settings.update` | any subset of: `my_day`, `important`, `planned`, `all`, `completed`, `tasks` | Server only (section 4.8). `sid` is the `app_settings` entity's `id` |
 
 `position` is a property of the mutation itself, beside `fields`; every other name in the
 Fields column goes in `fields`. A field that isn't listed for the op, including a parent
@@ -714,9 +820,22 @@ reorder math, using its own view of the neighbors. Sending neighbors rather than
 order values keeps To Do's descending-`OrderDateTime` encoding out of the app, so the
 encoding can change after Graph without an app update.
 
-Attachments are uploaded through a separate endpoint (`POST /api/v1/attachments`,
-multipart), not this batch, because the body is binary and can be up to 25 MiB. The
-existing upload code (`src/core/upload/`) does the Graph side.
+A list's `image_id` is a theme image's `id` (section 4.8), or `null` to remove the
+image. It is stored by this server and never sent to To Do, so it needs
+`capabilities.theme_images` rather than `list_appearance_write`; without it the field
+is `rejected` with `theme_images_unavailable`. An unknown or deleted image is
+`rejected` with `unknown_theme_image`. A `list.update` may combine `image_id` with any
+other field.
+
+Each `settings.update` field is one smart list's theme, `{ "color": name or null,
+"image_id": id or null }`, or `null` for the app's default. The value replaces the
+smart list's whole theme, and each smart list has its own field clock (section 6), so
+two devices that change different smart lists don't overwrite each other. A bad
+`color` or a value of another shape is `rejected` with `invalid_field:<key>`; an unknown
+image with `unknown_theme_image`.
+
+Attachments are uploaded through a separate endpoint (section 5.6), not this batch,
+because the body is binary. They are deleted here, with `attachment.delete`.
 
 ### 5.3 Response
 
@@ -789,6 +908,43 @@ build step extracts the write logic into `src/core/ops/` — plain functions tak
 `GraphClient`, an optional `SubstrateClient`, and the index — and makes the MCP tools
 call them. Existing MCP tests guard the refactor. The sync mutation handler and the
 §1 routes then call the same functions, so the three surfaces can't drift.
+
+### 5.6 Uploading an attachment
+
+```
+POST /api/v1/attachments?task_id=<task sid>&sid=<new attachment sid>&name=<file name>
+Authorization: Bearer <access token>
+Content-Type: <the file's type>
+<the file's bytes>
+```
+
+The body is the file itself, at most 25 MiB, To Do's limit. The server attaches it to
+the task through Graph: in one request up to 3 MB, otherwise through an upload
+session. With a blob store it also keeps a copy (section 4.6). The task then arrives
+in the feed with the new entry in its `attachments`, and the push socket announces it.
+
+- `sid` is the new attachment's `sid`, chosen by the app (a UUID), as for any create.
+  It is also what makes a retry safe: sending the same upload again with the same
+  `sid` returns the first result without attaching the file twice. A retry after a
+  failure that may have reached Graph adopts an attachment of the same name and bytes
+  that the first attempt made.
+- `name` is the file name To Do shows, 1 to 255 characters after the server removes
+  control characters and path separators.
+- `Content-Type` is stored as sent when the server can't tell the type from the
+  bytes. A recognised type in the bytes wins.
+
+The response has the shape of a mutation result (section 5.3):
+
+| Status | Body |
+| --- | --- |
+| 200 | `{ "status": "applied", "sid": "…", "cursor": "…" }`, or `"status": "duplicate"` for a repeat |
+| 400 | `{"error":"bad_request","detail":"…"}`: a missing or malformed parameter |
+| 404 | `{"error":"unknown_task"}` |
+| 409 | `{"error":"list_excluded"}`, `{"error":"sid_in_use"}` or `{"error":"in_progress","retry":true}` |
+| 413 | `{"error":"too_large"}` |
+| 502, 503 | `{"error":"graph_…","retry":…}`, as for a download (section 4.6) |
+
+`capabilities.attachment_upload: true` says the server has this route.
 
 ---
 
@@ -1164,11 +1320,11 @@ recurring tasks" gets built, since each completed instance stays a row.
 
 ### 10.2 Attachment storage
 
-A new `BlobStore` port in `ports.ts`: R2 on Cloudflare, a directory on Node. In Graph
-mode it is unused; `GET /api/v1/attachments/{sid}` streams bytes from Graph
-(section 4.6). Migration before the switch copies every attachment's bytes into the
-store. The volume is unknown — a `SUM(size)` over the new `attachments` table will
-give it once the backfill runs.
+The blob store (section 4.9) is the `BlobStore` port in `ports.ts`: R2 on Cloudflare.
+While Graph is the source it holds a copy of each attachment downloaded or uploaded
+through this server (section 4.6). Before the switch, a migration copies every
+remaining attachment's bytes into it, after which it is the only copy. The Node host
+has no blob store yet.
 
 ### 10.3 IDs for new items
 
@@ -1597,6 +1753,12 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-26: sections 4.6, 4.8, 4.9, 5.2 and 5.6: a blob store (R2). Attachment
+  downloads are kept in it; `POST /api/v1/attachments` uploads a file and
+  `attachment.delete` removes one. Theme images (`POST`/`GET /api/v1/theme-images`, the
+  `theme_image` kind), a list's `image_id`, and smart-list themes in the
+  `app_settings` entity with `settings.update`. New capabilities `attachment_cache`,
+  `attachment_upload` and `theme_images`.
 - 2026-11-25: section 7.1: `changed` messages are coalesced: one at once, then at most
   one per 3 seconds while changes keep coming. Measured on the Servant Voice server, a
   `task.create` went from three messages to two.
