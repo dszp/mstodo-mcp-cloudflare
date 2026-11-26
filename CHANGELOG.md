@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left a Durable Object behind for good (6,561 objects, 821 MB on one server). The agent
   class is renamed `MSToDoMCP` → `MSToDoSession`, and **migration v3 deletes every object
   of the old class**: open Claude conversations get a 404 on their next tool call and start
-  a new session. Self-hosters copying `wrangler.example.jsonc` need the v3 migration and
-  the new `class_name`.
+  a new session. Its binding is renamed `TODO_INDEX` → `MCP_SESSION`, because Cloudflare won't delete a
+  class while a binding of the same name remains. Self-hosters need the new binding and
+  the v3 migration in their own wrangler config (see `wrangler.example.jsonc`).
 - **The push socket coalesces `changed` messages** (docs/SYNC-API.md section 7.1). The
   first change after a quiet spell is sent at once; changes in the next 3 seconds are sent
   as one message with the newest cursor. A `task.create` through the sync API now sends

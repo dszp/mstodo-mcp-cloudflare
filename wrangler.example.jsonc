@@ -23,8 +23,8 @@
 
   "durable_objects": {
     "bindings": [
-      // Per-session MCP agent (legacy binding name TODO_INDEX).
-      { "name": "TODO_INDEX", "class_name": "MSToDoSession" },
+      // Per-session MCP agent. Deletes itself after a day idle.
+      { "name": "MCP_SESSION", "class_name": "MSToDoSession" },
       // Singleton cross-list index DO (idFromName("owner")) — the single source
       // of truth for tasks/roster/delta state.
       { "name": "TODO_INDEX_DO", "class_name": "TodoIndex" }

@@ -4,9 +4,9 @@ import { appEnv } from "./env";
 import { OWNER_DO_NAME } from "../../core/index/sql";
 
 // serve(path, { binding }) — agents/mcp defaults binding to "MCP_OBJECT", but
-// our DO binding (wrangler.jsonc) is named TODO_INDEX. Without this arg the SDK
+// our DO binding (wrangler.jsonc) is named MCP_SESSION. Without this arg the SDK
 // throws on first /mcp request: env.MCP_OBJECT is undefined.
-const mcpHandler = MSToDoSession.serve(MCP_PATH, { binding: "TODO_INDEX" });
+const mcpHandler = MSToDoSession.serve(MCP_PATH, { binding: "MCP_SESSION" });
 
 // Built per request: the resources are this Worker's own URL (see
 // authorizationServerOptions). Everything else — endpoints, TTLs, the grant
