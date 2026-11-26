@@ -499,22 +499,29 @@ function themeImageRef(v: unknown, field: string): string | null {
 
 // How a picture is shown (section 4.8), or null for the app's default. Every
 // key is required and range-checked; any other key is refused.
+// shade_dark is the one optional key: missing or null means "use shade".
 const STYLE_RANGES: Record<keyof ImageStyle, [number, number]> = {
   focus_x: [0, 1],
   focus_y: [0, 1],
   zoom: [1, 4],
   shade: [-1, 1],
   blur: [0, 1],
+  shade_dark: [-1, 1],
 };
+const OPTIONAL_STYLE_KEYS = new Set<keyof ImageStyle>(["shade_dark"]);
 function imageStyle(v: unknown, field: string): ImageStyle | null {
   if (v === null) return null;
   if (!v || typeof v !== "object" || Array.isArray(v)) return invalid(field);
   const o = v as Record<string, unknown>;
   const keys = Object.keys(STYLE_RANGES) as Array<keyof ImageStyle>;
-  if (Object.keys(o).length !== keys.length) return invalid(field);
+  if (Object.keys(o).some((k) => !(k in STYLE_RANGES))) return invalid(field);
   const out = {} as ImageStyle;
   for (const k of keys) {
     const n = o[k];
+    if (OPTIONAL_STYLE_KEYS.has(k) && (n === undefined || n === null)) {
+      (out as unknown as Record<string, null>)[k] = null;
+      continue;
+    }
     const [lo, hi] = STYLE_RANGES[k];
     if (typeof n !== "number" || !Number.isFinite(n) || n < lo || n > hi) return invalid(field);
     out[k] = n;

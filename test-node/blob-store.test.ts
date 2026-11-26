@@ -211,7 +211,7 @@ describe("smart-list themes", () => {
   });
 });
 
-const STYLE = { focus_x: 0.3, focus_y: 0.7, zoom: 1.5, shade: -0.2, blur: 0.1 };
+const STYLE = { focus_x: 0.3, focus_y: 0.7, zoom: 1.5, shade: -0.2, blur: 0.1, shade_dark: 0.4 };
 
 describe("image_style", () => {
   it("is set on a list beside its image, alone, and cleared with it", async () => {
@@ -247,12 +247,27 @@ describe("image_style", () => {
       { ...STYLE, blur: "0" },
       { focus_x: 0.5 },
       { ...STYLE, tint: 1 },
+      { ...STYLE, shade_dark: 1.5 },
     ]) {
       expect(await t.send("list.update", list, { image_style: bad })).toMatchObject({ error: "invalid_field:image_style" });
     }
     expect(await t.send("settings.update", t.settingsSid, { all: { image_style: { ...STYLE, zoom: 9 } } })).toMatchObject({
       error: "invalid_field:all",
     });
+  });
+});
+
+describe("image_style shade_dark", () => {
+  it("is optional: missing or null is stored as null", async () => {
+    const t = setup();
+    const list = t.sidOf("list", "L1");
+    const { shade_dark: _omit, ...five } = STYLE;
+    const listData = () =>
+      (ofKind(t.feed().changes, "list")[0] as Extract<FeedChange, { kind: "list"; deleted: false }>).data;
+    expect(await t.send("list.update", list, { image_style: five })).toMatchObject({ status: "applied" });
+    expect(listData().image_style).toEqual({ ...five, shade_dark: null });
+    expect(await t.send("list.update", list, { image_style: { ...five, shade_dark: null } })).toMatchObject({ status: "applied" });
+    expect(listData().image_style).toEqual({ ...five, shade_dark: null });
   });
 });
 

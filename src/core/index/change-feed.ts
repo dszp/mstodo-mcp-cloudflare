@@ -112,6 +112,8 @@ export interface ImageStyle {
   zoom: number;
   shade: number;
   blur: number;
+  // The shade in dark mode; null means use `shade`.
+  shade_dark: number | null;
 }
 export type SmartListTheme = { color: string | null; image_id: string | null; image_style: ImageStyle | null };
 export interface FeedAppSettings {

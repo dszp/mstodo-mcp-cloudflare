@@ -697,9 +697,11 @@ list's theme carries them beside its `image_id`. `null` means the app's defaults
 | `zoom` | 1 to 4 | 1 | Magnification |
 | `shade` | -1 to 1 | 0 | A white wash when negative, a dark layer when positive |
 | `blur` | 0 to 1 | 0 | Blur strength |
+| `shade_dark` | -1 to 1, or `null` | `null` | The shade in dark mode; `null` means use `shade` |
 
-An `image_style` is all five keys, each a number in its range. Anything else, a
-missing key or an extra one, is `rejected` with `invalid_field:image_style` (for a
+An `image_style` has every key above, each a number in its range. `shade_dark` is the
+one optional key: missing or `null`, it is stored and sent as `null`. Anything else, a
+missing required key or an extra key, is `rejected` with `invalid_field:image_style` (for a
 smart list, `invalid_field:<key>`). A style can be set without an image.
 
 **Smart-list themes.** One `app_settings` entity in the feed holds the theme of each
@@ -711,7 +713,7 @@ sync:
   "data": { "smart_lists": {
     "my_day":    { "color": "dark_blue", "image_id": "3f9a…",
                    "image_style": { "focus_x": 0.5, "focus_y": 0.3, "zoom": 1.2,
-                                    "shade": 0.25, "blur": 0 } },
+                                    "shade": 0.25, "blur": 0, "shade_dark": null } },
     "important": { "color": "dark_rose", "image_id": null, "image_style": null },
     "planned": null, "all": null, "completed": null } } }
 ```
