@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 describe("SECRET_NAMES", () => {
-  it("lists the five secrets push-secrets.sh pushes", () => {
+  it("lists the five Worker secrets", () => {
     expect([...SECRET_NAMES]).toEqual([
       "MS_TENANT_ID",
       "MS_CLIENT_ID",

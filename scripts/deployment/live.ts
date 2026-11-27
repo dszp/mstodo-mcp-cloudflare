@@ -172,6 +172,16 @@ const couldNotVerify = (dep: DeploymentFile, e: unknown): DeploymentRefusal =>
 // the same helper the other environment checks use), so the signature stays
 // (api, dep, opts).
 export async function checkLiveWorker(api: CloudflareApi, dep: DeploymentFile, opts: { adopt: boolean }): Promise<void> {
+  await inspectLiveWorker(api, dep, opts);
+}
+
+// checkLiveWorker, also reporting whether the Worker exists, so a caller can skip
+// the reads that only make sense for an uploaded script (changeset, subdomain).
+export async function inspectLiveWorker(
+  api: CloudflareApi,
+  dep: DeploymentFile,
+  opts: { adopt: boolean },
+): Promise<{ found: boolean }> {
   const file = ownFile(dep);
 
   let live: Awaited<ReturnType<CloudflareApi["getWorkerKv"]>>;
@@ -205,7 +215,7 @@ export async function checkLiveWorker(api: CloudflareApi, dep: DeploymentFile, o
     }
   }
 
-  if (dep.custom_domains.length === 0) return;
+  if (dep.custom_domains.length === 0) return { found: live.found };
   let domains: Awaited<ReturnType<CloudflareApi["listCustomDomains"]>>;
   try {
     domains = await api.listCustomDomains(dep.account_id);
@@ -218,6 +228,26 @@ export async function checkLiveWorker(api: CloudflareApi, dep: DeploymentFile, o
       throw new DeploymentRefusal(file, `custom_domains[${i}]`, `${d} is attached to the Worker ${holder.service}, not ${dep.worker_name}`);
     }
   });
+  return { found: live.found };
+}
+
+// Hostnames currently attached to this deployment's Worker, for `check` to print.
+export async function attachedDomains(api: CloudflareApi, dep: DeploymentFile): Promise<string[]> {
+  try {
+    const all = await api.listCustomDomains(dep.account_id);
+    return all.filter((d) => d.service === dep.worker_name).map((d) => d.hostname);
+  } catch (e) {
+    throw couldNotVerify(dep, e);
+  }
+}
+
+// The live workers.dev and preview-URL switches, for `check` to compare with the file.
+export async function liveSubdomain(api: CloudflareApi, dep: DeploymentFile) {
+  try {
+    return await api.getSubdomain(dep.account_id, dep.worker_name);
+  } catch (e) {
+    throw couldNotVerify(dep, e);
+  }
 }
 
 // What attaching this deployment's custom_domains would add, remove or collide

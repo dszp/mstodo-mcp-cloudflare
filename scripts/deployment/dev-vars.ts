@@ -3,7 +3,7 @@ import { basename, dirname } from "node:path";
 import { DeploymentRefusal } from "./schema.ts";
 import type { Runner } from "./runner.ts";
 
-// Keep in sync with scripts/push-secrets.sh and .dev.vars.example.
+// Keep in sync with .dev.vars.example.
 export const SECRET_NAMES: readonly string[] = [
   "MS_TENANT_ID",
   "MS_CLIENT_ID",
@@ -14,7 +14,7 @@ export const SECRET_NAMES: readonly string[] = [
 
 // Value after the first `=` on the first line that starts with `NAME=`. CRLF is
 // tolerated and one pair of matching surrounding quotes is stripped, matching
-// how wrangler parses .dev.vars and what push-secrets.sh did.
+// how wrangler parses .dev.vars and what the old push-secrets.sh did.
 export function readDevVar(text: string, name: string): string | undefined {
   const prefix = `${name}=`;
   for (const raw of text.split("\n")) {
@@ -131,6 +131,17 @@ const alive = (pid: number): boolean => {
   }
 };
 
+// True when a live process holds the lock: its resolved .dev.vars is in use.
+export function devLockHeld(lockPath: string): boolean {
+  let pid = NaN;
+  try {
+    pid = Number.parseInt(readFileSync(lockPath, "utf8"), 10);
+  } catch {
+    return false;
+  }
+  return Number.isInteger(pid) && pid > 0 && alive(pid);
+}
+
 // One `dev` per deployment. The lock holds the pid; a dead pid is replaced.
 export function acquireDevLock(lockPath: string): () => void {
   mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
@@ -149,13 +160,8 @@ export function acquireDevLock(lockPath: string): () => void {
     }
   };
   if (!create()) {
-    let pid = NaN;
-    try {
-      pid = Number.parseInt(readFileSync(lockPath, "utf8"), 10);
-    } catch {
-      // vanished or unreadable: treat as stale
-    }
-    if (Number.isInteger(pid) && pid > 0 && alive(pid)) refuse();
+    // A vanished, unreadable or dead-pid lock is stale.
+    if (devLockHeld(lockPath)) refuse();
     rmSync(lockPath, { force: true });
     if (!create()) refuse();
   }

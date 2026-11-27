@@ -1,4 +1,4 @@
-// Command-line parsing for scripts/deployment.mjs. Wrangler flags pass through
+// Command-line parsing for scripts/deployment/cli.ts. Wrangler flags pass through
 // only when listed here, per command: the rest (--name, -c, -e, --routes, --var,
 // --account-id, ...) can redirect or rewrite a deployment, so they are refused.
 // Erasable TypeScript only: this runs on bare Node.
@@ -36,7 +36,7 @@ const refuse = (field: string, reason: string): never => {
 
 export function parseArgs(argv: string[]): ParsedArgs {
   if (argv.length === 0) {
-    return refuse("usage", `node scripts/deployment.mjs <${COMMANDS.join("|")}> <name> [flags]`);
+    return refuse("usage", `node scripts/deployment/cli.ts <${COMMANDS.join("|")}> <name> [flags]`);
   }
   const command = argv[0];
   if (!COMMANDS.includes(command)) return refuse("command", `unknown command "${command}"; expected one of ${COMMANDS.join(", ")}`);
