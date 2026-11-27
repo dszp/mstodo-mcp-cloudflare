@@ -403,7 +403,7 @@ shared credentials between servers beyond the capability URL itself:
    `{ download_url, filename, content_type, size, expires_at }`.
 2. `Obsidian: upload_attachment_url(url, target_note, filename)` (already exists) —
    Obsidian fetches the URL **server-side** and stores it.
-3. Bytes flow `mstdo.scriptek.com → obsv.scriptek.com` directly; the model only
+3. Bytes flow `todo.example.com → notes.example.com` directly; the model only
    passes the opaque URL between the two calls.
 
 For the reverse direction: a symmetric `Obsidian: mint_download_link` plus an
@@ -424,7 +424,7 @@ metadata it read at mint time.
 - **URL allowlist on the *pull* side** — the single most important guardrail. The
   ingesting server (Obsidian's `upload_attachment_url`, or a future
   `ingest_from_url` here) must refuse to fetch from arbitrary hosts; maintain a
-  small host allowlist (`mstdo.scriptek.com` ↔ `obsv.scriptek.com`). Without it, a
+  small host allowlist (`todo.example.com` ↔ `notes.example.com`). Without it, a
   prompt injection in any processed content could redirect bytes to an
   attacker-controlled URL.
 - **Scope is one attachment**, read-only — not bearer access to anything else.
@@ -564,8 +564,8 @@ API work is no longer all under Unreleased.
 
 Sources other than the owner's own task store, such as Flagged Emails, Planner, or
 another Microsoft 365 tenant, run as separate Workers that feed the server. The target
-case: a Worker that signs in to the Servant Voice tenant and syncs that tenant's
-Flagged Emails into the server for the personal tenant.
+case: a Worker that signs in to a second work tenant and syncs that tenant's
+Flagged Emails into the server for the owner's main tenant.
 
 The design that case implies:
 

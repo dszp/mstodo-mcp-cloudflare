@@ -381,7 +381,7 @@ Authorization: Bearer <access token>
     { "kind": "list_group", "id": "0190…", "seq": 18000, "deleted": false,
       "data": { "name": "Clients", "sort_key": "2026-11-21T10:00:00.0000000Z" } },
     { "kind": "list", "id": "0190…", "seq": 18001, "deleted": false,
-      "data": { "name": "🧾INVOICING", "sync": "todo", "wellknown": null, "is_owner": true,
+      "data": { "name": "🛒ERRANDS", "sync": "todo", "wellknown": null, "is_owner": true,
                 "is_shared": false, "group_id": "0190…",
                 "sort_key": "2026-11-20T10:00:00.0000000Z",
                 "theme": { "color": "…", "background": "…" }, "image_id": null,
@@ -1395,7 +1395,7 @@ server stores it as Substrate returns it, so the change is in the feed at once. 
 group's `position` is among the top-level lists and the other groups, like a top-level
 list's; the reference is a list or a group sid.
 
-Observed on the Servant Voice account (2026-11-25): Substrate accepted `ThemeColor`,
+Observed on the test account (2026-11-25): Substrate accepted `ThemeColor`,
 `ThemeBackground`, `ParentFolderGroupId` (a group's `Id`, or `null` to ungroup) and
 `OrderDateTime` in one `PATCH taskfolders/{id}`, and returned the whole folder. It
 ignored `null` for a theme value and stored `""` as given. It keeps a list's
@@ -1820,7 +1820,7 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
   themes. New capabilities `attachment_cache`,
   `attachment_upload` and `theme_images`.
 - 2026-11-25: section 7.1: `changed` messages are coalesced: one at once, then at most
-  one per 3 seconds while changes keep coming. Measured on the Servant Voice server, a
+  one per 3 seconds while changes keep coming. Measured on the test server, a
   `task.create` went from three messages to two.
 - 2026-11-25: sections 5.2 and 10.4: `list_group.create`, `list_group.update`,
   `list_group.reorder` and `list_group.delete`; groups are no longer read-only.
@@ -1864,7 +1864,7 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
   ID changed. The move matcher in section 2 can key on it. Moves made in the To Do app
   use the same Substrate re-parent (see `reparentTask`), so I expect the same result
   there; the end-to-end test in step 8 confirms it.
-- 2026-11-23, live on the Servant Voice test worker (`mstodo-mcp-sv`), with a
+- 2026-11-23, live on the secondary test deployment, with a
   temporary token-gated probe from the unmerged `scratch/sync-probe` branch:
   - **Immutable IDs work for To Do tasks.** With `Prefer: IdType="ImmutableId"`,
     Graph returns task IDs in a different form (`AAkAL…`). A task created, re-parented
@@ -1881,7 +1881,7 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
     groups, so the group object's fields are still unseen. (`taskgroups` and
     `taskfoldergroups` return "Endpoint not supported".)
   - Graph's `/me/todo/lists` and `…/tasks` reject `$select` with `ParseUri` errors.
-- 2026-11-23, after David created two list groups in the Servant Voice account and
+- 2026-11-23, after David created two list groups in the test account and
   moved one list into one of them: a group record from `GET …/foldergroups` has exactly
   `Id`, `Name` and `OrderDateTime`. The grouped list's `ParentFolderGroupId` equals the
   group's `Id`, and moving the list into the group gave it a new `OrderDateTime`; its
@@ -1999,7 +1999,7 @@ a time budget (section 5.1).
 ### 18.7a Correction: production mirrors flagged email
 Sections 1 and 1.2 describe `flaggedEmails` as not mirrored. That's the default, but
 this deployment opts in (`sync_flagged_emails`), and on 2026-11-24 production held
-13,296 tasks, 10,247 of them in Flagged Emails. Two consequences:
+about 12,000 tasks, roughly 9,000 of them in Flagged Emails. Two consequences:
 - **The sub-resource backfill is about five times the section 1.1 estimate** if it
   covers flagged email. Flagged-email tasks carry a linked resource (the message link)
   and rarely steps. Proposal: when the list is `reference`, backfill only its open tasks,

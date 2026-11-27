@@ -11,7 +11,7 @@ const autotaskRule = {
   id: "autotask-ticket",
   pattern: "(T\\d{8}\\.\\d{4}(?:\\.\\d{3})?)",
   url_template:
-    "https://ww3.autotask.net/Autotask/AutotaskExtend/ExecuteCommand.aspx?Code=OpenTicketDetail&TicketNumber=$1",
+    "https://example.autotask.net/Autotask/AutotaskExtend/ExecuteCommand.aspx?Code=OpenTicketDetail&TicketNumber=$1",
   display_template: "Ticket $1",
   external_id_template: "$1",
   application_name: "Autotask",
@@ -20,8 +20,8 @@ const autotaskRule = {
 
 const obsidianRule = {
   id: "obsidian-note",
-  pattern: "https://o\\.dszp\\.app/n/([A-Za-z0-9_-]{21})",
-  url_template: "https://o.dszp.app/n/$1",
+  pattern: "https://notes\\.example\\.com/n/([A-Za-z0-9_-]{21})",
+  url_template: "https://notes.example.com/n/$1",
   display_template: "Note: $1",
   external_id_template: "$1",
   application_name: "Obsidian",
@@ -59,7 +59,7 @@ describe("runLinkRules one-linked-resource-per-task", () => {
     const matches = runLinkRules(cfg([autotaskRule, obsidianRule]), {
       body: {
         content:
-          "ref T20260524.0001 and https://o.dszp.app/n/6cfFQ5GUYAZiHdAUBqsy2 too",
+          "ref T20260524.0001 and https://notes.example.com/n/Xq7Nk2LpR4wTzA9bC3dE1 too",
       },
     });
     expect(matches).toHaveLength(1);
@@ -69,7 +69,7 @@ describe("runLinkRules one-linked-resource-per-task", () => {
     const both = {
       body: {
         content:
-          "ref T20260524.0001 and https://o.dszp.app/n/6cfFQ5GUYAZiHdAUBqsy2 too",
+          "ref T20260524.0001 and https://notes.example.com/n/Xq7Nk2LpR4wTzA9bC3dE1 too",
       },
     };
     // Autotask first → Autotask wins.

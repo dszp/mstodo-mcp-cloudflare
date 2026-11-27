@@ -132,7 +132,7 @@ describe("DEPLOYMENT_NAME", () => {
   for (const bad of ["Prod", "../x", "-x", ""]) {
     it(`rejects ${JSON.stringify(bad)}`, () => expect(DEPLOYMENT_NAME.test(bad)).toBe(false));
   }
-  it("accepts servant-voice", () => expect(DEPLOYMENT_NAME.test("servant-voice")).toBe(true));
+  it("accepts second-tenant", () => expect(DEPLOYMENT_NAME.test("second-tenant")).toBe(true));
 });
 
 describe("deploymentPaths", () => {

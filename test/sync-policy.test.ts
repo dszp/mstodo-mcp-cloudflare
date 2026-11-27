@@ -14,7 +14,7 @@ describe("listSync (docs/SYNC-API.md section 1.2)", () => {
 
   it("a name pattern sets the setting", () => {
     const c = cfg({ patterns: [{ pattern: "^ARCHIVE", type: "reference" }, { pattern: "^JUNK", type: "excluded" }] });
-    expect(listSync({ list_id: "A", wellknown: null, display_name: "🗄️ARCHIVE 2024" }, c)).toBe("reference");
+    expect(listSync({ list_id: "A", wellknown: null, display_name: "🗄️ARCHIVE 2019" }, c)).toBe("reference");
     expect(listSync({ list_id: "B", wellknown: null, display_name: "JUNK" }, c)).toBe("excluded");
   });
 

@@ -63,6 +63,12 @@ To upgrade:
 4. In the main checkout, run `npm run check -- <name>` and `npm run dry-run -- <name>` for every deployment. `check` doesn't depend on the wrangler version except through `auth token`, so it mainly proves the token step still works.
 5. Merge, then deploy as usual. The first deploy after the upgrade shows an empty config diff if the rendered config is unchanged.
 
+## Leak guard
+
+The repository is public. Don't put real hostnames, account or KV IDs, business or client names, real list or task names, or figures from the owner's account in files or commit messages: use `example.com` hosts, made-up names and made-up numbers, and keep the real values in gitignored files (`deployments/`, `config-live/`).
+
+`npm run leak-guard` checks the tree at `HEAD` (`-- --log A..B` adds those commits' messages) against private terms kept outside the repository, because a committed list would publish them. Locally the terms are in `.git/leak-patterns`, which every worktree shares. A clone's `pre-push` hook runs `node scripts/leak-guard.ts --pre-push`. CI reads the same list from the `LEAK_PATTERNS` Actions secret and prints only file, line and pattern number. After editing the file, update the secret: `gh secret set LEAK_PATTERNS < .git/leak-patterns`. Rewording a match is the fix. Adding a term is right when something new and private appears.
+
 ## Worktrees and local types
 
 Do feature work in a git worktree next to the main checkout, with `node_modules` symlinked to the main checkout's copy. Deploy from the main checkout: `deployments/` and each `last-deployed.json` are gitignored and per checkout, so a worktree has none. When you remove the worktree, delete that symlink first, or `git worktree remove` refuses because of an untracked file.

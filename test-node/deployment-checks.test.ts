@@ -52,7 +52,7 @@ const refusal = (fn: () => unknown): DeploymentRefusal => {
 
 describe("normalizeHost", () => {
   it("lowercases and strips one trailing dot", () => {
-    expect(normalizeHost("Mstdo.Example.COM.")).toBe("mstdo.example.com");
+    expect(normalizeHost("Todo.Example.COM.")).toBe("todo.example.com");
     expect(normalizeHost("a.example.com..")).toBe("a.example.com.");
   });
 });
@@ -77,15 +77,15 @@ describe("checkBaseUrl", () => {
   });
 
   it("accepts a host listed in custom_domains", () => {
-    const d = dep({ base_url: "https://mstdo.example.com", workers_dev: false, custom_domains: ["mstdo.example.com"] });
+    const d = dep({ base_url: "https://todo.example.com", workers_dev: false, custom_domains: ["todo.example.com"] });
     expect(() => checkBaseUrl(d, f)).not.toThrow();
   });
 
   it.each([
     ["uppercase", "MSTDO.Example.com"],
-    ["a trailing dot", "mstdo.example.com."],
+    ["a trailing dot", "todo.example.com."],
   ])("refuses a custom domain that is not canonical: %s", (_label, domain) => {
-    const d = dep({ base_url: "https://mstdo.example.com", workers_dev: false, custom_domains: ["ok.example.com", domain] });
+    const d = dep({ base_url: "https://todo.example.com", workers_dev: false, custom_domains: ["ok.example.com", domain] });
     const r = refusal(() => checkBaseUrl(d, f));
     expect(r.field).toBe("custom_domains[1]");
     expect(r.file).toBe(f);
@@ -106,14 +106,14 @@ describe("checkBaseUrl", () => {
   });
 
   it("refuses a host that is neither listed nor workers.dev", () => {
-    const d = dep({ base_url: "https://other.example.com", custom_domains: ["mstdo.example.com"] });
+    const d = dep({ base_url: "https://other.example.com", custom_domains: ["todo.example.com"] });
     expect(refusal(() => checkBaseUrl(d, f)).field).toBe("base_url");
   });
 
   it.each([
-    ["a scheme", "https://mstdo.example.com"],
-    ["a path", "mstdo.example.com/x"],
-    ["a port", "mstdo.example.com:8443"],
+    ["a scheme", "https://todo.example.com"],
+    ["a path", "todo.example.com/x"],
+    ["a port", "todo.example.com:8443"],
     ["no dot", "localhost"],
     ["a wildcard", "*.example.com"],
     ["an underscore", "ms_tdo.example.com"],

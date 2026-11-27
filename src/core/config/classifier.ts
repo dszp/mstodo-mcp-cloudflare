@@ -5,13 +5,13 @@ const MAX_LIST_NAME_CHARS = 256;
 // Strip emoji (Extended_Pictographic), skin-tone modifiers (Emoji_Modifier,
 // U+1F3FB–U+1F3FF), variation selectors (U+FE0F), and Zero-Width Joiners
 // (U+200D) from a display name, then trim whitespace. This normalizes names
-// like "🏠PERSONAL" to "PERSONAL" before pattern matching.
+// like "🏠HOME" to "HOME" before pattern matching.
 //
 // Emoji_Modifier is its own property — it is NOT Extended_Pictographic — so a
-// name like "👨🏻 INTERNAL TECH 👨🏻" left a stray "🏻" once the base glyph was
+// name like "👨🏻 TEAM PROJECTS 👨🏻" left a stray "🏻" once the base glyph was
 // removed, defeating anchored patterns. We deliberately do NOT use the broader
 // Emoji_Component (which also covers ASCII digits, "#", "*") — that would
-// mangle legitimate names like "90 ROCKS".
+// mangle legitimate names like "30 GOALS".
 export function stripEmoji(s: string): string {
   return s.replace(/\p{Extended_Pictographic}|\p{Emoji_Modifier}|️|‍/gu, "").trim();
 }
