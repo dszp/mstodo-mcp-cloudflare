@@ -1,0 +1,13 @@
+{
+  // The sync engine's own check: ES2022 only, no DOM, no Node or Workers types,
+  // so an engine file that reaches for window, localStorage, document, process
+  // or Buffer fails to compile. Tests are left to ./tsconfig.json (vitest types).
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": [],
+    "paths": { "@potem/core/*": ["../../packages/core/*"] }
+  },
+  "include": ["src/sync/**/*.ts"],
+  "exclude": ["src/sync/**/*.test.ts"]
+}

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Smart-list and local-search rules for clients** (`docs/SYNC-API.md` section 4.10): which tasks
+  each smart list holds, how it is ordered and counted, and how local search matches, so every
+  client shows the same lists.
+- **`timezone` in `GET /api/v1/sync/info`** (with a token): the owner's `TIMEZONE`, `UTC` when
+  unset, so a client computes "today" in the zone of the feed's bare dates. Section 14.1 also
+  documents the `cursor` the response already carried, and section 4.2 says which dates
+  `my_day.committed_day` holds.
+- **Web client scaffold** (`workers/web`, not deployed): a sync engine with no DOM or framework
+  dependency (an in-memory mirror, the pull loop over the change feed, smart lists and local
+  search), and a React spike that renders a synthetic feed (`npm run web:spike`). New dev
+  dependencies, pinned: `react` and `react-dom` 19.3.1, `@types/react` 19.3.2,
+  `@types/react-dom` 19.3.0, `vite` 8.3.8, `@vitejs/plugin-react` 6.3.0,
+  `@tanstack/react-virtual` 3.14.28. The Node image's runtime install leaves them out.
+
+### Fixed
+- **Task body text for search.** An HTML body's `<script>` and `<style>` contents (Outlook
+  bodies carry a `<style>` block) are no longer indexed as words, and a numeric entity beyond
+  U+10FFFF is kept as written instead of throwing while the task is stored. Section 4.10 of
+  `docs/SYNC-API.md` states the rule, and the web engine's local search matches the same text.
+
 ### Changed
 - **Repository layout.** Host-independent code moved from `src/core` to `packages/core`, imported
   as `@potem/core/<path>`, and the server (hosts, tests, `wrangler.example.jsonc`, build scripts)

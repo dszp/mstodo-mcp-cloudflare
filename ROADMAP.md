@@ -547,7 +547,11 @@ potem-server/
 `packages/core` and `workers/server` are in place (2026-11-27). It is still one npm
 package, with one `package.json` and lockfile at the root; code outside `packages/core`
 imports it as `@potem/core/<path>` through a `paths` alias in `tsconfig.json` and a matching
-vitest alias, so there is no workspace to publish or link. `workers/web` is next.
+vitest alias, so there is no workspace to publish or link. `workers/web` is started
+(2026-11-27): a framework-free sync engine in `workers/web/src/sync` (mirror store, pull
+loop, smart lists and local search per `docs/SYNC-API.md` section 4.10) and a React spike
+in `workers/web/spike` that renders a synthetic feed. It has no Worker yet and is not
+deployed.
 
 The web UI lives here, not with the apps, because it is TypeScript and imports the sync
 API types directly. The app repository is named for its platform (`potem-apple`); an

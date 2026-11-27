@@ -16,17 +16,46 @@ const NAMED_ENTITIES: Record<string, string> = {
 };
 
 function decodeEntities(s: string): string {
-  return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (whole, body: string) => {
+  return s.replace(/&(#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z]+);/g, (whole, body: string) => {
     if (body[0] === "#") {
-      const code =
-        body[1] === "x" || body[1] === "X"
-          ? parseInt(body.slice(2), 16)
-          : parseInt(body.slice(1), 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : whole;
+      const hex = body[1] === "x" || body[1] === "X";
+      const code = hex ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+      // Outside Unicode, String.fromCodePoint throws: leave the entity as written.
+      return code <= 0x10ffff ? String.fromCodePoint(code) : whole;
     }
     const named = NAMED_ENTITIES[body.toLowerCase()];
     return named ?? whole;
   });
+}
+
+// Elements whose contents are not text a reader sees.
+const RAW_TEXT = ["script", "style"];
+const endsName = (c: string | undefined): boolean => c === undefined || c === ">" || c === "/" || /\s/.test(c);
+
+// The raw-text element a tag at `lt` opens, if any.
+function rawTextElement(input: string, lt: number): string | null {
+  for (const name of RAW_TEXT) {
+    if (input.slice(lt + 1, lt + 1 + name.length).toLowerCase() === name && endsName(input[lt + 1 + name.length])) {
+      return name;
+    }
+  }
+  return null;
+}
+
+// Index just past the `</name …>` that closes a raw-text element whose content
+// starts at `from`, or the input's length when it is never closed.
+function skipRawText(input: string, name: string, from: number): number {
+  let i = from;
+  for (;;) {
+    const close = input.indexOf("</", i);
+    if (close === -1) return input.length;
+    const after = close + 2 + name.length;
+    if (input.slice(close + 2, after).toLowerCase() === name && endsName(input[after])) {
+      const gt = input.indexOf(">", after);
+      return gt === -1 ? input.length : gt + 1;
+    }
+    i = close + 2;
+  }
 }
 
 export function stripHtml(input: string, contentType?: string): string {
@@ -50,7 +79,8 @@ export function stripHtml(input: string, contentType?: string): string {
       break;
     }
     withoutTags += input.slice(i, lt) + " ";
-    i = gt + 1;
+    const raw = rawTextElement(input, lt);
+    i = raw === null ? gt + 1 : skipRawText(input, raw, gt + 1);
   }
   const decoded = decodeEntities(withoutTags);
   return decoded.replace(/\s+/g, " ").trim();

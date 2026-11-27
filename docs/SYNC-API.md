@@ -424,7 +424,14 @@ Rules:
   To Do shows only the day, and a value Graph stores as exact UTC midnight is read as
   that UTC date, anything else as the local date in `TIMEZONE`. The app sends
   `completed_at` back as a bare date too. Instants (reminders, created, modified) go
-  out as UTC ISO 8601.
+  out as UTC ISO 8601. `GET /api/v1/sync/info` names that zone as `timezone`
+  (section 14.1).
+- `my_day.committed_day` and `my_day.postponed_day` are calendar dates as To Do keeps
+  them: the first ten characters of the `CommittedDay` and `PostponedDay` values
+  Substrate sends, with no time zone conversion. The server writes them as the date
+  in `TIMEZONE` (`myday.add` without a date uses today there); a Microsoft To Do app
+  writes its device's local date. They compare with a client's "today" when the
+  owner's devices run in `TIMEZONE`.
 - `subresources_complete: false` means the server hasn't fetched this task's steps,
   links and attachments yet (the per-task scan, section 1.1). The app shows what it has
   and gets the rest in a later pull. Once fetched, it stays `true`: a later change to
@@ -750,6 +757,82 @@ the binding, `capabilities.attachment_cache` and `capabilities.theme_images` are
 Once a day the server's cron sweeps the bucket. It deletes each attachment copy whose
 attachment is no longer in the mirror, and each theme image that no list or smart list
 has used for 30 days, counted from the first sweep that found it unused.
+
+### 4.10 Client rules: smart lists and local search
+
+The server computes no smart lists. Each client builds them from the mirror it holds,
+and every client follows the rules below so that a smart list holds the same tasks, in
+the same order, in every app. The Apple app's implementation was the source of these
+rules.
+
+Every smart list leaves out tasks in lists with `sync: "reference"`. "Today" is the
+date as a bare `YYYY-MM-DD` in the owner's zone, which `GET /api/v1/sync/info` returns
+as `timezone` (section 14.1), whatever zone the device is in. The feed's bare dates
+and `my_day.committed_day` are in that zone too (section 4.2). `order` is the task's
+`order` string from the feed (section 4.2), compared as text. "Open" means `status` is
+not `completed`.
+
+These rules cover the smart lists and search. The order of tasks inside a regular list
+is up to each client and is not part of this section.
+
+Sorting follows SQLite's rule for nulls: in a descending sort a null value sorts last,
+in an ascending sort first. Rows still tied after the listed keys sort by `id`
+ascending, so every client shows one order.
+
+| List | Holds | Order | A task created here gets |
+|---|---|---|---|
+| `my_day` | `my_day.committed_day == today`, any status. With the client's "show tasks due today in My Day" preference (default off), also open tasks with `due == today` | `my_day.committed_order` desc, then `order` desc | `myday.add` after the create |
+| `important` | open, `importance == "high"` | `order` desc, then `created_at` desc | `importance: "high"` |
+| `planned` | open, `due` not null (a reminder alone does not count) | `due` asc, then `order` desc | `due: today` |
+| `all` | open | `order` desc, then `created_at` desc | nothing extra |
+| `completed` | `status == "completed"`; a client may limit it to `completed_at >= since` | `completed_at` desc, then `modified_at` desc | nothing extra |
+
+A completed task in today's My Day stays in `my_day` and is shown under a
+"Completed" section of that list, in the same order as the rest of the list.
+
+The sidebar count is the number of open tasks in the list. For `completed` it is the
+number of tasks the list holds: completed tasks, limited by the same "completed since"
+date when the client applies one to the list.
+
+A completed task with no `completed_at` sorts last in `completed`, forms a final group
+of its own in the grouping below, and is left out when a "completed since" date is
+applied.
+
+`completed` is grouped by completion date: one group per day for the 14 days up to
+and including today, then six seven-day weeks counting back from the day before the
+first of those days, then one group per calendar month. A date after today counts as
+its own day.
+
+**Local search.** A client searches its own mirror before it calls the server:
+
+- The query's words are what is left after splitting it on runs of Unicode whitespace,
+  the characters JavaScript's `\s` matches. A query with no words matches nothing.
+  Every word must appear in the title, the note body's plain text, or the title of a
+  step. Matching ignores case for ASCII letters only, as SQLite's `LIKE` does, so
+  clients agree on every query.
+- A body's plain text is its `content` when `type` is `text`. When `type` is `html`,
+  it is the content with each tag (`<` to the next `>`) replaced by a space, the
+  contents of `<script>` and `<style>` elements dropped (to their closing tag, or to
+  the end when there is none), the entities `&amp;`, `&lt;`, `&gt;`, `&quot;`,
+  `&apos;` and `&nbsp;` and numeric entities (`&#39;`, `&#x27;`) decoded, other
+  entities and a numeric entity beyond U+10FFFF left as written, runs of whitespace
+  collapsed to one space, and the ends trimmed. A `<` with no `>` after it is kept as
+  text. So markup such as `div` or `href` never matches, and a word split by a tag
+  (`ham<b>mer</b>`) is two words. The server indexes a body for `GET /api/v1/search`
+  by the same rule.
+- The scope is the whole mirror, reference lists included; or one list; or one smart
+  list. A smart-list scope applies that list's "Holds" rule without its "open"
+  requirement, because only "Include Completed" decides whether completed tasks
+  appear, and it still leaves out reference lists. My Day's "due today" clause still
+  requires the task to be open.
+- Completed tasks are included unless the user turns off "Include Completed". A
+  "completed since" date, when set, drops completed tasks completed before it, and
+  those with no `completed_at`.
+- Results fall into four groups in this order: open tasks whose title contains the
+  first query word, open tasks whose title does not, completed tasks whose title does,
+  completed tasks whose title does not. Only the first word is tested against the
+  title, with the same ASCII-only case folding. Within a group, `order` desc, then `id` asc.
+- "Search all history" calls `GET /api/v1/search` for the tasks the mirror does not hold.
 
 ---
 
@@ -1572,6 +1655,7 @@ to build now:
   ```json
   {
     "server_id": "c1b0…",
+    "cursor": "k3v9.18452",
     "account": { "name": "David (work)", "email_hint": "d…@…" },
     "version": "0.18.0",
     "capabilities": { "my_day": true, "step_order": true, "sub_resources": true,
@@ -1580,13 +1664,18 @@ to build now:
                       "attachment_cache": true, "theme_images": true,
                       "push": "websocket",
                       "source": "graph" },
-    "link_rules_rev": "9f2c4e01a7b3d5e6"
+    "link_rules_rev": "9f2c4e01a7b3d5e6",
+    "timezone": "America/New_York"
   }
   ```
 
   `server_id` is a random ID created once and stored in DO storage. It never changes,
   unlike the cursor epoch, which changes on an identity reset. The app keys the
   account's local data by it, so re-adding the same server is recognized.
+  `cursor` is the change feed's current position (section 3), the same form a pull
+  returns. `timezone` is the owner's `TIMEZONE`, an IANA name (`UTC` when the server
+  has none set): the zone of the feed's bare dates, and the zone a client uses for
+  "today" (section 4.10). The anonymous `/sync/info` probe carries neither.
   `capabilities` tells the app what this server supports: a deployment without the
   Exchange Online scope has no My Day, no step order and no list appearance
   (`list_appearance`: sidebar groups, order and theme in the feed, section 10.4;
@@ -1808,6 +1897,11 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-27: section 14.1: the authenticated `/sync/info` returns `timezone`, the owner's
+  `TIMEZONE`, which section 4.10's "today" uses; its existing `cursor` field is documented.
+  Section 4.2 states that `my_day.committed_day` is To Do's calendar date, unconverted.
+- 2026-11-27: section 4.10 added: the smart-list and local-search rules every client follows,
+  taken from the Apple app, so each app and the web UI show the same lists.
 - 2026-11-27: section 6: completing a task without `completed_at` is stamped with the
   owner's local date, and a completion date Graph ignored is sent once more.
 - 2026-11-27: section 4.6: the Claude connector's attachment reads and uploads use the

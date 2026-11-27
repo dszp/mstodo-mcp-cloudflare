@@ -9,6 +9,8 @@ import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
 import { OPS, UPDATABLE } from "@potem/core/sync/mutations";
 import type { FeedChange } from "@potem/core/index/change-feed";
+import { handleApiRequest } from "@potem/core/api/router";
+import type { AppEnv } from "@potem/core/ports";
 
 const DOC = readFileSync(new URL("../../../docs/SYNC-API.md", import.meta.url).pathname, "utf8");
 
@@ -127,5 +129,28 @@ describe("capabilities match section 14.1", () => {
     const info = await c.syncInfo();
     const documented = jsonAfter("### 14.1") as { capabilities: Record<string, unknown> };
     expect(Object.keys(info.capabilities).sort()).toEqual(Object.keys(documented.capabilities).sort());
+  });
+
+  it("/sync/info with a token has the top-level fields the doc shows", async () => {
+    const db = openDatabase(":memory:");
+    const sql = sqlDb(db);
+    const state = stateStore(db);
+    const c = new IndexCore({ sql, transact: transactor(db), state, alarms: state, env: { TIMEZONE: "UTC" } as never });
+    c.bootstrap();
+    const env = {
+      TIMEZONE: "America/Chicago",
+      ownerIndex: () => ({ ...c, authState: async () => ({ epoch: "e1", reauth: null }), syncInfo: () => c.syncInfo() }),
+      TODO_CACHE: { get: async () => null },
+    } as unknown as AppEnv;
+    const res = await handleApiRequest(
+      new Request("https://srv.test/api/v1/sync/info"),
+      env,
+      { epoch: "e1", authorized_at: Date.now() } as never,
+      { waitUntil: () => {} },
+    );
+    const info = (await res.json()) as Record<string, unknown>;
+    const documented = jsonAfter("### 14.1") as Record<string, unknown>;
+    expect(Object.keys(info).sort()).toEqual(Object.keys(documented).sort());
+    expect(info.timezone).toBe("America/Chicago");
   });
 });

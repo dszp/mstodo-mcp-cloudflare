@@ -167,6 +167,9 @@ async function syncInfo(_url: URL, env: AppEnv): Promise<Response> {
     version: VERSION,
     capabilities: info.capabilities,
     link_rules_rev: linkRules?.rev ?? null,
+    // The zone the feed's bare dates are in, and the one a client's "today"
+    // uses (section 4.10). Unset means UTC, as the change feed reads it.
+    timezone: env.TIMEZONE || "UTC",
   });
 }
 

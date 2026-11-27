@@ -20,7 +20,9 @@
     "types": "wrangler types -c workers/server/wrangler.example.jsonc workers/server/worker-configuration.d.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "leak-guard": "node scripts/leak-guard.ts"
+    "leak-guard": "node scripts/leak-guard.ts",
+    "web:spike": "vite --config workers/web/spike/vite.config.ts",
+    "web:spike:prod": "vite build --config workers/web/spike/vite.config.ts && vite preview --config workers/web/spike/vite.config.ts"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.2.3",
@@ -32,12 +34,19 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.6.0",
+    "@tanstack/react-virtual": "3.14.28",
     "@types/node": "^25.8.0",
+    "@types/react": "19.3.2",
+    "@types/react-dom": "19.3.0",
     "@types/ws": "^8.18.2",
+    "@vitejs/plugin-react": "6.3.0",
     "buffer": "^6.0.3",
     "esbuild": "^0.28.2",
     "jsonc-parser": "^3.3.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "typescript": "^6.0.3",
+    "vite": "8.3.8",
     "vitest": "^4.1.12",
     "wrangler": "4.158.0"
   }
