@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { generateFeed, pageOf } from "./fixture";
 import type { FeedChange } from "../src/sync/feed";
 
@@ -36,32 +37,38 @@ function spikeFeed(): Plugin {
   return {
     name: "spike-feed",
     configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        const url = new URL(req.url ?? "/", "http://localhost");
-        if (url.pathname === "/spike/meta") {
-          res.setHeader("content-type", "application/json");
-          res.setHeader("cache-control", "no-store");
-          res.end(JSON.stringify({ today: TODAY }));
-          return;
-        }
-        if (url.pathname === "/bff/api/sync/changes") {
-          const limit = Math.max(1, Number(url.searchParams.get("limit") ?? 500) | 0);
-          const cursor = url.searchParams.get("cursor") || null;
-          // The dataset params ride along on every page request (the page adds them).
-          const body = JSON.stringify(pageOf(feedFor(url.searchParams), cursor, limit));
-          res.setHeader("content-type", "application/json");
-          res.setHeader("cache-control", "no-store");
-          res.end(body);
-          return;
-        }
-        next();
-      });
+      server.middlewares.use(handle);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(handle);
     },
   };
+  function handle(req: IncomingMessage, res: ServerResponse, next: () => void): void {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname === "/spike/meta") {
+      res.setHeader("content-type", "application/json");
+      res.setHeader("cache-control", "no-store");
+      res.end(JSON.stringify({ today: TODAY }));
+      return;
+    }
+    if (url.pathname === "/bff/api/sync/changes") {
+      const limit = Math.max(1, Number(url.searchParams.get("limit") ?? 500) | 0);
+      const cursor = url.searchParams.get("cursor") || null;
+      // The dataset params ride along on every page request (the page adds them).
+      const body = JSON.stringify(pageOf(feedFor(url.searchParams), cursor, limit));
+      res.setHeader("content-type", "application/json");
+      res.setHeader("cache-control", "no-store");
+      res.end(body);
+      return;
+    }
+    next();
+  }
 }
 
 export default defineConfig({
   root: fileURLToPath(new URL(".", import.meta.url)),
   plugins: [react(), spikeFeed()],
   server: { host: "127.0.0.1", port: 5173, strictPort: true },
+  preview: { host: "127.0.0.1", port: 5173, strictPort: true },
+  build: { outDir: "dist", emptyOutDir: true },
 });

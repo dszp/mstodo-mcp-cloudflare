@@ -5,7 +5,7 @@ import type { FeedPage } from "../src/sync/feed";
 import { App, publishStats, type Stats } from "./App";
 
 declare global {
-  interface Window { __spike?: Stats; __spikeStore?: MirrorStore }
+  interface Window { __spike?: Stats; __spikeStore?: MirrorStore; __spikeTouch?: (id: string) => void }
 }
 
 async function main(): Promise<void> {
@@ -33,6 +33,14 @@ async function main(): Promise<void> {
     const t0 = performance.now();
     realApply(changes);
     applyMs += performance.now() - t0;
+  };
+
+  // One-task change through applyPage, for the render-count probe.
+  window.__spikeTouch = (id) => {
+    const t = store.task(id);
+    if (!t) return;
+    const { id: _id, ...data } = t;
+    store.applyPage([{ kind: "task", id, seq: 0, deleted: false, data: { ...data, title: `${t.title} *` }, field_clock: {} }]);
   };
 
   const pulled = await pullAll(fetchPage, store, null);

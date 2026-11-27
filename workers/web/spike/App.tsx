@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { MirrorStore } from "../src/sync/store";
 import { listTasks, smartCounts, smartListTasks } from "../src/sync/smart-lists";
@@ -15,7 +15,12 @@ const SMART: [SmartList, string][] = [
   ["my_day", "My Day"], ["important", "Important"], ["planned", "Planned"], ["all", "All"], ["completed", "Completed"],
 ];
 
+// Render probe: the controller asserts that one touched task re-renders one row.
+let rowRenders = 0;
+(globalThis as { __spikeRowRenders?: number }).__spikeRowRenders = 0;
+
 const Row = memo(function Row(p: { store: MirrorStore; id: string; top: number; selected: boolean; onPick: (id: string) => void }) {
+  (globalThis as { __spikeRowRenders?: number }).__spikeRowRenders = ++rowRenders;
   useStoreKey(p.store, { task: p.id });
   const t = p.store.task(p.id);
   if (!t) return null;
@@ -68,13 +73,19 @@ export function App({ store, today, stats, onFirstRows }: { store: MirrorStore; 
   const opts = useMemo(() => ({ today }), [today]);
   const counts = useMemo(() => smartCounts(store, opts), [store, opts, tasksV]);
   const lists = useMemo(
-    () => [...store.lists()].filter((l) => l.sync !== "reference").sort((a, b) => (a.sort_key ?? "").localeCompare(b.sort_key ?? "") || a.id.localeCompare(b.id)),
+    () => [...store.lists()].sort((a, b) => (a.sort_key ?? "").localeCompare(b.sort_key ?? "") || a.id.localeCompare(b.id)),
     [store, listsV],
   );
-  const ids = useMemo(
-    () => ("smart" in sel ? smartListTasks(store, sel.smart, opts) : listTasks(store, sel.list)).map((t) => t.id),
-    [store, sel, opts, tasksV],
-  );
+  // Keep the previous array while the id sequence is unchanged, so a title
+  // edit doesn't re-render TaskList.
+  const prevIds = useRef<string[]>([]);
+  const ids = useMemo(() => {
+    const next = ("smart" in sel ? smartListTasks(store, sel.smart, opts) : listTasks(store, sel.list)).map((t) => t.id);
+    const prev = prevIds.current;
+    if (prev.length === next.length && prev.every((id, i) => id === next[i])) return prev;
+    return (prevIds.current = next);
+  }, [store, sel, opts, tasksV]);
+  const onPick = useCallback((id: string) => { setPicked(id); setView("detail"); }, []);
   const listKey = "smart" in sel ? sel.smart : sel.list;
   return (
     <>
@@ -88,11 +99,11 @@ export function App({ store, today, stats, onFirstRows }: { store: MirrorStore; 
           <hr />
           {lists.map((l) => (
             <button key={l.id} className={"list" in sel && sel.list === l.id ? "sel" : ""} onClick={() => { setSel({ list: l.id }); setView("list"); }}>
-              <span>{l.name ?? "(unnamed)"}</span>
+              <span>{l.name ?? "(unnamed)"}</span>{l.sync === "reference" && <span className="n">ref</span>}
             </button>
           ))}
         </div>
-        <TaskList key={listKey} store={store} ids={ids} selected={picked} onPick={(id) => { setPicked(id); setView("detail"); }} onRows={onFirstRows} />
+        <TaskList key={listKey} store={store} ids={ids} selected={picked} onPick={onPick} onRows={onFirstRows} />
         <Detail store={store} id={picked} />
       </div>
       <button className="back" style={{ position: "fixed", top: 0, right: 0 }} onClick={() => setView(view === "detail" ? "list" : "side")}>Back</button>
