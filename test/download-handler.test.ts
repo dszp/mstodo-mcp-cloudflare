@@ -6,6 +6,8 @@ const env = testAppEnv();
 import { handleDownload } from "../src/core/upload/download-handler";
 import { createDownloadCapability, lookupDownloadCapability } from "../src/core/upload/tokens";
 import { testAppEnv } from "./_app-env";
+import { ownerIndex } from "../src/core/owner-index";
+import { attachmentBlobKey } from "../src/core/blobs";
 import type { AppEnv } from "../src/core/ports";
 
 const TOKENS_KEY = "tokens:owner";
@@ -125,6 +127,32 @@ describe("handleDownload serve flow", () => {
     const res2 = await handleDownload(getReq(token), env);
     expect(res2!.status).toBe(401);
     expect((await res2!.json() as { reason: string }).reason).toBe("link_invalid");
+  });
+
+  it("keeps a copy on the first download and serves the next from the blob store", async () => {
+    const index = ownerIndex(env);
+    await index.replaceAttachments("T1", "L1", [
+      { "@odata.type": "#microsoft.graph.taskFileAttachment", id: "A1", name: "note.txt", size: 2, contentType: "text/plain" },
+    ] as never);
+    const ref = await index.attachmentBlobRef("A1");
+    expect(ref).not.toBeNull();
+    try {
+      installFetch(attachmentOk());
+      const first = await createDownloadCapability(env, { ...SCOPE, filename: "note.txt", content_type: "text/plain", size: 2 });
+      expect(await (await handleDownload(getReq(first.token), env))!.text()).toBe("hi");
+      expect(calls).toHaveLength(1);
+      expect(await env.BLOBS!.get(attachmentBlobKey(ref!.sid))).not.toBeNull();
+
+      installFetch(() => new Response("Graph should not be called", { status: 500 }));
+      const second = await createDownloadCapability(env, { ...SCOPE, filename: "note.txt", content_type: "text/plain", size: 2 });
+      const res = await handleDownload(getReq(second.token), env);
+      expect(res!.status).toBe(200);
+      expect(await res!.text()).toBe("hi");
+      expect(calls).toHaveLength(0);
+    } finally {
+      await env.BLOBS!.delete(attachmentBlobKey(ref!.sid));
+      await index.replaceAttachments("T1", "L1", []);
+    }
   });
 
   it("burns BEFORE the Graph fetch — a Graph failure still consumes the link", async () => {

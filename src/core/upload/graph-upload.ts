@@ -49,7 +49,7 @@ function attachmentsUrl(listId: string, taskId: string): string {
   )}/attachments`;
 }
 
-function base64FromBytes(bytes: Uint8Array): string {
+export function base64FromBytes(bytes: Uint8Array): string {
   let bin = "";
   const CHUNK = 0x8000;
   for (let i = 0; i < bytes.length; i += CHUNK) {

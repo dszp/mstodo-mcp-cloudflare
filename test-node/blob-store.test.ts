@@ -11,34 +11,10 @@ import { syncExecutor } from "../src/core/sync/executor";
 import { sweepBlobs, themeImageId, THEME_IMAGE_IDLE_MS } from "../src/core/blobs";
 import { themeImageBytes, uploadAttachment, uploadThemeImage } from "../src/core/api/uploads";
 import { attachmentBySid } from "../src/core/api/attachments";
-import type { AppEnv, BlobStore } from "../src/core/ports";
+import type { AppEnv } from "../src/core/ports";
+import { memoryBlobs } from "./_memory-blobs";
 import type { OpsContext } from "../src/core/ops/context";
 import type { FeedChange } from "../src/core/index/change-feed";
-
-function memoryBlobs() {
-  const objects = new Map<string, { bytes: Uint8Array; type?: string; uploaded: Date }>();
-  const store: BlobStore = {
-    async get(key) {
-      const o = objects.get(key);
-      if (!o) return null;
-      return { body: new Blob([o.bytes]).stream(), size: o.bytes.byteLength, httpMetadata: { contentType: o.type } };
-    },
-    async put(key, value, options) {
-      const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-      objects.set(key, { bytes: new Uint8Array(bytes), type: options?.httpMetadata?.contentType, uploaded: new Date(0) });
-    },
-    async delete(keys) {
-      for (const k of Array.isArray(keys) ? keys : [keys]) objects.delete(k);
-    },
-    async list({ prefix }) {
-      return {
-        objects: [...objects.entries()].filter(([k]) => k.startsWith(prefix)).map(([key, o]) => ({ key, uploaded: o.uploaded })),
-        truncated: false,
-      };
-    },
-  };
-  return { store, objects };
-}
 
 function setup(opts: { blobs?: boolean } = {}) {
   const db = openDatabase(":memory:");
