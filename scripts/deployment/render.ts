@@ -3,7 +3,7 @@
 // the single source of structure (bindings, migrations, vars, crons); the deployment
 // file only supplies what differs. Erasable TypeScript only: this runs on bare Node.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { DeploymentRefusal, deploymentPaths, parseJsonc, type DeploymentFile } from "./schema.ts";
 
 export type WranglerConfig = Record<string, unknown>;
@@ -12,6 +12,9 @@ type Opts = { repoRoot: string; renderDir: string; file: string };
 type Binding = Record<string, unknown>;
 
 const PLACEHOLDER = "<your-";
+
+// The server Worker's example config. Its `main` and `$schema` are relative to its own directory.
+export const SERVER_EXAMPLE = "workers/server/wrangler.example.jsonc";
 
 export function renderConfig(example: WranglerConfig, dep: DeploymentFile, opts: Opts): WranglerConfig {
   const refuse = (field: string, reason: string): never => {
@@ -26,9 +29,11 @@ export function renderConfig(example: WranglerConfig, dep: DeploymentFile, opts:
   out.preview_urls = dep.preview_urls;
 
   // wrangler resolves `main` relative to the config file, which now lives in renderDir.
-  out.main = relative(opts.renderDir, join(opts.repoRoot, String(example.main)));
+  // The example's own paths are relative to the example's directory.
+  const exampleDir = dirname(join(opts.repoRoot, SERVER_EXAMPLE));
+  out.main = relative(opts.renderDir, join(exampleDir, String(example.main)));
   if (typeof example.$schema === "string") {
-    out.$schema = relative(opts.renderDir, join(opts.repoRoot, example.$schema));
+    out.$schema = relative(opts.renderDir, join(exampleDir, example.$schema));
   }
 
   // The deployment file is the only source of routes; one the example carries
@@ -96,7 +101,7 @@ export function findPlaceholders(config: WranglerConfig): string[] {
 // pointed at, so the CLI writes it (writeRender) only once every check passed.
 export function loadAndRender(repoRoot: string, dep: DeploymentFile): WranglerConfig {
   const paths = deploymentPaths(repoRoot, dep.name);
-  const examplePath = join(repoRoot, "wrangler.example.jsonc");
+  const examplePath = join(repoRoot, SERVER_EXAMPLE);
   const example = parseJsonc(readFileSync(examplePath, "utf8"), examplePath) as WranglerConfig;
   const rendered = renderConfig(example, dep, { repoRoot, renderDir: paths.renderDir, file: paths.file });
   const placeholders = findPlaceholders(rendered);

@@ -16,5 +16,5 @@
     "paths": { "@potem/core/*": ["./packages/core/*"] },
     "noEmit": true
   },
-  "include": ["src/**/*", "packages/**/*", "test/**/*", "test-node/**/*", "worker-configuration.d.ts"]
+  "include": ["workers/server/src/**/*", "packages/**/*", "workers/server/test/**/*", "workers/server/test-node/**/*", "workers/server/worker-configuration.d.ts"]
 }

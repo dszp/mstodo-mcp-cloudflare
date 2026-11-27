@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { DeploymentRefusal, type DeploymentFile } from "../scripts/deployment/schema.ts";
-import type { Runner } from "../scripts/deployment/runner.ts";
+import { DeploymentRefusal, type DeploymentFile } from "../schema.ts";
+import type { Runner } from "../runner.ts";
 import {
   attachedDomains,
   checkDomainChangeset,
@@ -9,7 +9,7 @@ import {
   liveSubdomain,
   wranglerToken,
   type CloudflareApi,
-} from "../scripts/deployment/live.ts";
+} from "../live.ts";
 
 const ACCOUNT = "0123456789abcdef0123456789abcdef";
 const KV_A = "0123456789abcdef0123456789abcde1";

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { DeploymentRefusal } from "../scripts/deployment/schema.ts";
-import { parseArgs } from "../scripts/deployment/args.ts";
+import { DeploymentRefusal } from "../schema.ts";
+import { parseArgs } from "../args.ts";
 
 const refusal = (argv: string[]): DeploymentRefusal => {
   try {

@@ -2,11 +2,11 @@ import { defineConfig } from "vitest/config";
 import { cloudflarePool, cloudflareTest } from "@cloudflare/vitest-plugin";
 
 const poolOptions = {
-  main: "test/_test-worker.ts",
+  main: "workers/server/test/_test-worker.ts",
   // Use the committed example config so `npm test` runs on a fresh clone without
   // a deployment's rendered config. miniflare ignores account_id / KV IDs
   // (it simulates bindings locally), so the placeholders are fine for tests.
-  wrangler: { configPath: "./wrangler.example.jsonc" },
+  wrangler: { configPath: "./workers/server/wrangler.example.jsonc" },
   miniflare: {
     kvNamespaces: ["OAUTH_KV", "TODO_CACHE"],
     compatibilityFlags: ["nodejs_compat"],
@@ -38,14 +38,14 @@ export default defineConfig({
         resolve: { alias: coreAlias },
         test: {
           name: "workers",
-          include: ["test/**/*.test.ts"],
+          include: ["workers/server/test/**/*.test.ts"],
           pool: cloudflarePool(poolOptions),
         },
       },
       {
         test: {
           name: "node",
-          include: ["test-node/**/*.test.ts"],
+          include: ["workers/server/test-node/**/*.test.ts", "scripts/deployment/test/**/*.test.ts", "scripts/test/**/*.test.ts"],
           environment: "node",
           pool: "forks",
           // node_modules are externalized (loaded by Node, not Vite), which
@@ -56,7 +56,7 @@ export default defineConfig({
         resolve: {
           alias: {
             ...coreAlias,
-            "cloudflare:workers": new URL("./src/hosts/node/cloudflare-workers-shim.ts", import.meta.url).pathname,
+            "cloudflare:workers": new URL("./workers/server/src/hosts/node/cloudflare-workers-shim.ts", import.meta.url).pathname,
           },
         },
       },

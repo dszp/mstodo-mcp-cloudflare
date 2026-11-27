@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // End-to-end check of the client sync API (docs/SYNC-API.md section 12, step 9).
 //
-//   node scripts/sync-e2e.mjs https://<your-worker-host>
+//   node workers/server/scripts/sync-e2e.mjs https://<your-worker-host>
 //
 // Signs in as an app would (dynamic client registration, PKCE, resource
 // /api/v1), pulls the whole change feed, then holds the push socket open. Edit
@@ -173,7 +173,7 @@ const describe = (c) =>
   c.deleted ? `${c.kind} ${c.id.slice(0, 8)} deleted` : `${c.kind} ${c.id.slice(0, 8)} "${c.data.title ?? c.data.name}"${c.data.status ? ` [${c.data.status}]` : ""}`;
 
 async function main() {
-  if (!process.argv[2]) throw new Error("usage: node scripts/sync-e2e.mjs https://<worker-host>");
+  if (!process.argv[2]) throw new Error("usage: node workers/server/scripts/sync-e2e.mjs https://<worker-host>");
   const state = load();
   console.log("server:", (await (await fetch(`${origin}/api/v1/sync/info`)).json()).server_id);
   const info = await api(state, "/sync/info");

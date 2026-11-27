@@ -10,7 +10,7 @@ import { stateStore } from "../src/hosts/node/state-store";
 import { OPS, UPDATABLE } from "@potem/core/sync/mutations";
 import type { FeedChange } from "@potem/core/index/change-feed";
 
-const DOC = readFileSync(new URL("../docs/SYNC-API.md", import.meta.url).pathname, "utf8");
+const DOC = readFileSync(new URL("../../../docs/SYNC-API.md", import.meta.url).pathname, "utf8");
 
 // The body of the first ```json block after a heading.
 function jsonAfter(heading: string): unknown {

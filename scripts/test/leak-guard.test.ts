@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findLeaks, formatLeak, parsePatterns, pushRanges } from "../scripts/leak-guard.ts";
+import { findLeaks, formatLeak, parsePatterns, pushRanges } from "../leak-guard.ts";
 
 describe("parsePatterns", () => {
   it("keeps one lowercased term per line and skips blanks and comments", () => {

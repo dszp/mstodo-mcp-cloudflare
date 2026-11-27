@@ -1,5 +1,5 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
+  "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "potem-server",
 
   // The template every deployment is rendered from: `npm run deploy -- <name>` fills

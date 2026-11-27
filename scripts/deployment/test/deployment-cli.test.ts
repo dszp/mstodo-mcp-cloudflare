@@ -2,17 +2,17 @@ import { afterEach, beforeEach, describe, it, expect } from "vitest";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main, type CliDeps } from "../scripts/deployment/cli.ts";
-import { deploymentPaths } from "../scripts/deployment/schema.ts";
-import type { CloudflareApi } from "../scripts/deployment/live.ts";
-import type { RunResult } from "../scripts/deployment/runner.ts";
+import { main, type CliDeps } from "../cli.ts";
+import { deploymentPaths } from "../schema.ts";
+import type { CloudflareApi } from "../live.ts";
+import type { RunResult } from "../runner.ts";
 
 // Fake values only.
 const ACCOUNT = "0123456789abcdef0123456789abcdef";
 // Every wrangler child: the file's account, and the Worker name pinned so that a
 // WRANGLER_CI_OVERRIDE_NAME in a root .env cannot rename the target.
 const CHILD_ENV = { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, WRANGLER_CI_OVERRIDE_NAME: "example-alpha" };
-const realRoot = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const realRoot = new URL("../../../", import.meta.url).pathname.replace(/\/$/, "");
 
 const alphaFile = {
   account_id: ACCOUNT,
@@ -42,7 +42,8 @@ const writeDeployment = (name: string, body: unknown): void => {
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "deployment-cli-"));
-  copyFileSync(join(realRoot, "wrangler.example.jsonc"), join(root, "wrangler.example.jsonc"));
+  mkdirSync(join(root, "workers/server"), { recursive: true });
+  copyFileSync(join(realRoot, "workers/server/wrangler.example.jsonc"), join(root, "workers/server/wrangler.example.jsonc"));
   writeDeployment("alpha", alphaFile);
   writeDeployment("beta", betaFile);
 });

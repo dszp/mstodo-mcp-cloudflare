@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { deployedContent, diffRenders } from "../scripts/deployment/diff.ts";
-import type { WranglerConfig } from "../scripts/deployment/render.ts";
+import { deployedContent, diffRenders } from "../diff.ts";
+import type { WranglerConfig } from "../render.ts";
 
 const base = (): WranglerConfig => ({
-  $schema: "../../node_modules/wrangler/config-schema.json",
-  main: "../../src/hosts/cloudflare/worker.ts",
+  $schema: "../../../../node_modules/wrangler/config-schema.json",
+  main: "../../../../workers/server/src/hosts/cloudflare/worker.ts",
   name: "example-potem",
   account_id: "0123456789abcdef0123456789abcdef",
   compatibility_date: "2026-01-01",

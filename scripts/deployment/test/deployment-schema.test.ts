@@ -6,9 +6,9 @@ import {
   deploymentPaths,
   parseDeploymentFile,
   parseJsonc,
-} from "../scripts/deployment/schema.ts";
+} from "../schema.ts";
 
-const root = new URL("../", import.meta.url).pathname;
+const root = new URL("../../../", import.meta.url).pathname;
 
 describe("deployment files stay out of git", () => {
   const paths = [

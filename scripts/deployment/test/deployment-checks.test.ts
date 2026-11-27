@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DeploymentRefusal, type DeploymentFile } from "../scripts/deployment/schema.ts";
+import { DeploymentRefusal, type DeploymentFile } from "../schema.ts";
 import {
   checkAccountEnv,
   checkBaseUrl,
@@ -12,7 +12,7 @@ import {
   normalizeHost,
   WRANGLER_NO_ENV,
   wranglerEnv,
-} from "../scripts/deployment/checks.ts";
+} from "../checks.ts";
 
 const ACCOUNT = "0123456789abcdef0123456789abcdef";
 const OTHER_ACCOUNT = "fedcba9876543210fedcba9876543210";

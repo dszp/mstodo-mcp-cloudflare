@@ -2,7 +2,7 @@
 # .env (next to this file) holds the settings; see docs/NODE-HOSTING.md.
 services:
   mstodo-mcp:
-    build: { context: ../../.., dockerfile: src/hosts/node/Dockerfile }
+    build: { context: ../../../../.., dockerfile: workers/server/src/hosts/node/Dockerfile }
     env_file: .env          # required: SERVICE_BASE_URL, MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, OWNER_EMAIL; optional: OWNER_OBJECT_ID, TIMEZONE (default UTC), …
     volumes: [ "mstodo-data:/data" ]
     ports: [ "127.0.0.1:8787:8787" ]   # put a TLS reverse proxy in front for anything but localhost testing

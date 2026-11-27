@@ -1,6 +1,6 @@
 # Node host image. Build from the repository root:
-#   docker build -f src/hosts/node/Dockerfile -t mstodo-mcp .
-# The root .dockerignore is an allowlist (TypeScript under src/ plus the build
+#   docker build -f workers/server/src/hosts/node/Dockerfile -t mstodo-mcp .
+# The root .dockerignore is an allowlist (TypeScript under workers/server/src/ plus the build
 # inputs), so the context never holds .dev.vars, deployments/ or the Compose
 # .env beside this file. The COPYs below narrow further, to the source the Node
 # bundle is built from.
@@ -10,12 +10,12 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
-COPY scripts/build-node.mjs ./scripts/
+COPY workers/server/scripts/build-node.mjs ./workers/server/scripts/
 COPY packages/core ./packages/core
-COPY src/hosts/shared ./src/hosts/shared
-COPY src/hosts/node ./src/hosts/node
+COPY workers/server/src/hosts/shared ./workers/server/src/hosts/shared
+COPY workers/server/src/hosts/node ./workers/server/src/hosts/node
 # Guard for what .dockerignore can't express: refuse anything but TypeScript.
-RUN if find src packages -type f ! -name '*.ts' | grep .; then echo "non-source file in build context" >&2; exit 1; fi
+RUN if find workers/server/src packages -type f ! -name '*.ts' | grep .; then echo "non-source file in build context" >&2; exit 1; fi
 RUN npm run build:node
 
 FROM node:24-slim

@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect } from "vitest";
 import { existsSync, mkdtempSync, realpathSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DeploymentRefusal } from "../scripts/deployment/schema.ts";
+import { DeploymentRefusal } from "../schema.ts";
 import {
   SECRET_NAMES,
   acquireDevLock,
@@ -11,9 +11,9 @@ import {
   resolveSecret,
   sweepResolvedDevVars,
   writeResolvedDevVars,
-} from "../scripts/deployment/dev-vars.ts";
-import { deploymentPaths } from "../scripts/deployment/schema.ts";
-import { nodeRunner, type Runner } from "../scripts/deployment/runner.ts";
+} from "../dev-vars.ts";
+import { deploymentPaths } from "../schema.ts";
+import { nodeRunner, type Runner } from "../runner.ts";
 
 const dirs: string[] = [];
 const tmp = (): string => {

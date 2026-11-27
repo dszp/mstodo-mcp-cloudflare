@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect } from "vitest";
-import { readFileSync, writeFileSync, mkdtempSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -8,12 +8,12 @@ import {
   parseDeploymentFile,
   parseJsonc,
   type DeploymentFile,
-} from "../scripts/deployment/schema.ts";
-import { findPlaceholders, loadAndRender, removeRender, renderConfig, writeRender, type WranglerConfig } from "../scripts/deployment/render.ts";
+} from "../schema.ts";
+import { findPlaceholders, loadAndRender, removeRender, renderConfig, writeRender, type WranglerConfig } from "../render.ts";
 
-const repoRoot = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
-const exampleText = readFileSync(join(repoRoot, "wrangler.example.jsonc"), "utf8");
-const fixtureText = readFileSync(join(repoRoot, "test-node/fixtures/deployment-fixture.jsonc"), "utf8");
+const repoRoot = new URL("../../../", import.meta.url).pathname.replace(/\/$/, "");
+const exampleText = readFileSync(join(repoRoot, "workers/server/wrangler.example.jsonc"), "utf8");
+const fixtureText = readFileSync(join(repoRoot, "scripts/deployment/test/fixtures/deployment-fixture.jsonc"), "utf8");
 const example = () => parseJsonc(exampleText, "wrangler.example.jsonc") as WranglerConfig;
 const fixture = (over: Partial<DeploymentFile> = {}): DeploymentFile => ({
   ...parseDeploymentFile(fixtureText, "fixture.jsonc", "fixture"),
@@ -128,9 +128,14 @@ describe("renderConfig", () => {
     expect(r.field).toBe("vars.toString");
   });
 
+  it("resolves main relative to the server example's directory", () => {
+    const out = render();
+    expect(resolve(opts.renderDir, out.main as string)).toBe(join(repoRoot, "workers/server/src/hosts/cloudflare/worker.ts"));
+  });
+
   it("rewrites main and $schema so they resolve from the render directory", () => {
     const out = render();
-    expect(resolve(opts.renderDir, out.main as string)).toBe(join(repoRoot, "src/hosts/cloudflare/worker.ts"));
+    expect(resolve(opts.renderDir, out.main as string)).toBe(join(repoRoot, "workers/server/src/hosts/cloudflare/worker.ts"));
     expect(resolve(opts.renderDir, out.$schema as string)).toBe(
       join(repoRoot, "node_modules/wrangler/config-schema.json"),
     );
@@ -165,6 +170,10 @@ describe("loadAndRender", () => {
     scratch.push(root);
     return root;
   };
+  const putExample = (root: string, text: string) => {
+    mkdirSync(join(root, "workers/server"), { recursive: true });
+    writeFileSync(join(root, "workers/server/wrangler.example.jsonc"), text);
+  };
   afterEach(() => {
     for (const d of scratch.splice(0)) rmSync(d, { recursive: true, force: true });
   });
@@ -172,7 +181,7 @@ describe("loadAndRender", () => {
   it("returns the config without writing anything", () => {
     const root = scratchRoot();
     // A scratch repo root: only the example is needed.
-    writeFileSync(join(root, "wrangler.example.jsonc"), exampleText);
+    putExample(root, exampleText);
     const out = loadAndRender(root, fixture({ name: "scratch" }));
     expect(out.name).toBe(fixture().worker_name);
     expect(existsSync(deploymentPaths(root, "scratch").renderDir)).toBe(false);
@@ -180,7 +189,7 @@ describe("loadAndRender", () => {
 
   it("writeRender puts rendered.json under the repo's render directory; removeRender deletes it", () => {
     const root = scratchRoot();
-    writeFileSync(join(root, "wrangler.example.jsonc"), exampleText);
+    putExample(root, exampleText);
     const out = loadAndRender(root, fixture({ name: "scratch" }));
     writeRender(root, "scratch", out);
     const p = deploymentPaths(root, "scratch").rendered;
@@ -192,7 +201,7 @@ describe("loadAndRender", () => {
 
   it("refuses with the first placeholder path when one survives", () => {
     const root = scratchRoot();
-    writeFileSync(join(root, "wrangler.example.jsonc"), exampleText.replace(/"vars": \{/, '"vars": { "NOTE": "<your-thing>",'));
+    putExample(root, exampleText.replace(/"vars": \{/, '"vars": { "NOTE": "<your-thing>",'));
     const r = refusal(() => loadAndRender(root, fixture({ name: "scratch" })));
     expect(r.field).toBe("vars.NOTE");
     expect(existsSync(deploymentPaths(root, "scratch").rendered)).toBe(false);
