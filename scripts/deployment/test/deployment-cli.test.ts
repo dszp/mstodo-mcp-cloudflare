@@ -44,6 +44,8 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "deployment-cli-"));
   mkdirSync(join(root, "workers/server"), { recursive: true });
   copyFileSync(join(realRoot, "workers/server/wrangler.example.jsonc"), join(root, "workers/server/wrangler.example.jsonc"));
+  mkdirSync(join(root, "workers/web"), { recursive: true });
+  copyFileSync(join(realRoot, "workers/web/wrangler.example.jsonc"), join(root, "workers/web/wrangler.example.jsonc"));
   writeDeployment("alpha", alphaFile);
   writeDeployment("beta", betaFile);
 });
@@ -620,5 +622,43 @@ describe("main: unexpected errors", () => {
     });
     expect(await main(["check", "alpha"], h.deps)).toBe(2);
     expect(h.logs.at(-1)).toBe("error: TypeError: boom");
+  });
+});
+
+describe("main: a web deployment", () => {
+  const webFile = {
+    kind: "web",
+    account_id: ACCOUNT,
+    worker_name: "example-web",
+    base_url: "https://example-web.example.workers.dev",
+    workers_dev: true,
+    preview_urls: false,
+    server_service: "example-alpha",
+    vars: { SERVER_ORIGIN: "https://example-alpha.example.workers.dev" },
+  };
+  const webPaths = () => deploymentPaths(root, "web");
+  beforeEach(() => writeDeployment("web", webFile));
+
+  it("renders from the web example", async () => {
+    const h = harness();
+    expect(await main(["render", "web"], h.deps)).toBe(0);
+    const out = JSON.parse(h.logs.join("\n"));
+    expect(out.name).toBe("example-web");
+    expect(out.vars.WEB_ORIGIN).toBe(webFile.base_url);
+    expect(out.services).toEqual([{ binding: "SERVER", service: "example-alpha" }]);
+  });
+
+  it("pushes only WEB_SESSION_SECRET", async () => {
+    writeFileSync(webPaths().devVars, "WEB_SESSION_SECRET=0123456789abcdef0123456789abcdef0123\nMS_CLIENT_SECRET=not-for-web\n");
+    const h = harness({ apiImpl: liveApi({ getWorkerKv: async () => ({ found: true, kv: {} }) }) });
+    expect(await main(["secrets", "web"], h.deps)).toBe(0);
+    const puts = h.runs.filter((r) => r.cmd === "npx");
+    expect(puts.map((p) => p.args[3])).toEqual(["WEB_SESSION_SECRET"]);
+    expect(puts[0].opts?.stdin).toBe("0123456789abcdef0123456789abcdef0123");
+  });
+
+  it("does not refuse a live web Worker over KV bindings", async () => {
+    const h = harness({ apiImpl: liveApi({ getWorkerKv: async () => ({ found: true, kv: { OAUTH_KV: "other" } }) }) });
+    expect(await main(["check", "web"], h.deps)).toBe(0);
   });
 });

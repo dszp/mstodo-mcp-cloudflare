@@ -4,7 +4,7 @@
 // file only supplies what differs. Erasable TypeScript only: this runs on bare Node.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { DeploymentRefusal, deploymentPaths, parseJsonc, type DeploymentFile } from "./schema.ts";
+import { DeploymentRefusal, deploymentPaths, parseJsonc, type DeploymentFile, type DeploymentKind } from "./schema.ts";
 
 export type WranglerConfig = Record<string, unknown>;
 
@@ -15,6 +15,10 @@ const PLACEHOLDER = "<your-";
 
 // The server Worker's example config. Its `main` and `$schema` are relative to its own directory.
 export const SERVER_EXAMPLE = "workers/server/wrangler.example.jsonc";
+// The web client Worker's example, laid out the same way.
+export const WEB_EXAMPLE = "workers/web/wrangler.example.jsonc";
+
+export const exampleFor = (kind: DeploymentKind): string => (kind === "web" ? WEB_EXAMPLE : SERVER_EXAMPLE);
 
 export function renderConfig(example: WranglerConfig, dep: DeploymentFile, opts: Opts): WranglerConfig {
   const refuse = (field: string, reason: string): never => {
@@ -30,10 +34,16 @@ export function renderConfig(example: WranglerConfig, dep: DeploymentFile, opts:
 
   // wrangler resolves `main` relative to the config file, which now lives in renderDir.
   // The example's own paths are relative to the example's directory.
-  const exampleDir = dirname(join(opts.repoRoot, SERVER_EXAMPLE));
-  out.main = relative(opts.renderDir, join(exampleDir, String(example.main)));
+  const exampleDir = dirname(join(opts.repoRoot, exampleFor(dep.kind)));
+  const fromExample = (path: string): string => relative(opts.renderDir, join(exampleDir, path));
+  out.main = fromExample(String(example.main));
   if (typeof example.$schema === "string") {
-    out.$schema = relative(opts.renderDir, join(exampleDir, example.$schema));
+    out.$schema = fromExample(example.$schema);
+  }
+  // Static assets resolve against the config file as `main` does.
+  const assets = out.assets;
+  if (typeof assets === "object" && assets !== null && typeof (assets as Binding).directory === "string") {
+    (assets as Binding).directory = fromExample((assets as Binding).directory as string);
   }
 
   // The deployment file is the only source of routes; one the example carries
@@ -76,8 +86,15 @@ export function renderConfig(example: WranglerConfig, dep: DeploymentFile, opts:
     if (!Object.hasOwn(vars, key)) refuse(`vars.${key}`, "the example declares no var with this name");
     vars[key] = value;
   }
-  vars.SERVICE_BASE_URL = dep.base_url;
+  if (dep.kind === "web") vars.WEB_ORIGIN = dep.base_url;
+  else vars.SERVICE_BASE_URL = dep.base_url;
   out.vars = vars;
+
+  // The web Worker reaches the server through a service binding when the file names one.
+  if (dep.kind === "web") {
+    if (dep.server_service !== undefined) out.services = [{ binding: "SERVER", service: dep.server_service }];
+    else delete out.services;
+  }
 
   return out;
 }
@@ -101,7 +118,7 @@ export function findPlaceholders(config: WranglerConfig): string[] {
 // pointed at, so the CLI writes it (writeRender) only once every check passed.
 export function loadAndRender(repoRoot: string, dep: DeploymentFile): WranglerConfig {
   const paths = deploymentPaths(repoRoot, dep.name);
-  const examplePath = join(repoRoot, SERVER_EXAMPLE);
+  const examplePath = join(repoRoot, exampleFor(dep.kind));
   const example = parseJsonc(readFileSync(examplePath, "utf8"), examplePath) as WranglerConfig;
   const rendered = renderConfig(example, dep, { repoRoot, renderDir: paths.renderDir, file: paths.file });
   const placeholders = findPlaceholders(rendered);

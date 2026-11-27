@@ -240,6 +240,14 @@ budget (shared across all apps in the tenant) is spoken for. (`todoTask` has no 
 per-resource cap: one subscription per list, e.g. ~38 here; if any tenant limit is ever hit, Graph
 returns `403` and that list quietly falls back to timer-only.)
 
+A deployment is a server unless `deployment.jsonc` says `"kind": "web"`. A web deployment is the
+web client Worker in `workers/web`: it renders from `workers/web/wrangler.example.jsonc`, has no
+`kv` or `r2` (leave them out), and needs `vars.SERVER_ORIGIN`, the https origin of your server.
+`base_url` becomes `vars.WEB_ORIGIN`. `server_service` (optional) is the server Worker's name; when
+set, the web Worker reaches the server through a service binding instead of the public network.
+`npm run secrets -- <name>` pushes only `WEB_SESSION_SECRET` for a web deployment, at least 32
+bytes of random data, for example `openssl rand -base64 48`. Put it in the deployment's `.dev.vars`.
+
 The committed `workers/server/wrangler.example.jsonc` is the template for every deployment and what the test
 pool and CI read, so `npm test` works without any deployment. A new binding added there reaches
 every deployment on its next deploy, once the deployment file supplies its ID.

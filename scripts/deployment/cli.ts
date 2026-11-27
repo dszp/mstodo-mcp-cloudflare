@@ -21,7 +21,7 @@ import {
   wranglerEnv,
 } from "./checks.ts";
 import {
-  SECRET_NAMES,
+  secretNames,
   acquireDevLock,
   devLockHeld,
   readDevVar,
@@ -166,7 +166,7 @@ async function check(ctx: Ctx): Promise<number> {
     deps.log(`rendered: ${ctx.paths.rendered}`);
     return 0;
   }
-  deps.log(`live Worker ${dep.worker_name}: found, KV bindings match`);
+  deps.log(`live Worker ${dep.worker_name}: found${dep.kind === "server" ? ", KV bindings match" : ""}`);
   deps.log(`custom domains attached: ${list(await attachedDomains(api, dep))}`);
   const cs = await checkDomainChangeset(api, dep);
   deps.log(`custom domain changeset: added: ${list(cs.added)}; removed: ${list(cs.removed)}; conflicting: ${list(cs.conflicting)}`);
@@ -306,7 +306,7 @@ function readDevVarsFile(ctx: Ctx): string {
 async function resolveAll(ctx: Ctx): Promise<[string, string][]> {
   const text = readDevVarsFile(ctx);
   const out: [string, string][] = [];
-  for (const name of SECRET_NAMES) {
+  for (const name of secretNames(ctx.dep.kind)) {
     const raw = readDevVar(text, name);
     if (raw === undefined || raw === "") continue;
     out.push([name, await resolveSecret(raw, ctx.dep.op_account, ctx.deps.run)]);
@@ -316,8 +316,9 @@ async function resolveAll(ctx: Ctx): Promise<[string, string][]> {
 
 async function secrets(ctx: Ctx): Promise<number> {
   const { dep, deps } = ctx;
-  // MS_CLIENT_SECRET also derives the key that seals the KV tokens, so a secret
-  // pushed to the wrong Worker is the most damaging wrong-target write.
+  // On the server, MS_CLIENT_SECRET also derives the key that seals the KV tokens,
+  // so a secret pushed to the wrong Worker is the most damaging wrong-target write.
+  // On the web Worker, WEB_SESSION_SECRET seals the session cookies.
   const api = await deps.api(dep);
   const { found } = await inspectLiveWorker(api, dep, { adopt: false });
   // On a missing Worker, `wrangler secret put` creates an empty draft one (its
@@ -329,7 +330,7 @@ async function secrets(ctx: Ctx): Promise<number> {
 
   const entries = await resolveAll(ctx);
   const present = new Set(entries.map(([n]) => n));
-  for (const name of SECRET_NAMES) if (!present.has(name)) deps.log(`${name}: skipped (empty)`);
+  for (const name of secretNames(dep.kind)) if (!present.has(name)) deps.log(`${name}: skipped (empty)`);
 
   publishRender(ctx);
   let failed = 0;

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { DeploymentRefusal } from "../schema.ts";
 import {
   SECRET_NAMES,
+  secretNames,
   acquireDevLock,
   readDevVar,
   removeResolvedDevVars,
@@ -34,6 +35,15 @@ describe("SECRET_NAMES", () => {
       "OWNER_EMAIL",
       "OWNER_OBJECT_ID",
     ]);
+  });
+});
+
+describe("secretNames", () => {
+  it("is the server's five secrets for a server", () => {
+    expect([...secretNames("server")]).toEqual([...SECRET_NAMES]);
+  });
+  it("is only WEB_SESSION_SECRET for a web deployment", () => {
+    expect([...secretNames("web")]).toEqual(["WEB_SESSION_SECRET"]);
   });
 });
 

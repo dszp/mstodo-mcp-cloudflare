@@ -19,6 +19,7 @@ const TOKEN = "tok-SECRET-0123456789";
 
 const dep = (over: Partial<DeploymentFile> = {}): DeploymentFile => ({
   name: "alpha",
+  kind: "server",
   account_id: ACCOUNT,
   worker_name: "example-alpha",
   base_url: "https://example-alpha.acct.workers.dev",
@@ -79,6 +80,13 @@ describe("checkLiveWorker", () => {
       expect(r.field).toBe("kv.OAUTH_KV");
       await expect(checkLiveWorker(api, dep(), { adopt: true })).resolves.toBeUndefined();
     }
+  });
+
+  it("skips the KV comparison for a web deployment", async () => {
+    // A hand-built web dep that still lists KV (the parser would refuse it): the
+    // live Worker binds those names elsewhere, and nothing is compared.
+    const api = stubApi({ getWorkerKv: async () => ({ found: true, kv: { OAUTH_KV: KV_OTHER, TODO_CACHE: KV_OTHER } }) });
+    await expect(checkLiveWorker(api, dep({ kind: "web" }), { adopt: false })).resolves.toBeUndefined();
   });
 
   it("does not refuse a binding the live Worker does not have yet", async () => {

@@ -3,7 +3,7 @@
 // Erasable TypeScript only: this runs on bare Node.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { DeploymentRefusal, deploymentPaths, parseDeploymentFile, type DeploymentFile } from "./schema.ts";
+import { DeploymentRefusal, deploymentPaths, isHttpsOrigin, parseDeploymentFile, type DeploymentFile } from "./schema.ts";
 
 export type LoadedDeployment = { file: string; dep: DeploymentFile };
 
@@ -34,15 +34,10 @@ export function checkBaseUrl(dep: DeploymentFile, file: string): void {
     return host;
   });
 
-  let url: URL | undefined;
-  try {
-    url = new URL(dep.base_url);
-  } catch {
-    // refused below
-  }
-  if (url === undefined || url.protocol !== "https:" || url.port !== "" || url.origin !== dep.base_url) {
+  if (!isHttpsOrigin(dep.base_url)) {
     return refuse("base_url", "must be an https origin: no path, query, trailing slash or port");
   }
+  const url = new URL(dep.base_url);
 
   const host = url.hostname;
   if (domains.includes(host)) return;

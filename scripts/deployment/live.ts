@@ -199,7 +199,8 @@ export async function inspectLiveWorker(
   // A binding the live Worker lacks is a new binding (a template addition), so it
   // is not a mismatch by itself; but at least one file binding must match live
   // exactly, otherwise this is a different Worker that happens to share the name.
-  if (live.found && !opts.adopt) {
+  // Only the server Worker has KV bindings; a web Worker has none to compare.
+  if (live.found && !opts.adopt && dep.kind === "server") {
     const entries = Object.entries(dep.kv);
     for (const [binding, id] of entries) {
       const liveId = live.kv[binding];
