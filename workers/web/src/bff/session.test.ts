@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { clearCookie, cookieHeader, readCookie } from "./cookies.ts";
-import { type Device, type Session, deviceFor, sessionState } from "./session.ts";
+import { type Device, type Session, deviceFor, isDevice, isSession, sessionState } from "./session.ts";
 
 const limits = { maxHours: 12, idleMinutes: 60 };
 const NOW = 1_000_000;
@@ -103,5 +103,40 @@ describe("deviceFor", () => {
     expect(deviceFor(d, "https://a.example.com")).toBe(d);
     expect(deviceFor(d, "https://b.example.com")).toBeNull();
     expect(deviceFor(null, "https://a.example.com")).toBeNull();
+  });
+});
+
+describe("malformed session records", () => {
+  const bad = (patch: Record<string, unknown>) => ({ ...base, ...patch }) as unknown as Session;
+  const without = (k: keyof Session) => {
+    const { [k]: _omit, ...rest } = base;
+    return rest as unknown as Session;
+  };
+
+  it("counts as expired, never valid", () => {
+    expect(sessionState(without("created_at"), NOW, limits)).toBe("expired");
+    expect(sessionState(without("last_seen"), NOW, limits)).toBe("expired");
+    expect(sessionState(without("access_exp"), NOW, limits)).toBe("expired");
+    expect(sessionState(bad({ last_seen: "x" }), NOW, limits)).toBe("expired");
+    expect(sessionState(bad({ cf_access_exp: "x" }), NOW, limits)).toBe("expired");
+    expect(sessionState(bad({ access_exp: NaN }), NOW, limits)).toBe("expired");
+    expect(sessionState(bad({ refresh_token: "" }), NOW, limits)).toBe("expired");
+    expect(sessionState(bad({ data_key: 5 }), NOW, limits)).toBe("expired");
+    expect(sessionState(null as unknown as Session, NOW, limits)).toBe("expired");
+  });
+
+  it("isSession accepts a good record, with or without cf fields", () => {
+    expect(isSession(base)).toBe(true);
+    expect(isSession({ ...base, cf_access_token: "t", cf_access_exp: NOW })).toBe(true);
+    expect(isSession({ ...base, cf_access_token: 3 })).toBe(false);
+    expect(isSession("nope")).toBe(false);
+  });
+
+  it("isDevice rejects missing or empty fields", () => {
+    const d = { client_id: "c", client_secret: "s", server_origin: "https://a.example.com" };
+    expect(isDevice(d)).toBe(true);
+    expect(isDevice({ client_id: "c", server_origin: "o" })).toBe(false);
+    expect(isDevice({ ...d, client_id: "" })).toBe(false);
+    expect(isDevice(null)).toBe(false);
   });
 });
