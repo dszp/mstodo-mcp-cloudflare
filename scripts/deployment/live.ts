@@ -23,8 +23,8 @@ export interface CloudflareApi {
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 
-// Carries the HTTP status (when there was one) and nothing from the response:
-// callers print `status` or the class name, never a body or a message.
+// Carries the HTTP status (when there was one) and nothing from the response: its
+// message is one of the fixed strings below, so refusals may print it.
 class CloudflareApiError extends Error {
   readonly status: number | undefined;
   constructor(message: string, status?: number) {
@@ -152,20 +152,26 @@ export function createCloudflareApi(token: string, fetchImpl: typeof fetch = fet
   };
 }
 
-// What a refusal may say about a failure: the HTTP status, else the error class.
-function failureReason(e: unknown): string {
-  if (e instanceof Error) {
+type ApiCall = "settings" | "domains" | "changeset" | "subdomain";
+
+// What a refusal may say about a failure: which call, then the client's own
+// message (fixed strings, built from the status at most), else an HTTP status,
+// else the error class. Never another error's message: it can echo a body or a header.
+function failureReason(call: ApiCall, e: unknown): string {
+  let reason = "unknown error";
+  if (e instanceof CloudflareApiError) reason = e.message;
+  else if (e instanceof Error) {
     const status = (e as { status?: unknown }).status;
-    return typeof status === "number" ? String(status) : e.name;
+    reason = typeof status === "number" ? `HTTP ${status}` : e.name;
   }
-  return "unknown error";
+  return `${call} call: ${reason}`;
 }
 
-const couldNotVerify = (dep: DeploymentFile, e: unknown): DeploymentRefusal =>
+const couldNotVerify = (dep: DeploymentFile, call: ApiCall, e: unknown): DeploymentRefusal =>
   new DeploymentRefusal(
     ownFile(dep),
     "(live Worker)",
-    `could not verify the live Worker ${dep.worker_name}: ${failureReason(e)}`,
+    `could not verify the live Worker ${dep.worker_name}: ${failureReason(call, e)}`,
   );
 
 // Refusal file is the deployment's own path (`deployments/<name>/deployment.jsonc`,
@@ -188,7 +194,7 @@ export async function inspectLiveWorker(
   try {
     live = await api.getWorkerKv(dep.account_id, dep.worker_name);
   } catch (e) {
-    throw couldNotVerify(dep, e);
+    throw couldNotVerify(dep, "settings", e);
   }
   // A binding the live Worker lacks is a new binding (a template addition), so it
   // is not a mismatch by itself; but at least one file binding must match live
@@ -220,7 +226,7 @@ export async function inspectLiveWorker(
   try {
     domains = await api.listCustomDomains(dep.account_id);
   } catch (e) {
-    throw couldNotVerify(dep, e);
+    throw couldNotVerify(dep, "domains", e);
   }
   dep.custom_domains.forEach((d, i) => {
     const holder = domains.find((x) => normalizeHost(x.hostname) === normalizeHost(d));
@@ -237,7 +243,7 @@ export async function attachedDomains(api: CloudflareApi, dep: DeploymentFile): 
     const all = await api.listCustomDomains(dep.account_id);
     return all.filter((d) => d.service === dep.worker_name).map((d) => d.hostname);
   } catch (e) {
-    throw couldNotVerify(dep, e);
+    throw couldNotVerify(dep, "domains", e);
   }
 }
 
@@ -246,7 +252,7 @@ export async function liveSubdomain(api: CloudflareApi, dep: DeploymentFile) {
   try {
     return await api.getSubdomain(dep.account_id, dep.worker_name);
   } catch (e) {
-    throw couldNotVerify(dep, e);
+    throw couldNotVerify(dep, "subdomain", e);
   }
 }
 
@@ -256,7 +262,7 @@ export async function checkDomainChangeset(api: CloudflareApi, dep: DeploymentFi
   try {
     return await api.domainChangeset(dep.account_id, dep.worker_name, dep.custom_domains);
   } catch (e) {
-    throw couldNotVerify(dep, e);
+    throw couldNotVerify(dep, "changeset", e);
   }
 }
 

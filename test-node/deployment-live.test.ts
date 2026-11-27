@@ -2,9 +2,11 @@ import { describe, it, expect } from "vitest";
 import { DeploymentRefusal, type DeploymentFile } from "../scripts/deployment/schema.ts";
 import type { Runner } from "../scripts/deployment/runner.ts";
 import {
+  attachedDomains,
   checkDomainChangeset,
   checkLiveWorker,
   createCloudflareApi,
+  liveSubdomain,
   wranglerToken,
   type CloudflareApi,
 } from "../scripts/deployment/live.ts";
@@ -111,7 +113,7 @@ describe("checkLiveWorker", () => {
       listCustomDomains: async () => Promise.reject(Object.assign(new Error(`echo ${TOKEN}`), { status: 500 })),
     });
     const r = await refusalOf(checkLiveWorker(api, dep({ custom_domains: ["a.example.com"] }), { adopt: false }));
-    expect(r.message).toContain("could not verify the live Worker example-alpha: 500");
+    expect(r.message).toContain("could not verify the live Worker example-alpha: domains call: HTTP 500");
     expect(r.message).not.toContain(TOKEN);
   });
 
@@ -314,5 +316,39 @@ describe("wranglerToken", () => {
       const r = await refusalOf(wranglerToken(runner(0, out).run, dep(), "/repo"));
       expect(r.message).not.toContain(TOKEN);
     }
+  });
+});
+
+describe("could-not-verify refusals", () => {
+  // Real CloudflareApiErrors from the client, behind each wrapper.
+  const failing = (status: number) =>
+    createCloudflareApi(TOKEN, fetchStub(() => jsonResponse(status, { success: false, errors: [{ message: TOKEN }] })).f);
+
+  it("name the call that failed and the client's fixed message, never the body or token", async () => {
+    const d = dep({ custom_domains: ["a.example.com"] });
+    const cases: [string, Promise<unknown>][] = [
+      ["settings call: HTTP 500", checkLiveWorker(failing(500), d, { adopt: false })],
+      ["domains call: HTTP 403", attachedDomains(failing(403), d)],
+      ["changeset call: HTTP 502", checkDomainChangeset(failing(502), d)],
+      ["subdomain call: HTTP 401", liveSubdomain(failing(401), d)],
+    ];
+    for (const [want, p] of cases) {
+      const r = await refusalOf(p);
+      expect(r.message, want).toContain(`could not verify the live Worker example-alpha: ${want}`);
+      expect(r.message, want).not.toContain(TOKEN);
+    }
+  });
+
+  it("carry a malformed-response message", async () => {
+    const api = createCloudflareApi(TOKEN, fetchStub(() => jsonResponse(200, ok({ enabled: "yes" }))).f);
+    const r = await refusalOf(liveSubdomain(api, dep()));
+    expect(r.message).toContain("subdomain call: unexpected subdomain response");
+  });
+
+  it("give only the class of an error that is not the client's", async () => {
+    const api = stubApi({ getSubdomain: async () => Promise.reject(new TypeError(`boom ${TOKEN}`)) });
+    const r = await refusalOf(liveSubdomain(api, dep()));
+    expect(r.message).toContain("subdomain call: TypeError");
+    expect(r.message).not.toContain(TOKEN);
   });
 });
