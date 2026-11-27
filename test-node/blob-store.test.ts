@@ -124,6 +124,20 @@ describe("theme images", () => {
     expect((await upload(t.env, JPEG, "image/jpeg", "width=5&height=5&brightness=1.5")).status).toBe(400);
   });
 
+  it("takes brightness as any decimal from 0 to 1, as Swift formats a Double", async () => {
+    const t = setup();
+    const res = await upload(t.env, JPEG, "image/jpeg", "width=5&height=5&brightness=0.4235294117647059");
+    expect([res.status, ((await res.json()) as { brightness: number }).brightness]).toEqual([201, 0.4235294117647059]);
+    for (const ok of ["0", "1", "1.0", "0.0", "1e-05", ".5"]) {
+      const r = await upload(t.env, PNG, "image/png", `width=5&height=5&brightness=${ok}`);
+      expect([ok, r.ok]).toEqual([ok, true]);
+    }
+    for (const no of ["", "-0.1", "1.0000001", "2e-1x", "NaN", "Infinity", "0x1", " 0.5"]) {
+      const r = await upload(t.env, PNG, "image/png", `width=5&height=5&brightness=${encodeURIComponent(no)}`);
+      expect([no, r.status]).toEqual([no, 400]);
+    }
+  });
+
   it("accepts HEIC by its ftyp brand", async () => {
     const t = setup();
     const heic = new Uint8Array([0, 0, 0, 24, ...new TextEncoder().encode("ftypheic"), 0, 0, 0, 0]);

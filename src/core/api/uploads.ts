@@ -219,8 +219,10 @@ export async function uploadThemeImage(req: Request, env: AppEnv): Promise<Respo
   const rawBrightness = q.get("brightness");
   let brightness: number | null = null;
   if (rawBrightness !== null) {
-    brightness = /^(0(\.\d{1,6})?|1(\.0{1,6})?)$/.test(rawBrightness) ? Number(rawBrightness) : NaN;
-    if (Number.isNaN(brightness)) return json({ error: "bad_brightness" }, 400);
+    // Any plain decimal, in exponent form too: Swift writes a Double with
+    // all its digits (0.4235294117647059), and a small one as 1e-05.
+    brightness = /^(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(rawBrightness) ? Number(rawBrightness) : NaN;
+    if (!(brightness >= 0 && brightness <= 1)) return json({ error: "bad_brightness" }, 400);
   }
   const type = (req.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
   if (!THEME_IMAGE_TYPES.has(type)) return json({ error: "unsupported_type" }, 415);

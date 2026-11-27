@@ -647,7 +647,8 @@ Content-Type: image/jpeg | image/png | image/heic
 - The body is the image itself, at most 15 MiB. The server checks that the bytes are
   the type the `Content-Type` names and refuses anything else.
 - The server doesn't decode the image. `width` and `height` (whole pixels, 1 to 20,000)
-  and the optional `brightness` (0 for black to 1 for white, the app's measure) are
+  and the optional `brightness` (a decimal number from 0 for black to 1 for white, the
+  app's measure, with any number of digits) are
   stored as the app sends them and returned to every device.
 - The `id` is derived from the bytes (the first 32 hex digits of their SHA-256), so it
   never changes and the same image uploaded twice gets the same `id`. Uploading again
