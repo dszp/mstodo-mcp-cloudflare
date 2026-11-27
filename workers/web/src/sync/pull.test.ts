@@ -79,4 +79,27 @@ describe("pullAll", () => {
     await expect(pullAll(fetchPage, store, null)).rejects.toThrow(/cursor_expired/);
     expect(clear).not.toHaveBeenCalled();
   });
+
+  it("a 410 after a restart and an applied page throws, clearing only once", async () => {
+    const store = new MirrorStore();
+    const clear = vi.spyOn(store, "clear");
+    const { fetchPage } = scripted(gone(), okPage(page("n1", true)), gone("cursor_reset"));
+    await expect(pullAll(fetchPage, store, "c1")).rejects.toThrow(/cursor_reset/);
+    expect(clear).toHaveBeenCalledTimes(1);
+  });
+
+  it("restart resets the counts to what the store now holds", async () => {
+    const seen: { pages: number; changes: number }[] = [];
+    const { fetchPage } = scripted(
+      okPage(page("c2", true, [listChange("a")])),
+      gone(),
+      okPage(page("n1", false, [listChange("b"), listChange("c")])),
+    );
+    const res = await pullAll(fetchPage, new MirrorStore(), "c1", (n) => seen.push(n));
+    expect(res).toEqual({ cursor: "n1", pages: 1, changes: 2 });
+    expect(seen).toEqual([
+      { pages: 1, changes: 1 },
+      { pages: 1, changes: 2 },
+    ]);
+  });
 });

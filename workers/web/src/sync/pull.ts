@@ -8,6 +8,8 @@ export type FetchPage = (
   { ok: true; page: FeedPage } | { ok: false; status: 410; error: "cursor_reset" | "cursor_expired" }
 >;
 
+// pages and changes count what the store holds now: a 410 restart clears the
+// store, so the counts start over from zero.
 export interface PullResult {
   cursor: string;
   pages: number;
@@ -17,8 +19,8 @@ export interface PullResult {
 // Pages through the change feed into the store, one applyPage per page.
 // A 410 means the cursor is unusable. A full sync (no cursor) carries no
 // deletion records, so the restart clears the store first or deleted rows
-// would linger. A 410 when already pulling from null has nowhere left to
-// fall back to, so it throws.
+// would linger. A pull restarts at most once: a 410 after a restart, or when
+// already pulling from null, has nowhere left to fall back to, so it throws.
 export async function pullAll(
   fetchPage: FetchPage,
   store: MirrorStore,
@@ -28,12 +30,16 @@ export async function pullAll(
   let cursor = from;
   let pages = 0;
   let changes = 0;
+  let restarted = false;
   for (;;) {
     const res = await fetchPage(cursor);
     if (!res.ok) {
-      if (cursor === null) throw new Error(`change feed refused a full sync: ${res.error}`);
+      if (restarted || cursor === null) throw new Error(`change feed refused a full sync: ${res.error}`);
       store.clear();
       cursor = null;
+      restarted = true;
+      pages = 0;
+      changes = 0;
       continue;
     }
     store.applyPage(res.page.changes);
