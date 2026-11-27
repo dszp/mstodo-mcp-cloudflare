@@ -13,14 +13,20 @@ RESUME.md
 .env
 .env.*
 
-# Real wrangler config holds account_id + KV namespace IDs (account-specific).
-# Copy wrangler.example.jsonc -> wrangler.jsonc and fill it in. Tests read the
-# example; deploys read the real (gitignored) file.
+# Deploys render their config from wrangler.example.jsonc plus deployments/<name>/
+# (npm run deploy -- <name>). A root wrangler config from before that holds an
+# account ID and KV namespace IDs, so any left in a checkout stays out of git.
 wrangler.jsonc
+wrangler.json
+wrangler.toml
 
 # Local snapshots of live KV config (real Autotask URL, real list IDs). The
 # sanitized templates in config-examples/ ARE committed; these real dumps aren't.
 config-live/
+
+# Named deployments: per-deployment files hold account IDs, KV IDs, hostnames
+# and secrets. deployment.example.jsonc at the root is committed.
+deployments/
 
 # Wrangler-generated artifacts and dependencies
 node_modules/

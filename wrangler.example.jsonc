@@ -1,17 +1,19 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "mstodo-mcp",
+  "name": "potem-server",
 
-  // Copy this file to `wrangler.jsonc` and fill in the account-specific values
-  // below. The real `wrangler.jsonc` is gitignored (it holds your account_id and
-  // KV namespace IDs). The test pool (vitest.config.ts) reads THIS example so
+  // The template every deployment is rendered from: `npm run deploy -- <name>` fills
+  // the account-specific values below from deployments/<name>/deployment.jsonc
+  // (gitignored) into .wrangler/deployments/<name>/rendered.json. Leave them as
+  // placeholders here. The test pool (vitest.config.ts) reads THIS example so
   // `npm test` works on a fresh clone without secrets.
   "account_id": "<your-cloudflare-account-id>",
   "main": "src/hosts/cloudflare/worker.ts",
   "compatibility_date": "2026-05-01",
   "compatibility_flags": ["nodejs_compat"],
 
-  // Create your own namespaces and paste their IDs here (v4 syntax — no colon):
+  // Create your own namespaces and put their IDs under "kv" in
+  // deployments/<name>/deployment.jsonc, not here (v4 syntax — no colon):
   //   wrangler kv namespace create OAUTH_KV
   //   wrangler kv namespace create TODO_CACHE
   // The BINDING names must stay OAUTH_KV (workers-oauth-provider expects it) and
@@ -24,7 +26,8 @@
   // Optional blob store (docs/SYNC-API.md section 4.9): keeps a copy of each
   // attachment the app downloads or uploads, and holds the app's theme images.
   // Without it, downloads stream from Graph and theme images are unavailable.
-  //   wrangler r2 bucket create mstodo-blobs   (any name; use it below)
+  //   wrangler r2 bucket create <bucket-name>   (any name; put it under "r2" in
+  //   deployments/<name>/deployment.jsonc, or null there to leave this binding out)
   // The binding name must stay BLOBS.
   "r2_buckets": [
     { "binding": "BLOBS", "bucket_name": "mstodo-blobs" }
@@ -112,7 +115,17 @@
     // each, newest-changed first, draining the NULL-marker backlog over cycles.
     //   FREE PLAN: leave at "8" (stays under the 50-subrequest ceiling alongside
     //   delta + the other scans). PAID PLAN: raise it for faster backfill.
-    "CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE": "8"
+    "CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE": "8",
+    // Cloudflare Access team domain, `<team>.cloudflareaccess.com`. Access checks are off when empty; set with ACCESS_AUD.
+    "ACCESS_TEAM_DOMAIN": "",
+    // Audience (AUD) tag of the Access application. Off when empty.
+    "ACCESS_AUD": "",
+    // Comma-separated sign-in callback URIs that may receive the Access token. Empty refuses every /app/signin request.
+    "ACCESS_HANDOFF_REDIRECT_URIS": "",
+    // Apple team ID for /.well-known/apple-app-site-association. Off when empty.
+    "APPLE_TEAM_ID": "",
+    // Comma-separated app bundle IDs for the same file. Off when empty.
+    "APPLE_BUNDLE_IDS": ""
   },
 
   "observability": { "enabled": true }

@@ -1,7 +1,7 @@
 # Node host image. Build from the repository root:
 #   docker build -f src/hosts/node/Dockerfile -t mstodo-mcp .
 # The root .dockerignore is an allowlist (TypeScript under src/ plus the build
-# inputs), so the context never holds .dev.vars, wrangler.jsonc or the Compose
+# inputs), so the context never holds .dev.vars, deployments/ or the Compose
 # .env beside this file. The COPYs below narrow further, to the source the Node
 # bundle is built from.
 
