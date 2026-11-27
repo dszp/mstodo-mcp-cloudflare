@@ -55,6 +55,8 @@ import { patternProblem } from "../config/regex-safety";
 import { resolveListScope, resolveStatusFilter } from "../config/query-scope";
 import type { SubstrateTask } from "../graph/substrate-client";
 import { listAttachments } from "../graph/todo-resources";
+import { base64FromBytes, bytesFromBase64 } from "../upload/graph-upload";
+import { readAttachment } from "../attachment-cache";
 import { checklistCacheEnabled } from "../checklist/gate";
 import { getGraphInnerErrorCode, opsContext, type OpsContext } from "../ops/context";
 import { err, ok, type ToolErr, type ToolResult } from "../ops/result";
@@ -1576,7 +1578,7 @@ class ToDoTools implements TokenProvider {
       "get_attachment",
       {
         description:
-          "Return a single task attachment including base64-encoded contentBytes (for taskFileAttachment). Use list_attachments to enumerate ids.",
+          "Return a single task attachment including base64-encoded contentBytes (for taskFileAttachment). Served from the server's stored copy when it has one; otherwise read from Microsoft and stored. Use list_attachments to enumerate ids.",
         inputSchema: {
           list: z.string().min(1).optional().describe("List alias (from get_list_config), display name, or Graph list ID."),
           task_id: z.string().min(1).describe("Microsoft Graph task id."),
@@ -1597,7 +1599,30 @@ class ToDoTools implements TokenProvider {
           }
           const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}/attachments/${encodeURIComponent(attachment_id)}`;
           try {
-            const attachment = await graph.getJson(url, AttachmentSchema);
+            // The blob store's copy when there is one (built into Graph's
+            // shape from the mirror's metadata), else Graph's answer, whose
+            // bytes are kept for next time.
+            const index = this.#index();
+            let fromGraph: z.infer<typeof AttachmentSchema> | undefined;
+            const read = await readAttachment(this.ctx.env, index, { list_id, task_id, attachment_id }, async () => {
+              fromGraph = await graph.getJson(url, AttachmentSchema);
+              const b64 = (fromGraph as { contentBytes?: unknown }).contentBytes;
+              return typeof b64 === "string" && b64.length > 0 ? bytesFromBase64(b64) : null;
+            });
+            let attachment: z.infer<typeof AttachmentSchema>;
+            if (fromGraph) {
+              attachment = fromGraph;
+            } else {
+              const ref = await index.attachmentBlobRef(attachment_id);
+              attachment = {
+                "@odata.type": "#microsoft.graph.taskFileAttachment",
+                id: attachment_id,
+                name: ref?.name ?? undefined,
+                contentType: ref?.content_type ?? null,
+                size: read!.bytes.byteLength,
+                contentBytes: base64FromBytes(read!.bytes),
+              } as z.infer<typeof AttachmentSchema>;
+            }
             // For an image, return a native MCP `image` content block so the
             // client renders it inline — no base64-decode round-trip. The bytes
             // are carried in the image block, so strip contentBytes from the JSON
@@ -2902,7 +2927,7 @@ class ToDoTools implements TokenProvider {
       "sync_status",
       {
         description:
-          "Read-only health probe for the TodoIndex delta sync. Returns one report per resource (the 'lists' roster + one 'tasks:{listId}' per list) with status, last_synced_at, mid_cycle (resume cursor outstanding), last_error, and row_count — plus totals { tasks, lists, all_idle }. all_idle=true means every resource is fully caught up. Also returns `notifications` (webhook-delivery health): last_notification_at (epoch ms of the last accepted Graph change notification), notifications_total (cumulative accepted), and minutes_since. A null/very-old last_notification_at while subscription coverage is full means Graph has silently stopped delivering todoTask notifications and sync is riding the delta poll only — pair this with subscription_status (coverage) to tell 'no subscriptions' from 'subscriptions present but not delivering'.",
+          "Read-only health probe for the TodoIndex delta sync. Returns one report per resource (the 'lists' roster + one 'tasks:{listId}' per list) with status, last_synced_at, mid_cycle (resume cursor outstanding), last_error, and row_count — plus totals { tasks, lists, all_idle }. all_idle=true means every resource is fully caught up. Also returns `notifications` (webhook-delivery health): last_notification_at (epoch ms of the last accepted Graph change notification), notifications_total (cumulative accepted), and minutes_since. Also returns `attachments`: { files, bytes, tasks_unscanned } — file attachments in the index and their total size as Microsoft reports it; complete only when tasks_unscanned is 0. A null/very-old last_notification_at while subscription coverage is full means Graph has silently stopped delivering todoTask notifications and sync is riding the delta poll only — pair this with subscription_status (coverage) to tell 'no subscriptions' from 'subscriptions present but not delivering'.",
         inputSchema: {},
       },
       async (): Promise<McpResponse> =>

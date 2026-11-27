@@ -1,4 +1,5 @@
 import { log } from "../log";
+import { keepAttachment } from "../attachment-cache";
 import { loadTokens } from "../auth/microsoft";
 import { loadAttachmentConfig } from "../config/loader";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
@@ -355,7 +356,12 @@ export async function handleUpload(req: Request, env: AppEnv): Promise<Response 
         maxInlineBytes,
       });
       attachedCount++;
-      if (r.attachment_id) batchHashes.set(hash, r.attachment_id);
+      if (r.attachment_id) {
+        batchHashes.set(hash, r.attachment_id);
+        await keepAttachment(env, stub, {
+          list_id: scope.list_id, task_id: scope.task_id, attachment_id: r.attachment_id, name: r.name ?? name, content_type: ct,
+        }, bytes);
+      }
       outcomes.push({
         ok: true,
         status: "attached",

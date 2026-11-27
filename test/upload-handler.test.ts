@@ -6,6 +6,8 @@ const env = testAppEnv();
 import { handleUpload } from "../src/core/upload/handler";
 import { createUploadCapability } from "../src/core/upload/tokens";
 import { testAppEnv } from "./_app-env";
+import { ownerIndex } from "../src/core/owner-index";
+import { attachmentBlobKey } from "../src/core/blobs";
 
 const TOKENS_KEY = "tokens:owner";
 const SCOPE = { list_id: "L1", task_id: "T1" } as const;
@@ -137,6 +139,26 @@ describe("handleUpload attach flow", () => {
     expect(body.files).toHaveLength(1);
     expect(body.files[0].status).toBe("attached");
     expect(body.files[0].attachment_id).toBe("NEW1");
+  });
+
+  it("records the new attachment in the mirror and keeps a copy of its bytes in the blob store", async () => {
+    installFetch((c) => {
+      if (c.url.endsWith("/attachments") && c.method === "GET") return Response.json({ value: [] }, { status: 200 });
+      if (c.url.endsWith("/attachments") && c.method === "POST") {
+        return Response.json(
+          { "@odata.type": "#microsoft.graph.taskFileAttachment", id: "KEEP1", name: "k.txt", size: 2 },
+          { status: 201 },
+        );
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+    const { token } = await createUploadCapability(env, SCOPE);
+    const res = await handleUpload(multipartPost("https://x/upload", new File(["hi"], "k.txt", { type: "text/plain" }), token), env);
+    expect(res!.status).toBe(200);
+    const ref = await ownerIndex(env).attachmentBlobRef("KEEP1");
+    expect(ref).toMatchObject({ name: "k.txt", size: 2 });
+    const stored = await env.BLOBS!.get(attachmentBlobKey(ref!.sid));
+    expect(stored && (await new Response(stored.body).text())).toBe("hi");
   });
 
   it("skips a content-duplicate even when Graph's size differs from the raw length", async () => {

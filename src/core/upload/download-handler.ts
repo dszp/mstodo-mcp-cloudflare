@@ -2,6 +2,7 @@ import { log } from "../log";
 import { loadTokens } from "../auth/microsoft";
 import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
 import { getAttachmentBytes } from "./graph-upload";
+import { readAttachment } from "../attachment-cache";
 import { contentDisposition, json, reasonForGraphError, statusForReason } from "./handler";
 import { ownerIndex } from "../owner-index";
 import {
@@ -17,8 +18,8 @@ import type { AppEnv } from "../ports";
 //
 // A GET with a valid single-use capability token (?t=) serves exactly one
 // attachment's bytes and burns the token. The metadata (filename, content type)
-// was baked into the capability at mint time, so /download makes a single Graph
-// call (the bytes) and trusts no request headers. There is no bearer mode: a link
+// was baked into the capability at mint time, so /download makes at most one Graph
+// call (the bytes, when the blob store has no copy) and trusts no request headers. There is no bearer mode: a link
 // is always scoped to one attachment on one task.
 
 export async function handleDownload(req: Request, env: AppEnv): Promise<Response | null> {
@@ -70,7 +71,11 @@ export async function handleDownload(req: Request, env: AppEnv): Promise<Respons
 
   let bytes: Uint8Array | null;
   try {
-    bytes = await getAttachmentBytes(graph, scope.list_id, scope.task_id, scope.attachment_id);
+    // The blob store's copy when there is one; else Graph's, kept for next time.
+    const read = await readAttachment(env, stub, scope, () =>
+      getAttachmentBytes(graph, scope.list_id, scope.task_id, scope.attachment_id),
+    );
+    bytes = read?.bytes ?? null;
   } catch (e) {
     if (e instanceof GraphError) {
       const { reason, detail } = reasonForGraphError(e);

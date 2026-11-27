@@ -1948,6 +1948,24 @@ export class IndexCore implements TokenProvider {
     return row;
   }
 
+  // A file attachment's sid and metadata by its Graph id: what the connector
+  // needs to find or keep the blob store's copy (src/core/attachment-cache.ts).
+  // Null when the mirror doesn't have it, it's a reference attachment (no
+  // bytes), or its list is excluded (nothing from an excluded list is kept).
+  attachmentBlobRef(attachmentId: string): { sid: string; name: string | null; size: number | null; content_type: string | null } | null {
+    const row = this.#sql
+      .exec<{ sid: string; name: string | null; size: number | null; content_type: string | null; list_id: string }>(
+        `SELECT m.sid, a.name, a.size, a.content_type, COALESCE(t.list_id, a.list_id) AS list_id
+           FROM attachments a JOIN entity_map m ON m.kind = 'attachment' AND m.graph_id = a.attachment_id
+           LEFT JOIN tasks t ON t.task_id = a.task_id
+          WHERE a.attachment_id = ? AND a.kind = 'file'`,
+        attachmentId,
+      )
+      .toArray()[0];
+    if (!row || this.#isExcluded(row.list_id)) return null;
+    return { sid: row.sid, name: row.name, size: row.size, content_type: row.content_type };
+  }
+
   // ── App-owned appearance (docs/SYNC-API.md section 4.8) ──────────────────
 
   themeImage(id: string): (FeedThemeImage & { id: string }) | null {
@@ -2440,6 +2458,7 @@ export class IndexCore implements TokenProvider {
   async syncStatus(): Promise<{
     resources: SyncStatusReport[];
     totals: { tasks: number; lists: number; all_idle: boolean };
+    attachments: { files: number; bytes: number; tasks_unscanned: number };
     notifications: WebhookHealth;
   }> {
     const cfg = await this.#listsConfig();
@@ -2507,8 +2526,20 @@ export class IndexCore implements TokenProvider {
     return {
       resources,
       totals: { tasks, lists: listRows.length, all_idle },
+      attachments: this.#attachmentTotals(),
       notifications: this.#webhookHealth(Date.now()),
     };
+  }
+
+  // File attachments in the mirror and their total size, as Graph reports it.
+  // tasks_unscanned: tasks whose sub-resources (attachments among them) the
+  // budgeted scan hasn't read yet, so the totals are complete only at 0.
+  #attachmentTotals(): { files: number; bytes: number; tasks_unscanned: number } {
+    const a = this.#sql
+      .exec<{ files: number; bytes: number | null }>("SELECT COUNT(*) AS files, SUM(size) AS bytes FROM attachments WHERE kind = 'file'")
+      .one();
+    const t = this.#sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE checklist_synced_at IS NULL").one();
+    return { files: Number(a.files), bytes: Number(a.bytes ?? 0), tasks_unscanned: Number(t.n) };
   }
 
   // -- Sync (alarm-driven, resumable, budget-bounded) -----------------------

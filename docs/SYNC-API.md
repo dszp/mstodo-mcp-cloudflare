@@ -518,8 +518,10 @@ gets `401`.
 The server keeps a copy of each file attachment's bytes in R2 when the deployment has
 a blob store (`capabilities.attachment_cache: true`). The first download fetches the
 file from Graph (`/attachments/{id}/$value`), stores it under the attachment's `sid` and
-returns it; later downloads come from R2 without a Graph call. A file uploaded through
-this server (section 5.6) is stored at upload time. A To Do attachment can't be edited
+returns it; later downloads come from R2 without a Graph call. The Claude connector's
+reads (`get_attachment`, download links) use and fill the same copy. A file uploaded
+through this server (section 5.6, or the connector's upload links) is stored at upload
+time. A To Do attachment can't be edited
 in place, so a `sid` always names the same bytes. When an attachment leaves the mirror
 (deleted in any app, or its list excluded), the daily sweep (section 4.9) removes its
 copy. Without a blob store the server streams every download from Graph and stores
@@ -1787,6 +1789,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-27: section 4.6: the Claude connector's attachment reads and uploads use the
+  same blob store copy as the app's downloads.
 - 2026-11-26: sections 4.6, 4.8, 4.9, 5.2 and 5.6: a blob store (R2). Attachment
   downloads are kept in it; `POST /api/v1/attachments` uploads a file and
   `attachment.delete` removes one. Theme images (`POST`/`GET /api/v1/theme-images`, the
