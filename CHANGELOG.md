@@ -33,6 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/push-secrets.sh`; `npm run secrets -- <name>` replaces it.
 - The root `wrangler.jsonc`. Deploys no longer read it, and `config-live/` is no longer used.
 
+### Upgrading a self-hosted deployment
+If you deployed from a root `wrangler.jsonc`, convert it before your next deploy:
+1. Create `deployments/<name>/deployment.jsonc` from `deployment.example.jsonc`, copying the
+   account ID, Worker name, KV namespace IDs, R2 bucket name and any changed vars from your
+   `wrangler.jsonc`. Move your `.dev.vars` to `deployments/<name>/.dev.vars`.
+2. Set `workers_dev` and `preview_urls` explicitly to the values the live Worker has now. A
+   deploy changes them to whatever the file says.
+3. List every custom domain attached to the Worker in `custom_domains`, including ones added in
+   the Cloudflare dashboard. With any listed, a deploy detaches the ones that are missing.
+4. Run `npm run check -- <name>` and fix whatever it reports.
+5. Run `npm run deploy -- <name>` from a terminal. The first deploy has no `last-deployed.json`,
+   so it shows what it sends and asks you to confirm.
+
 ## [0.18.0] – 2026-11-27
 
 ### Added

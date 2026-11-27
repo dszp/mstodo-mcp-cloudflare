@@ -36,7 +36,7 @@ see [README.md](./README.md).
 
 ## Prerequisites
 
-- **Node 24 or later** and **npm** (Wrangler 4 is pinned in `devDependencies`). The test suite and the Node host use Node 24's built-in `node:sqlite` module.
+- **Node 24.2 or later** and **npm** (Wrangler 4 is pinned in `devDependencies`). The test suite and the Node host use Node 24's built-in `node:sqlite` module.
 - A **Cloudflare account**, logged in locally (`npx wrangler login`).
 - A **Microsoft Entra app registration** — walkthrough in [Microsoft Entra app
   registration](#microsoft-entra-app-registration) below. You'll need four values:
@@ -209,6 +209,11 @@ is removed. `npm run render -- <name>` prints the config without writing it. The
 mkdir -p deployments/<name>
 cp deployment.example.jsonc deployments/<name>/deployment.jsonc
 ```
+
+`deployments/` and the `last-deployed.json` each deploy records are local to this checkout.
+Deploy from your main checkout, not from a git worktree: a worktree starts without them, so a
+deploy there finds no deployment file, and one copied in has no `last-deployed.json`, so the
+deploy shows every setting as new.
 
 Edit `deployment.jsonc` and fill in:
 - `account_id`: your Cloudflare account ID (Dashboard → Workers, or `npx wrangler whoami`).

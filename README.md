@@ -46,7 +46,7 @@ running your own private instance — not a shared/multi-tenant service.
   deployment guide).
 - A **Microsoft Entra app registration** — free, created once (walkthrough in the
   [deployment guide](./DEPLOYMENT.md#microsoft-entra-app-registration)).
-- **Node 24 or later**, for development and tests (they use Node 24's built-in `node:sqlite`
+- **Node 24.2 or later**, for development and tests (they use Node 24's built-in `node:sqlite`
   module); the Worker host also needs Cloudflare's **Wrangler** CLI, which `npm ci` installs.
   The Docker image brings its own Node.
 - **Claude.ai** (or another MCP client) to connect to the deployed server.

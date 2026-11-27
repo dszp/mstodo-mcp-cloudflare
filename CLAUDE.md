@@ -25,7 +25,7 @@ npx tsc --noEmit -p .                           # typecheck (Workers types)
 npx tsc -p tsconfig.node.json                   # typecheck core + Node host with Node-only types
 ```
 
-**Tests need no real credentials or live config.** `vitest.config.ts` defines two projects. `workers` (`test/**`) points the Cloudflare pool at the committed `wrangler.example.jsonc` and supplies fake secrets via miniflare bindings; KV and DO bindings are simulated locally. `test/_test-worker.ts` re-exports only `TodoIndex` (the `MSToDoSession` agent DO is deliberately excluded — it pulls in the MCP SDK → ajv, which the pool can't resolve). `node` (`test-node/**`) runs on plain Node 24 with in-memory `node:sqlite` databases and fake `MS_*` values passed to `buildNodeEnv`; Microsoft endpoints are stubbed with `vi.stubGlobal("fetch")`. Node ≥ 24 is required for development (`node:sqlite`).
+**Tests need no real credentials or live config.** `vitest.config.ts` defines two projects. `workers` (`test/**`) points the Cloudflare pool at the committed `wrangler.example.jsonc` and supplies fake secrets via miniflare bindings; KV and DO bindings are simulated locally. `test/_test-worker.ts` re-exports only `TodoIndex` (the `MSToDoSession` agent DO is deliberately excluded — it pulls in the MCP SDK → ajv, which the pool can't resolve). `node` (`test-node/**`) runs on plain Node 24 with in-memory `node:sqlite` databases and fake `MS_*` values passed to `buildNodeEnv`; Microsoft endpoints are stubbed with `vi.stubGlobal("fetch")`. Node ≥ 24.2 is required for development (`node:sqlite`, and `import.meta.main` in `scripts/deployment/cli.ts`).
 
 ## Deployments
 
@@ -40,7 +40,7 @@ Each deployment is a folder, `deployments/<name>/` (gitignored), holding `deploy
 
 ## Worktrees and local types
 
-Do feature work in a git worktree next to the main checkout, with `node_modules` symlinked to the main checkout's copy. When you remove the worktree, delete that symlink first, or `git worktree remove` refuses because of an untracked file.
+Do feature work in a git worktree next to the main checkout, with `node_modules` symlinked to the main checkout's copy. Deploy from the main checkout: `deployments/` and each `last-deployed.json` are gitignored and per checkout, so a worktree has none. When you remove the worktree, delete that symlink first, or `git worktree remove` refuses because of an untracked file.
 
 Generate `worker-configuration.d.ts` (gitignored) from the example config, as CI does: `npm run types` (it reads `wrangler.example.jsonc`). A copy generated from a local config, or carried over from an older checkout, can disagree with CI's. For example, a required binding the local file lacks lets a cast pass `tsc` locally and fail it in CI.
 
@@ -131,7 +131,7 @@ Releases are cut **from `dev`**, then merged/pushed to `main` and tagged. The co
 5. **Tag — signed/annotated, never lightweight.** The repo sets `tag.gpgsign=true` with `gpg.format=ssh`, so use `git tag -s vX.Y.Z -m "Release X.Y.Z: <theme>"` (a bare `git tag vX.Y.Z` makes a *lightweight, unsigned* tag — wrong, and prior tags are signed `tag` objects). Verify with `git tag -v vX.Y.Z` (expect `Good "git" signature`). **Tags are protection-ruled on GitHub: the remote ref cannot be force-overwritten or deleted**, so get the signed tag right *before* pushing it — a pushed lightweight tag can't be cleanly upgraded in place.
 6. Push `dev` and the tag: `git push origin dev && git push origin vX.Y.Z`.
 7. **Merge to `main` via PR, not a local fast-forward.** `main` carries the `Merge pull request #N from dszp/dev` merge commits from every prior release, so it has diverged from `dev` and a local `git merge --ff-only` is impossible by design. Use `gh pr create --base main --head dev --title "Release X.Y.Z: …" --body …` then `gh pr merge <#> --merge` (a merge commit, matching #9–#12). The signed `vX.Y.Z` tag stays on the `Release` commit (now in `main`'s history); don't re-tag the merge commit.
-8. Deploy (`npm run deploy`) and confirm `/health` if this release ships code (often already deployed from `dev` before cutting the release — check first).
+8. Deploy each deployment (`npm run deploy -- <name>`, from the main checkout) and confirm its `/health` if this release ships code (often already deployed from `dev` before cutting the release — check first).
 
 ## Conventions & invariants worth preserving
 - **Only `IndexCore` refreshes tokens** (hosted by the `TodoIndex` DO on Cloudflare, in process on Node). Don't add token-endpoint calls elsewhere; route through its serializer.

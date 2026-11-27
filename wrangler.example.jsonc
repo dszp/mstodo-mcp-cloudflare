@@ -12,7 +12,8 @@
   "compatibility_date": "2026-05-01",
   "compatibility_flags": ["nodejs_compat"],
 
-  // Create your own namespaces and paste their IDs here (v4 syntax — no colon):
+  // Create your own namespaces and put their IDs under "kv" in
+  // deployments/<name>/deployment.jsonc, not here (v4 syntax — no colon):
   //   wrangler kv namespace create OAUTH_KV
   //   wrangler kv namespace create TODO_CACHE
   // The BINDING names must stay OAUTH_KV (workers-oauth-provider expects it) and
@@ -25,7 +26,8 @@
   // Optional blob store (docs/SYNC-API.md section 4.9): keeps a copy of each
   // attachment the app downloads or uploads, and holds the app's theme images.
   // Without it, downloads stream from Graph and theme images are unavailable.
-  //   wrangler r2 bucket create mstodo-blobs   (any name; use it below)
+  //   wrangler r2 bucket create <bucket-name>   (any name; put it under "r2" in
+  //   deployments/<name>/deployment.jsonc, or null there to leave this binding out)
   // The binding name must stay BLOBS.
   "r2_buckets": [
     { "binding": "BLOBS", "bucket_name": "mstodo-blobs" }
