@@ -1,0 +1,247 @@
+// Identity check 4: read what is deployed through the Cloudflare API before any
+// write. Only a definite "this Worker does not exist" (HTTP 404 on its settings)
+// counts as a first deploy; every other failure refuses, so an expired token or
+// the wrong account can never read as "nothing there, go ahead".
+//
+// Endpoint shapes come from wrangler's own bundle (node_modules/wrangler/
+// wrangler-dist/cli.js, wrangler 4.158), the authority for what the API returns.
+// Every response is { success, errors, result }.
+import { DeploymentRefusal, type DeploymentFile } from "./schema.ts";
+import { normalizeHost, ownFile } from "./checks.ts";
+import type { Runner } from "./runner.ts";
+
+export interface CloudflareApi {
+  getWorkerKv(account: string, worker: string): Promise<{ found: false } | { found: true; kv: Record<string, string> }>;
+  listCustomDomains(account: string): Promise<{ hostname: string; service: string }[]>;
+  domainChangeset(
+    account: string,
+    worker: string,
+    hostnames: string[],
+  ): Promise<{ added: string[]; removed: string[]; conflicting: string[] }>;
+  getSubdomain(account: string, worker: string): Promise<{ enabled: boolean; previews_enabled: boolean }>;
+}
+
+const API_BASE = "https://api.cloudflare.com/client/v4";
+
+// Carries the HTTP status (when there was one) and nothing from the response:
+// callers print `status` or the class name, never a body or a message.
+class CloudflareApiError extends Error {
+  readonly status: number | undefined;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "CloudflareApiError";
+    this.status = status;
+  }
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+export function createCloudflareApi(token: string, fetchImpl: typeof fetch = fetch): CloudflareApi {
+  const accountUrl = (account: string, rest: string) => `${API_BASE}/accounts/${encodeURIComponent(account)}${rest}`;
+  const scriptUrl = (account: string, worker: string, rest: string) =>
+    accountUrl(account, `/workers/scripts/${encodeURIComponent(worker)}${rest}`);
+
+  // Resolves to the response status and, for a 2xx, the unwrapped `result`.
+  // Messages here are fixed strings: a thrown fetch error or a response body can
+  // echo request headers, so neither is ever copied into an error.
+  async function call(url: string, init: { method: string; body?: unknown }, tolerate404 = false) {
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+    if (init.body !== undefined) headers["Content-Type"] = "application/json";
+    let res: Response;
+    try {
+      res = await fetchImpl(url, {
+        method: init.method,
+        headers,
+        ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+      });
+    } catch {
+      throw new CloudflareApiError("request failed");
+    }
+    if (tolerate404 && res.status === 404) return { status: 404, result: undefined as unknown };
+    if (res.status < 200 || res.status > 299) throw new CloudflareApiError(`HTTP ${res.status}`, res.status);
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      throw new CloudflareApiError("response was not JSON", res.status);
+    }
+    if (!isObject(body) || body.success !== true) throw new CloudflareApiError("API reported success: false", res.status);
+    return { status: res.status, result: body.result };
+  }
+
+  const malformed = (what: string): never => {
+    throw new CloudflareApiError(`unexpected ${what} response`);
+  };
+  const hostnames = (list: unknown, what: string): string[] => {
+    if (!Array.isArray(list)) return malformed(what);
+    return (list as unknown[]).map((x) => (isObject(x) && typeof x.hostname === "string" ? x.hostname : malformed(what)));
+  };
+
+  return {
+    // cli.js:118674, the SDK's scripts settings GET: result.bindings[] with
+    // { type: "kv_namespace", name, namespace_id } (the same fields wrangler reads
+    // at cli.js:32640 and 176017). The only call where 404 means "no such Worker".
+    async getWorkerKv(account, worker) {
+      const { status, result } = await call(scriptUrl(account, worker, "/settings"), { method: "GET" }, true);
+      if (status === 404) return { found: false };
+      if (!isObject(result) || !Array.isArray(result.bindings)) return malformed("settings");
+      const kv: Record<string, string> = {};
+      for (const b of result.bindings as unknown[]) {
+        if (!isObject(b) || b.type !== "kv_namespace") continue;
+        if (typeof b.name !== "string" || typeof b.namespace_id !== "string") return malformed("settings");
+        kv[b.name] = b.namespace_id;
+      }
+      return { found: true, kv };
+    },
+
+    // cli.js:117796, the SDK's account-wide domains list (single page): each entry
+    // has hostname and service (the Worker name), as wrangler reads them at
+    // cli.js:166230 (`domain3.hostname`, `domain3.service`).
+    async listCustomDomains(account) {
+      const { result } = await call(accountUrl(account, "/workers/domains"), { method: "GET" });
+      if (!Array.isArray(result)) return malformed("domains");
+      return (result as unknown[]).map((d) => {
+        if (!isObject(d) || typeof d.hostname !== "string" || typeof d.service !== "string") return malformed("domains");
+        const o = d as { hostname: string; service: string };
+        return { hostname: o.hostname, service: o.service };
+      });
+    },
+
+    // cli.js:166145-166170 (publishCustomDomains): POST <script>/domains/changeset
+    // ?replace_state=true with an array of origins ({ hostname, zone_id?, ... });
+    // result is { added, removed, updated, conflicting }, each a list of objects
+    // with `hostname` (cli.js:166231). This only computes a diff; it writes nothing.
+    async domainChangeset(account, worker, wanted) {
+      const { result } = await call(scriptUrl(account, worker, "/domains/changeset?replace_state=true"), {
+        method: "POST",
+        body: wanted.map((hostname) => ({ hostname })),
+      });
+      if (!isObject(result)) return malformed("changeset");
+      return {
+        added: hostnames(result.added, "changeset"),
+        removed: hostnames(result.removed, "changeset"),
+        conflicting: hostnames(result.conflicting, "changeset"),
+      };
+    },
+
+    // cli.js:118895, the SDK's per-script subdomain GET (wrangler's deploy reads
+    // the same flags at cli.js:166664-166676): result is { enabled, previews_enabled }.
+    async getSubdomain(account, worker) {
+      const { result } = await call(scriptUrl(account, worker, "/subdomain"), { method: "GET" });
+      if (!isObject(result) || typeof result.enabled !== "boolean" || typeof result.previews_enabled !== "boolean") {
+        return malformed("subdomain");
+      }
+      return { enabled: result.enabled, previews_enabled: result.previews_enabled };
+    },
+  };
+}
+
+// What a refusal may say about a failure: the HTTP status, else the error class.
+function failureReason(e: unknown): string {
+  if (e instanceof Error) {
+    const status = (e as { status?: unknown }).status;
+    return typeof status === "number" ? String(status) : e.name;
+  }
+  return "unknown error";
+}
+
+const couldNotVerify = (dep: DeploymentFile, e: unknown): DeploymentRefusal =>
+  new DeploymentRefusal(
+    ownFile(dep),
+    "(live Worker)",
+    `could not verify the live Worker ${dep.worker_name}: ${failureReason(e)}`,
+  );
+
+// Refusal file is the deployment's own path (`deployments/<name>/deployment.jsonc`,
+// the same helper the other environment checks use), so the signature stays
+// (api, dep, opts).
+export async function checkLiveWorker(api: CloudflareApi, dep: DeploymentFile, opts: { adopt: boolean }): Promise<void> {
+  const file = ownFile(dep);
+
+  let live: Awaited<ReturnType<CloudflareApi["getWorkerKv"]>>;
+  try {
+    live = await api.getWorkerKv(dep.account_id, dep.worker_name);
+  } catch (e) {
+    throw couldNotVerify(dep, e);
+  }
+  // A binding the live Worker lacks is a new binding, not a mismatch; only an
+  // existing binding pointing at a different namespace is a wrong-target sign.
+  if (live.found && !opts.adopt) {
+    for (const [binding, id] of Object.entries(dep.kv)) {
+      const liveId = live.kv[binding];
+      if (liveId !== undefined && liveId !== id) {
+        throw new DeploymentRefusal(
+          file,
+          `kv.${binding}`,
+          `the live Worker ${dep.worker_name} binds ${binding} to ${liveId}, the file says ${id}; pass --adopt only if you mean to rebind it`,
+        );
+      }
+    }
+  }
+
+  if (dep.custom_domains.length === 0) return;
+  let domains: Awaited<ReturnType<CloudflareApi["listCustomDomains"]>>;
+  try {
+    domains = await api.listCustomDomains(dep.account_id);
+  } catch (e) {
+    throw couldNotVerify(dep, e);
+  }
+  dep.custom_domains.forEach((d, i) => {
+    const holder = domains.find((x) => normalizeHost(x.hostname) === normalizeHost(d));
+    if (holder && holder.service !== dep.worker_name) {
+      throw new DeploymentRefusal(file, `custom_domains[${i}]`, `${d} is attached to the Worker ${holder.service}, not ${dep.worker_name}`);
+    }
+  });
+}
+
+// What attaching this deployment's custom_domains would add, remove or collide
+// with; used by `check` and `deploy --non-interactive` to refuse on conflicts.
+export async function checkDomainChangeset(api: CloudflareApi, dep: DeploymentFile) {
+  try {
+    return await api.domainChangeset(dep.account_id, dep.worker_name, dep.custom_domains);
+  } catch (e) {
+    throw couldNotVerify(dep, e);
+  }
+}
+
+// `wrangler auth token --json` prints { type: "api_token" | "oauth", token } or
+// { type: "api_key", key, email } (cli.js:353070-353115). Wrangler also prints
+// warnings and sometimes other noise around it, so the JSON object is located in
+// stdout instead of parsing all of it. The token stays in this process: the
+// only consumer is the Authorization header in createCloudflareApi.
+export async function wranglerToken(run: Runner, accountId: string): Promise<string> {
+  const refuse = (reason: string): never => {
+    throw new DeploymentRefusal("wrangler", "auth token", reason);
+  };
+  const res = await run("npx", ["wrangler", "auth", "token", "--json"], { env: { CLOUDFLARE_ACCOUNT_ID: accountId } });
+  if (res.code !== 0) return refuse("could not read wrangler's login; run `npx wrangler login` and retry");
+
+  const parsed = findJsonObject(res.stdout);
+  if (!parsed || typeof parsed.type !== "string") return refuse("wrangler printed no token; run `npx wrangler login` and retry");
+  if (parsed.type === "api_key") {
+    return refuse("wrangler is using CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL; set CLOUDFLARE_API_TOKEN or run `npx wrangler login`");
+  }
+  if ((parsed.type === "oauth" || parsed.type === "api_token") && typeof parsed.token === "string" && parsed.token !== "") {
+    return parsed.token;
+  }
+  return refuse("wrangler printed a credential type this script cannot use; run `npx wrangler login`");
+}
+
+// The first top-level JSON object in `text` that parses, ignoring surrounding noise.
+function findJsonObject(text: string): Record<string, unknown> | undefined {
+  const ends: number[] = [];
+  for (let i = text.length - 1; i >= 0; i--) if (text[i] === "}") ends.push(i);
+  for (let start = text.indexOf("{"); start !== -1; start = text.indexOf("{", start + 1)) {
+    for (const end of ends) {
+      if (end < start) break;
+      try {
+        const v: unknown = JSON.parse(text.slice(start, end + 1));
+        if (isObject(v)) return v;
+      } catch {
+        // not this span
+      }
+    }
+  }
+  return undefined;
+}

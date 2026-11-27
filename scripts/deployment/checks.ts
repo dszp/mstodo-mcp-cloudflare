@@ -17,7 +17,7 @@ export function normalizeHost(h: string): string {
 
 // The deployment's own file path, for refusals raised without one (the cross-file
 // and environment checks). The folder name is the deployment name.
-const ownFile = (dep: DeploymentFile): string => `deployments/${dep.name}/deployment.jsonc`;
+export const ownFile = (dep: DeploymentFile): string => `deployments/${dep.name}/deployment.jsonc`;
 
 export function checkBaseUrl(dep: DeploymentFile, file: string): void {
   const refuse = (field: string, reason: string): never => {
