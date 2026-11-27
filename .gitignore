@@ -29,7 +29,7 @@ config-live/
 deployments/
 
 # Wrangler-generated artifacts and dependencies
-node_modules/
+node_modules
 .wrangler/
 dist/
 worker-configuration.d.ts
