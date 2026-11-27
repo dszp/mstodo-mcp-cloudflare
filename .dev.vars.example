@@ -8,7 +8,7 @@
 # `op://<vault>/<item>/<field>`. Both commands resolve references via the `op`
 # CLI (needs `op signin` or OP_SERVICE_ACCOUNT_TOKEN) and leave literals
 # untouched, so you can keep secrets out of the file:
-#   MS_CLIENT_SECRET=op://Private/MS To-Do MCP/credential
+#   MS_CLIENT_SECRET=op://Dev/Potem Entra app/credential
 # Surrounding quotes are stripped, so 1Password's "Copy Secret Reference"
 # (which includes double quotes) can be pasted in verbatim.
 

@@ -300,7 +300,7 @@ The script reads each secret from `deployments/<name>/.dev.vars` and pipes the v
 Any value in `.dev.vars` may instead be a **1Password secret reference** of the form `op://<vault>/<item>/<field>` — the script resolves it via the [`op` CLI](https://developer.1password.com/docs/cli/) at push time (requires `op signin`, or `OP_SERVICE_ACCOUNT_TOKEN` for headless use) and pipes the resolved value over stdin like any other secret. Literal values still work unchanged, so you can keep some or all secrets out of the file:
 
 ```bash
-MS_CLIENT_SECRET=op://Private/MS To-Do MCP/credential
+MS_CLIENT_SECRET=op://Dev/Potem Entra app/credential
 ```
 
 To push a single secret manually instead, run `npm run check -- <name>` first and then:

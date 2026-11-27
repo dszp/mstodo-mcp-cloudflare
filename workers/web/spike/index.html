@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Potem web spike</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#1b1b1f; --mut:#6b6b76; --line:#e2e2e8; --sel:#e8eefc; --pane:#f6f6f9; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16161a; --fg:#e8e8ee; --mut:#9a9aa6; --line:#2c2c34; --sel:#26304a; --pane:#1d1d22; } }
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; margin: 0; }
+  body { font: 14px/1.35 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  .app { display: grid; grid-template-columns: 240px 380px 1fr; height: calc(100% - 28px); }
+  .pane { overflow: auto; border-right: 1px solid var(--line); min-width: 0; }
+  .side { background: var(--pane); padding: 8px 0; }
+  .side button { display: flex; justify-content: space-between; width: 100%; padding: 6px 14px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .side button.sel, .row.sel { background: var(--sel); }
+  .side .n { color: var(--mut); }
+  .side hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+  .row { position: absolute; left: 0; right: 0; height: 44px; padding: 6px 14px; border-bottom: 1px solid var(--line); cursor: pointer; overflow: hidden; }
+  .row .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .m { color: var(--mut); font-size: 12px; }
+  .row.done .t { text-decoration: line-through; color: var(--mut); }
+  .detail { padding: 14px 18px; border-right: 0; }
+  .detail h2 { margin: 0 0 8px; font-size: 18px; }
+  .detail pre { white-space: pre-wrap; font: inherit; }
+  footer { position: fixed; left: 0; right: 0; bottom: 0; height: 28px; padding: 5px 12px; background: var(--pane); border-top: 1px solid var(--line); font: 12px ui-monospace, monospace; color: var(--mut); white-space: nowrap; overflow: hidden; }
+  .back { display: none; }
+  @media (max-width: 699px) {
+    .app { grid-template-columns: 1fr; }
+    .app[data-view="side"] > :not(.side), .app[data-view="list"] > :not(.tasks), .app[data-view="detail"] > :not(.detail) { display: none; }
+    .back { display: block; padding: 8px 14px; border: 0; background: none; color: inherit; font: inherit; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="./main.tsx"></script>
+</body>
+</html>

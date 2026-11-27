@@ -78,9 +78,9 @@ secret, sign in to Microsoft again.
 
 ## Run with Docker Compose
 
-The repository includes a Dockerfile and a Compose file in `src/hosts/node/`.
+The repository includes a Dockerfile and a Compose file in `workers/server/src/hosts/node/`.
 
-1. In `src/hosts/node/`, create a file named `.env` with your settings:
+1. In `workers/server/src/hosts/node/`, create a file named `.env` with your settings:
 
    ```text
    SERVICE_BASE_URL=https://HOST
@@ -94,7 +94,7 @@ The repository includes a Dockerfile and a Compose file in `src/hosts/node/`.
    Replace each uppercase placeholder with your value. `TIMEZONE` is optional and defaults to
    `UTC`. The repository's `.gitignore` excludes `.env` files.
 
-1. From `src/hosts/node/`, build and start the container:
+1. From `workers/server/src/hosts/node/`, build and start the container:
 
    ```sh
    docker compose up -d --build

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
 # Least privilege: CI only checks out and tests — nothing writes. Pinning this
@@ -31,18 +31,54 @@ jobs:
       # worker-configuration.d.ts. Generate it from the committed example config
       # (placeholder account_id/IDs are irrelevant — only binding shapes matter).
       - name: Generate Worker types
-        run: npx wrangler types -c wrangler.example.jsonc
+        run: npx wrangler types -c workers/server/wrangler.example.jsonc workers/server/worker-configuration.d.ts
 
       - name: Typecheck
         run: npx tsc --noEmit
 
       # The Node host's own check: Node types only, no Workers globals, so a
-      # Workers-only API reaching src/core or src/hosts/node fails here.
+      # Workers-only API reaching packages/core or workers/server/src/hosts/node fails here.
       - name: Typecheck (Node host)
         run: npx tsc -p tsconfig.node.json
+
+      # The web client and spike: DOM lib and JSX. The tests in it import vitest,
+      # which brings Node's types along, so this check alone lets process or
+      # Buffer through.
+      - name: Typecheck (web)
+        run: npx tsc --noEmit -p workers/web
+
+      # The sync engine (workers/web/src/sync, tests excluded): ES2022 only, no
+      # DOM, Node or Workers types, so an engine file that touches window,
+      # localStorage, process or Buffer fails here.
+      - name: Typecheck (web sync engine)
+        run: npx tsc --noEmit -p workers/web/tsconfig.engine.json
 
       - name: Build (Node host)
         run: npm run build:node
 
       - name: Test
         run: npm test
+
+  # Refuses private terms (real hostnames, business and list names) in the tree
+  # and in the new commits' messages. The terms come from the LEAK_PATTERNS
+  # secret, never the repository, and findings print only file, line and pattern
+  # number. Dependabot runs get no secrets, and its commits carry none of the terms.
+  leak-guard:
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Leak guard
+        env:
+          LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
+          # A new branch's push has an all-zero `before`; then only the tree is checked.
+          RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || (!startsWith(github.event.before, '0000000') && format('{0}..{1}', github.event.before, github.sha) || '') }}
+        run: |
+          if [ -n "$RANGE" ]; then node scripts/leak-guard.ts --log "$RANGE"; else node scripts/leak-guard.ts; fi

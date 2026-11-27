@@ -118,7 +118,7 @@ A list nothing classifies (`unclassified` in `list_lists`) syncs as `todo`. Noth
 depends on `reference` existing: if it is dropped later, the setting is `todo` or
 `excluded`.
 
-**Where the setting comes from**, first hit wins (`classifyList`, `src/core/config/classifier.ts`):
+**Where the setting comes from**, first hit wins (`classifyList`, `packages/core/config/classifier.ts`):
 
 1. An ID pin in `config:lists.overrides`. `set_list_config` and the app's
    `list.update` both write here, so a pin is the normal way to set a list. A list
@@ -381,7 +381,7 @@ Authorization: Bearer <access token>
     { "kind": "list_group", "id": "0190…", "seq": 18000, "deleted": false,
       "data": { "name": "Clients", "sort_key": "2026-11-21T10:00:00.0000000Z" } },
     { "kind": "list", "id": "0190…", "seq": 18001, "deleted": false,
-      "data": { "name": "🧾INVOICING", "sync": "todo", "wellknown": null, "is_owner": true,
+      "data": { "name": "🛒ERRANDS", "sync": "todo", "wellknown": null, "is_owner": true,
                 "is_shared": false, "group_id": "0190…",
                 "sort_key": "2026-11-20T10:00:00.0000000Z",
                 "theme": { "color": "…", "background": "…" }, "image_id": null,
@@ -424,7 +424,14 @@ Rules:
   To Do shows only the day, and a value Graph stores as exact UTC midnight is read as
   that UTC date, anything else as the local date in `TIMEZONE`. The app sends
   `completed_at` back as a bare date too. Instants (reminders, created, modified) go
-  out as UTC ISO 8601.
+  out as UTC ISO 8601. `GET /api/v1/sync/info` names that zone as `timezone`
+  (section 14.1).
+- `my_day.committed_day` and `my_day.postponed_day` are calendar dates as To Do keeps
+  them: the first ten characters of the `CommittedDay` and `PostponedDay` values
+  Substrate sends, with no time zone conversion. The server writes them as the date
+  in `TIMEZONE` (`myday.add` without a date uses today there); a Microsoft To Do app
+  writes its device's local date. They compare with a client's "today" when the
+  owner's devices run in `TIMEZONE`.
 - `subresources_complete: false` means the server hasn't fetched this task's steps,
   links and attachments yet (the per-task scan, section 1.1). The app shows what it has
   and gets the rest in a later pull. Once fetched, it stays `true`: a later change to
@@ -751,6 +758,82 @@ Once a day the server's cron sweeps the bucket. It deletes each attachment copy 
 attachment is no longer in the mirror, and each theme image that no list or smart list
 has used for 30 days, counted from the first sweep that found it unused.
 
+### 4.10 Client rules: smart lists and local search
+
+The server computes no smart lists. Each client builds them from the mirror it holds,
+and every client follows the rules below so that a smart list holds the same tasks, in
+the same order, in every app. The Apple app's implementation was the source of these
+rules.
+
+Every smart list leaves out tasks in lists with `sync: "reference"`. "Today" is the
+date as a bare `YYYY-MM-DD` in the owner's zone, which `GET /api/v1/sync/info` returns
+as `timezone` (section 14.1), whatever zone the device is in. The feed's bare dates
+and `my_day.committed_day` are in that zone too (section 4.2). `order` is the task's
+`order` string from the feed (section 4.2), compared as text. "Open" means `status` is
+not `completed`.
+
+These rules cover the smart lists and search. The order of tasks inside a regular list
+is up to each client and is not part of this section.
+
+Sorting follows SQLite's rule for nulls: in a descending sort a null value sorts last,
+in an ascending sort first. Rows still tied after the listed keys sort by `id`
+ascending, so every client shows one order.
+
+| List | Holds | Order | A task created here gets |
+|---|---|---|---|
+| `my_day` | `my_day.committed_day == today`, any status. With the client's "show tasks due today in My Day" preference (default off), also open tasks with `due == today` | `my_day.committed_order` desc, then `order` desc | `myday.add` after the create |
+| `important` | open, `importance == "high"` | `order` desc, then `created_at` desc | `importance: "high"` |
+| `planned` | open, `due` not null (a reminder alone does not count) | `due` asc, then `order` desc | `due: today` |
+| `all` | open | `order` desc, then `created_at` desc | nothing extra |
+| `completed` | `status == "completed"`; a client may limit it to `completed_at >= since` | `completed_at` desc, then `modified_at` desc | nothing extra |
+
+A completed task in today's My Day stays in `my_day` and is shown under a
+"Completed" section of that list, in the same order as the rest of the list.
+
+The sidebar count is the number of open tasks in the list. For `completed` it is the
+number of tasks the list holds: completed tasks, limited by the same "completed since"
+date when the client applies one to the list.
+
+A completed task with no `completed_at` sorts last in `completed`, forms a final group
+of its own in the grouping below, and is left out when a "completed since" date is
+applied.
+
+`completed` is grouped by completion date: one group per day for the 14 days up to
+and including today, then six seven-day weeks counting back from the day before the
+first of those days, then one group per calendar month. A date after today counts as
+its own day.
+
+**Local search.** A client searches its own mirror before it calls the server:
+
+- The query's words are what is left after splitting it on runs of Unicode whitespace,
+  the characters JavaScript's `\s` matches. A query with no words matches nothing.
+  Every word must appear in the title, the note body's plain text, or the title of a
+  step. Matching ignores case for ASCII letters only, as SQLite's `LIKE` does, so
+  clients agree on every query.
+- A body's plain text is its `content` when `type` is `text`. When `type` is `html`,
+  it is the content with each tag (`<` to the next `>`) replaced by a space, the
+  contents of `<script>` and `<style>` elements dropped (to their closing tag, or to
+  the end when there is none), the entities `&amp;`, `&lt;`, `&gt;`, `&quot;`,
+  `&apos;` and `&nbsp;` and numeric entities (`&#39;`, `&#x27;`) decoded, other
+  entities and a numeric entity beyond U+10FFFF left as written, runs of whitespace
+  collapsed to one space, and the ends trimmed. A `<` with no `>` after it is kept as
+  text. So markup such as `div` or `href` never matches, and a word split by a tag
+  (`ham<b>mer</b>`) is two words. The server indexes a body for `GET /api/v1/search`
+  by the same rule.
+- The scope is the whole mirror, reference lists included; or one list; or one smart
+  list. A smart-list scope applies that list's "Holds" rule without its "open"
+  requirement, because only "Include Completed" decides whether completed tasks
+  appear, and it still leaves out reference lists. My Day's "due today" clause still
+  requires the task to be open.
+- Completed tasks are included unless the user turns off "Include Completed". A
+  "completed since" date, when set, drops completed tasks completed before it, and
+  those with no `completed_at`.
+- Results fall into four groups in this order: open tasks whose title contains the
+  first query word, open tasks whose title does not, completed tasks whose title does,
+  completed tasks whose title does not. Only the first word is tested against the
+  title, with the same ASCII-only case folding. Within a group, `order` desc, then `id` asc.
+- "Search all history" calls `GET /api/v1/search` for the tasks the mirror does not hold.
+
 ---
 
 ## 5. Sending edits
@@ -940,7 +1023,7 @@ owner. An update or delete is safe to repeat as-is.
 
 The MCP tool handlers in `register-tools.ts` (about 4,800 lines) are closures bound to
 `McpServer`. Neither this API nor ROADMAP §1 can reuse them as they stand. The first
-build step extracts the write logic into `src/core/ops/` — plain functions taking a
+build step extracts the write logic into `packages/core/ops/` — plain functions taking a
 `GraphClient`, an optional `SubstrateClient`, and the index — and makes the MCP tools
 call them. Existing MCP tests guard the refactor. The sync mutation handler and the
 §1 routes then call the same functions, so the three surfaces can't drift.
@@ -1154,7 +1237,7 @@ OAuth issuer, so a `client_id` built into the app would only work on one server
 grant list show the app the same way on every server.
 
 **Token lifetimes.** Access tokens last one hour, and refresh tokens slide to 14 days
-from last use (`src/hosts/shared/oauth.ts`). An iPhone app left unused for two weeks
+from last use (`workers/server/src/hosts/shared/oauth.ts`). An iPhone app left unused for two weeks
 has to sign in again. That's the existing connector policy; changing it for the app
 alone is possible later through the `tokenExchangeCallback`.
 
@@ -1174,7 +1257,7 @@ test that existing `/mcp` grants survive the change (the library keeps
 ### 8.1 Cloudflare Access in front of the app
 
 **Status: built, off by default.** The server-side half is in the code
-(`src/core/auth/access.ts`, `src/hosts/shared/app-signin.ts`). It stays off until the
+(`packages/core/auth/access.ts`, `workers/server/src/hosts/shared/app-signin.ts`). It stays off until the
 owner sets `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`; with neither set, every path behaves
 as it did before. The Access application itself is account configuration, which the
 owner sets up (see **Turning it on** below).
@@ -1322,12 +1405,12 @@ sign-in. Section 9 covers it.
 Both surfaces live under `/api/v1`, behind one router and one auth layer:
 
 ```
-src/core/api/
+packages/core/api/
   router.ts     # /api/v1/* path → handler; both hosts mount it
   auth.ts       # resolves a request to { principal, scopes } or a 401/403
   sync/         # changes, mutations, socket, attachments
   routes/       # the ROADMAP §1 per-tool routes (built later)
-src/core/ops/   # write logic shared by MCP tools, the sync API and §1 routes (section 5.5)
+packages/core/ops/   # write logic shared by MCP tools, the sync API and §1 routes (section 5.5)
 ```
 
 - The OAuth provider moves to the library's role-based form, with `/mcp` and
@@ -1337,7 +1420,7 @@ src/core/ops/   # write logic shared by MCP tools, the sync API and §1 routes (
   `/api/v1` routes n8n uses, never the sync routes (to verify: how the role-based form
   exposes `resolveExternalToken`). Cloudflare Access service tokens, the other §1 option, are
   checked at the edge before the Worker runs and need no code here.
-- `router.ts` is in `src/core`, so both hosts get it. On Node it is mounted in
+- `router.ts` is in `packages/core`, so both hosts get it. On Node it is mounted in
   `createHandler`, behind the existing body caps.
 
 Building the §1 routes isn't part of this work. Only the shared router, auth layer and
@@ -1395,7 +1478,7 @@ server stores it as Substrate returns it, so the change is in the feed at once. 
 group's `position` is among the top-level lists and the other groups, like a top-level
 list's; the reference is a list or a group sid.
 
-Observed on the Servant Voice account (2026-11-25): Substrate accepted `ThemeColor`,
+Observed on the test account (2026-11-25): Substrate accepted `ThemeColor`,
 `ThemeBackground`, `ParentFolderGroupId` (a group's `Id`, or `null` to ungroup) and
 `OrderDateTime` in one `PATCH taskfolders/{id}`, and returned the whole folder. It
 ignored `null` for a theme value and stored `""` as given. It keeps a list's
@@ -1489,8 +1572,8 @@ the same columns and entities, written by the app's mutations.
 ## 11. What stays unchanged
 
 - **MCP tools.** Same names, inputs, outputs and Graph IDs. The `ops/` extraction
-  changes where the code lives, not what it does; the existing tests in `test/` and
-  `test-node/` run unchanged before and after.
+  changes where the code lives, not what it does; the existing tests in `workers/server/test/` and
+  `workers/server/test-node/` run unchanged before and after.
 - **Node/Docker host.** Gets the same features through ports. New dependency: `ws`.
 - **Webhooks and delta sync.** Same triggers and budgets. Changes: hot lists sync
   first (section 7.2), and `resync`/410 use mark and sweep (section 3.3).
@@ -1502,7 +1585,7 @@ the same columns and entities, written by the app's mutations.
 
 ## 12. Build order
 
-Each step is one PR with tests on both hosts (`test/` for the Workers pool, `test-node/`
+Each step is one PR with tests on both hosts (`workers/server/test/` for the Workers pool, `workers/server/test-node/`
 for Node). Nothing ships until this document is approved.
 
 1. **Spike** (done; results at the end of this document).
@@ -1572,6 +1655,7 @@ to build now:
   ```json
   {
     "server_id": "c1b0…",
+    "cursor": "k3v9.18452",
     "account": { "name": "David (work)", "email_hint": "d…@…" },
     "version": "0.18.0",
     "capabilities": { "my_day": true, "step_order": true, "sub_resources": true,
@@ -1580,13 +1664,18 @@ to build now:
                       "attachment_cache": true, "theme_images": true,
                       "push": "websocket",
                       "source": "graph" },
-    "link_rules_rev": "9f2c4e01a7b3d5e6"
+    "link_rules_rev": "9f2c4e01a7b3d5e6",
+    "timezone": "America/New_York"
   }
   ```
 
   `server_id` is a random ID created once and stored in DO storage. It never changes,
   unlike the cursor epoch, which changes on an identity reset. The app keys the
   account's local data by it, so re-adding the same server is recognized.
+  `cursor` is the change feed's current position (section 3), the same form a pull
+  returns. `timezone` is the owner's `TIMEZONE`, an IANA name (`UTC` when the server
+  has none set): the zone of the feed's bare dates, and the zone a client uses for
+  "today" (section 4.10). The anonymous `/sync/info` probe carries neither.
   `capabilities` tells the app what this server supports: a deployment without the
   Exchange Online scope has no My Day, no step order and no list appearance
   (`list_appearance`: sidebar groups, order and theme in the feed, section 10.4;
@@ -1655,7 +1744,7 @@ So the design separates them:
 
 - **An identity provider** answers "who is signing in". It is the upstream of this
   server's OAuth flow (`beginUpstream` / `finishUpstream` in
-  `src/hosts/shared/auth-handler.ts`, which today always goes to Microsoft).
+  `workers/server/src/hosts/shared/auth-handler.ts`, which today always goes to Microsoft).
 - **A data source** answers "where do tasks come from". Graph is the only one built
   (`SYNC_SOURCE=graph`); `local` comes later (section 10). Connecting Graph remains a
   Microsoft authorization, but it becomes a connection the owner makes, not the
@@ -1703,7 +1792,7 @@ that an email alone can't be trusted (`/me.mail` is admin-settable; the UPN chec
 
 ## 16. Running without Cloudflare
 
-The Node host (`src/hosts/node`, `docs/NODE-HOSTING.md`) already runs the MCP server
+The Node host (`workers/server/src/hosts/node`, `docs/NODE-HOSTING.md`) already runs the MCP server
 with no Cloudflare services. Everything in this document is designed to work there
 too:
 
@@ -1808,6 +1897,11 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-27: section 14.1: the authenticated `/sync/info` returns `timezone`, the owner's
+  `TIMEZONE`, which section 4.10's "today" uses; its existing `cursor` field is documented.
+  Section 4.2 states that `my_day.committed_day` is To Do's calendar date, unconverted.
+- 2026-11-27: section 4.10 added: the smart-list and local-search rules every client follows,
+  taken from the Apple app, so each app and the web UI show the same lists.
 - 2026-11-27: section 6: completing a task without `completed_at` is stamped with the
   owner's local date, and a completion date Graph ignored is sent once more.
 - 2026-11-27: section 4.6: the Claude connector's attachment reads and uploads use the
@@ -1820,7 +1914,7 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
   themes. New capabilities `attachment_cache`,
   `attachment_upload` and `theme_images`.
 - 2026-11-25: section 7.1: `changed` messages are coalesced: one at once, then at most
-  one per 3 seconds while changes keep coming. Measured on the Servant Voice server, a
+  one per 3 seconds while changes keep coming. Measured on the test server, a
   `task.create` went from three messages to two.
 - 2026-11-25: sections 5.2 and 10.4: `list_group.create`, `list_group.update`,
   `list_group.reorder` and `list_group.delete`; groups are no longer read-only.
@@ -1852,8 +1946,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Spike results (build step 1)
 
-- 2026-11-23, both hosts' SQLite (`test/sync-spike-sqlite.test.ts`,
-  `test-node/sync-spike-sqlite.test.ts`): `AUTOINCREMENT` works in Durable Object
+- 2026-11-23, both hosts' SQLite (`workers/server/test/sync-spike-sqlite.test.ts`,
+  `workers/server/test-node/sync-spike-sqlite.test.ts`): `AUTOINCREMENT` works in Durable Object
   SQLite as run by the Workers test pool and in `node:sqlite`; a `seq` is not reused
   after the highest row is deleted; a trigger can mint a `sid` with
   `lower(hex(randomblob(16)))`; a `WHEN old.x IS NOT new.x` guard keeps marker-only
@@ -1864,7 +1958,7 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
   ID changed. The move matcher in section 2 can key on it. Moves made in the To Do app
   use the same Substrate re-parent (see `reparentTask`), so I expect the same result
   there; the end-to-end test in step 8 confirms it.
-- 2026-11-23, live on the Servant Voice test worker (`mstodo-mcp-sv`), with a
+- 2026-11-23, live on the secondary test deployment, with a
   temporary token-gated probe from the unmerged `scratch/sync-probe` branch:
   - **Immutable IDs work for To Do tasks.** With `Prefer: IdType="ImmutableId"`,
     Graph returns task IDs in a different form (`AAkAL…`). A task created, re-parented
@@ -1881,7 +1975,7 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
     groups, so the group object's fields are still unseen. (`taskgroups` and
     `taskfoldergroups` return "Endpoint not supported".)
   - Graph's `/me/todo/lists` and `…/tasks` reject `$select` with `ParseUri` errors.
-- 2026-11-23, after David created two list groups in the Servant Voice account and
+- 2026-11-23, after David created two list groups in the test account and
   moved one list into one of them: a group record from `GET …/foldergroups` has exactly
   `Id`, `Name` and `OrderDateTime`. The grouped list's `ParentFolderGroupId` equals the
   group's `Id`, and moving the list into the group gave it a new `OrderDateTime`; its
@@ -1999,7 +2093,7 @@ a time budget (section 5.1).
 ### 18.7a Correction: production mirrors flagged email
 Sections 1 and 1.2 describe `flaggedEmails` as not mirrored. That's the default, but
 this deployment opts in (`sync_flagged_emails`), and on 2026-11-24 production held
-13,296 tasks, 10,247 of them in Flagged Emails. Two consequences:
+about 12,000 tasks, roughly 9,000 of them in Flagged Emails. Two consequences:
 - **The sub-resource backfill is about five times the section 1.1 estimate** if it
   covers flagged email. Flagged-email tasks carry a linked resource (the message link)
   and rarely steps. Proposal: when the list is `reference`, backfill only its open tasks,
