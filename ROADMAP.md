@@ -623,3 +623,8 @@ command, such as `npm run deploy -- <name>`, that renders the wrangler config fr
 example and deploys it. A new binding is then added once, in the example, not by hand
 in every config (see CLAUDE.md, "Deployments"). Adapter Workers (section 13) use the
 same mechanism.
+
+The deploy command refuses to run without a named deployment, and refuses a name with
+no file or a file without an account ID. A bare `wrangler deploy` must not pick a
+default: with several accounts, a default is how one account's Worker gets deployed
+over another's. The root `wrangler.jsonc` goes away for the same reason.
