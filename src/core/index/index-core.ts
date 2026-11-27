@@ -833,8 +833,12 @@ export class IndexCore implements TokenProvider {
   // One attachment this server just attached through Graph (an app upload,
   // section 5.6), recorded at once so the feed carries it before the next
   // sub-resource scan.
+  // Records an attachment this server just made through Graph. Only on a task
+  // the mirror has: a row for any other task (one that never arrives, or was
+  // deleted before delta saw it) would outlive it, and keep its blob copy.
   putAttachment(taskId: string, listId: string, a: { id: string; name: string; size: number; content_type: string }): void {
     if (this.#isExcluded(listId)) return;
+    if (!this.#sql.exec("SELECT 1 FROM tasks WHERE task_id = ?", taskId).toArray().length) return;
     this.#sql.exec(
       `INSERT INTO attachments (attachment_id, task_id, list_id, name, size, content_type, kind, modified_at)
          VALUES (?, ?, ?, ?, ?, ?, 'file', ?)
@@ -1952,10 +1956,10 @@ export class IndexCore implements TokenProvider {
   // needs to find or keep the blob store's copy (src/core/attachment-cache.ts).
   // Null when the mirror doesn't have it, it's a reference attachment (no
   // bytes), or its list is excluded (nothing from an excluded list is kept).
-  attachmentBlobRef(attachmentId: string): { sid: string; name: string | null; size: number | null; content_type: string | null } | null {
+  attachmentBlobRef(attachmentId: string): { sid: string; task_id: string; name: string | null; size: number | null; content_type: string | null } | null {
     const row = this.#sql
-      .exec<{ sid: string; name: string | null; size: number | null; content_type: string | null; list_id: string }>(
-        `SELECT m.sid, a.name, a.size, a.content_type, COALESCE(t.list_id, a.list_id) AS list_id
+      .exec<{ sid: string; task_id: string; name: string | null; size: number | null; content_type: string | null; list_id: string }>(
+        `SELECT m.sid, a.task_id, a.name, a.size, a.content_type, COALESCE(t.list_id, a.list_id) AS list_id
            FROM attachments a JOIN entity_map m ON m.kind = 'attachment' AND m.graph_id = a.attachment_id
            LEFT JOIN tasks t ON t.task_id = a.task_id
           WHERE a.attachment_id = ? AND a.kind = 'file'`,
@@ -1963,7 +1967,7 @@ export class IndexCore implements TokenProvider {
       )
       .toArray()[0];
     if (!row || this.#isExcluded(row.list_id)) return null;
-    return { sid: row.sid, name: row.name, size: row.size, content_type: row.content_type };
+    return { sid: row.sid, task_id: row.task_id, name: row.name, size: row.size, content_type: row.content_type };
   }
 
   // ── App-owned appearance (docs/SYNC-API.md section 4.8) ──────────────────

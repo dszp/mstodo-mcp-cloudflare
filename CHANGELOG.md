@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **The Claude connector uses the attachment blob store.** `get_attachment` and download
   links serve the R2 copy when there is one and keep a copy when there isn't; files
-  attached through upload links or carried by a cross-list move are stored at once.
+  attached through upload links are stored at once.
   `sync_status` reports `attachments`: file count, total bytes as Graph reports them,
   and how many tasks' attachments the scan hasn't read yet.
 - **Blob store (R2) for the client app** (docs/SYNC-API.md sections 4.6, 4.8, 4.9, 5.2

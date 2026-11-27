@@ -8,7 +8,6 @@ import { loadAttachmentConfig, loadLinkRules } from "../config/loader";
 import { runLinkRules, type LinkRuleMatch } from "../config/link-rules-engine";
 import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph-upload";
 import { toGraphDate, toGraphDateTime } from "../util/dates";
-import { keepAttachment } from "../attachment-cache";
 import { bestEffort, getGraphInnerErrorCode, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
 import { committedDatePart } from "./my-day";
@@ -586,7 +585,7 @@ async function copyThenDelete(
         return abort("attachment_too_large", { attachment_id: meta.id, size: bytes.byteLength, max: PER_FILE_MAX_BYTES, ...counts });
       }
       try {
-        const copied = await attachFile(graph, accessToken, {
+        await attachFile(graph, accessToken, {
           listId: to_list_id,
           taskId: newId,
           name: full.name ?? "attachment",
@@ -595,14 +594,6 @@ async function copyThenDelete(
           maxInlineBytes: cfg.max_inline_bytes,
         });
         attachments_copied += 1;
-        // The copy is a new attachment with a new sid; keep its bytes so the
-        // first read doesn't go back to Graph. The source's copy is swept.
-        if (copied.attachment_id) {
-          await keepAttachment(ctx.env, ctx.index, {
-            list_id: to_list_id, task_id: newId, attachment_id: copied.attachment_id,
-            name: full.name ?? "attachment", content_type: full.contentType ?? "application/octet-stream",
-          }, bytes);
-        }
       } catch (e) {
         return abort("attachment_upload_failed", { attachment_id: meta.id, ...cause(e), ...counts });
       }

@@ -152,6 +152,8 @@ describe("handleUpload attach flow", () => {
       }
       return new Response("unexpected", { status: 500 });
     });
+    // Kept only for a task the mirror has.
+    await ownerIndex(env).upsertTask({ id: "T1", title: "t", status: "notStarted", lastModifiedDateTime: "2026-11-24T10:00:00Z" } as never, "L1");
     const { token } = await createUploadCapability(env, SCOPE);
     const res = await handleUpload(multipartPost("https://x/upload", new File(["hi"], "k.txt", { type: "text/plain" }), token), env);
     expect(res!.status).toBe(200);

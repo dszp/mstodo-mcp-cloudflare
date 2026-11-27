@@ -1,6 +1,5 @@
 // The blob store's copies of task attachments, for the Claude connector's
-// paths: get_attachment, the /download link, upload links and the cross-list
-// move. The app's GET /api/v1/attachments/{sid} keeps its own streaming read
+// paths: get_attachment, the /download link and upload links. The app's GET /api/v1/attachments/{sid} keeps its own streaming read
 // (src/core/api/attachments.ts); both store under the same key, so a copy
 // made by either serves the other.
 //
@@ -32,7 +31,10 @@ export async function readAttachment(
   fromGraph: () => Promise<Uint8Array | null>,
 ): Promise<{ bytes: Uint8Array; source: "cache" | "graph" } | null> {
   const blobs = env.BLOBS;
-  const known = blobs ? await index.attachmentBlobRef(ref.attachment_id) : null;
+  // The copy is keyed by attachment alone, so a request naming another task
+  // goes to Graph, which answers for that task.
+  const found = blobs ? await index.attachmentBlobRef(ref.attachment_id) : null;
+  const known = found && found.task_id === ref.task_id ? found : null;
   if (blobs && known) {
     const stored = await blobs.get(attachmentBlobKey(known.sid)).catch((e: unknown) => {
       log.warn("blob_get_failed", { attachment: known.sid, error: String(e) });

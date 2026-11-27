@@ -36,7 +36,7 @@ describe("IndexCore.attachmentBlobRef", () => {
   it("names a mirrored file attachment's sid and metadata", () => {
     const { c, sidOf } = setup();
     expect(c.attachmentBlobRef("A1")).toEqual({
-      sid: sidOf("A1"), name: "receipt.pdf", size: BYTES.byteLength, content_type: "application/pdf",
+      sid: sidOf("A1"), task_id: "T1", name: "receipt.pdf", size: BYTES.byteLength, content_type: "application/pdf",
     });
   });
 
@@ -81,6 +81,15 @@ describe("readAttachment", () => {
     expect(r?.bytes).toEqual(BYTES);
   });
 
+  it("doesn't serve the copy for a request naming another task, and goes to Graph", async () => {
+    const { c, env, blobs, sidOf } = setup();
+    blobs.objects.set(attachmentBlobKey(sidOf("A1")), { bytes: BYTES, uploaded: new Date(0) });
+    let graphCalls = 0;
+    const r = await readAttachment(env, c as never, { ...A1, task_id: "T9" }, async () => (graphCalls++, null));
+    expect(r).toBeNull();
+    expect(graphCalls).toBe(1);
+  });
+
   it("goes to Graph and stores nothing for an attachment the mirror doesn't know", async () => {
     const { c, env, blobs } = setup();
     const r = await readAttachment(env, c as never, { ...A1, attachment_id: "A2" }, async () => BYTES);
@@ -120,6 +129,13 @@ describe("keepAttachment", () => {
     const { c, sql, env, blobs } = setup();
     sql.exec("UPDATE lists SET sync = 'excluded' WHERE list_id = 'L1'");
     await keepAttachment(env, c as never, { list_id: "L1", task_id: "T1", attachment_id: "A9", name: "new.txt", content_type: "text/plain" }, BYTES);
+    expect(blobs.objects.size).toBe(0);
+  });
+
+  it("stores nothing for a task the mirror doesn't have, so no row outlives a task that never arrives", async () => {
+    const { c, env, blobs } = setup();
+    await keepAttachment(env, c as never, { list_id: "L1", task_id: "T-unknown", attachment_id: "A9", name: "n", content_type: "text/plain" }, BYTES);
+    expect(c.attachmentBlobRef("A9")).toBeNull();
     expect(blobs.objects.size).toBe(0);
   });
 
