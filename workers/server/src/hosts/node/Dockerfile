@@ -29,7 +29,12 @@ ENV NODE_ENV=production MSTODO_DB=/data/mstodo.sqlite PORT=8787 HOST=0.0.0.0
 COPY --from=build /app/package.json /app/package-lock.json ./
 # Runtime dependencies only, with install scripts off: nothing at run time
 # needs them, and skipping them keeps package scripts out of the image build.
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+# --omit=peer and --omit=optional drop the optional peers `agents` and
+# `partysocket` declare (vite, react), which `--omit=dev` alone still installs.
+# The bundle never imports `agents`; rolldown stays, because it is a required
+# peer of @rolldown/plugin-babel, a regular dependency of `agents`.
+RUN npm ci --omit=dev --omit=optional --omit=peer --ignore-scripts && npm cache clean --force \
+ && if [ -e node_modules/react ] || [ -e node_modules/vite ]; then echo "react or vite installed in the runtime image" >&2; exit 1; fi
 COPY --from=build /app/dist ./dist
 RUN mkdir -p /data && chown node:node /data
 USER node
