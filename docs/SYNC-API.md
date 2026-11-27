@@ -1852,8 +1852,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Spike results (build step 1)
 
-- 2026-11-23, both hosts' SQLite (`test/sync-spike-sqlite.test.ts`,
-  `test-node/sync-spike-sqlite.test.ts`): `AUTOINCREMENT` works in Durable Object
+- 2026-11-23, both hosts' SQLite (`workers/server/test/sync-spike-sqlite.test.ts`,
+  `workers/server/test-node/sync-spike-sqlite.test.ts`): `AUTOINCREMENT` works in Durable Object
   SQLite as run by the Workers test pool and in `node:sqlite`; a `seq` is not reused
   after the highest row is deleted; a trigger can mint a `sid` with
   `lower(hex(randomblob(16)))`; a `WHEN old.x IS NOT new.x` guard keeps marker-only
