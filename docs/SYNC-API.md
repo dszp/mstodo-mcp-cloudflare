@@ -759,22 +759,32 @@ the same order, in every app. The Apple app's implementation was the source of t
 rules.
 
 Every smart list leaves out tasks in lists with `sync: "reference"`. "Today" is the
-device's local date as a bare `YYYY-MM-DD`. `order` is the task's `order` string from
-the feed (section 4.2), compared as text. "Open" means `status` is not `completed`.
+local date as a bare `YYYY-MM-DD`. A client runs with the owner's `TIMEZONE`, so that
+its "today" matches the feed's bare dates; a client whose device zone differs uses the
+date in `TIMEZONE`. `order` is the task's `order` string from the feed (section 4.2),
+compared as text. "Open" means `status` is not `completed`.
+
+Sorting follows SQLite's rule for nulls: in a descending sort a null value sorts last,
+in an ascending sort first. Rows still tied after the listed keys sort by `id`
+ascending, so every client shows one order.
 
 | List | Holds | Order | A task created here gets |
 |---|---|---|---|
-| `my_day` | `my_day.committed_day == today`, any status. With the client's `dueTodayInMyDay` preference (default off), also open tasks with `due == today` | `my_day.committed_order` desc, then `order` desc | `myday.add` after the create |
+| `my_day` | `my_day.committed_day == today`, any status. With the client's "show tasks due today in My Day" preference (default off), also open tasks with `due == today` | `my_day.committed_order` desc, then `order` desc | `myday.add` after the create |
 | `important` | open, `importance == "high"` | `order` desc, then `created_at` desc | `importance: "high"` |
 | `planned` | open, `due` not null (a reminder alone does not count) | `due` asc, then `order` desc | `due: today` |
 | `all` | open | `order` desc, then `created_at` desc | nothing extra |
 | `completed` | `status == "completed"`; a client may limit it to `completed_at >= since` | `completed_at` desc, then `modified_at` desc | nothing extra |
 
 A task completed today that is in My Day stays in `my_day` and is shown under a
-"Completed" section of that list.
+"Completed" section of that list, in the same order as the rest of the list.
 
 The sidebar count is the number of open tasks in the list. For `completed` it is the
 number of completed tasks.
+
+A completed task with no `completed_at` sorts last in `completed`, forms a final group
+of its own in the grouping below, and is left out when a "completed since" date is
+applied.
 
 `completed` is grouped by completion date: one group per day for the 14 days up to
 and including today, then six seven-day weeks counting back from the day before the
@@ -783,13 +793,20 @@ its own day.
 
 **Local search.** A client searches its own mirror before it calls the server:
 
-- Every whitespace-separated word of the query must appear, case-insensitively, in the
-  title, the note body, or the title of a step.
-- The scope is every synced list, reference lists included, or only the current list or
-  smart list.
-- Completed tasks are included unless the user turns off "Include Completed".
-- Results put open tasks before completed ones, then title matches before body and step
-  matches, then `order` desc within each group.
+- Every whitespace-separated word of the query must appear in the title, the note body,
+  or the title of a step. Matching ignores case for ASCII letters only, as SQLite's
+  `LIKE` does, so clients agree on every query.
+- The scope is the whole mirror, reference lists included; or one list; or one smart
+  list. A smart-list scope applies that list's "Holds" rule without its "open"
+  requirement, because only "Include Completed" decides whether completed tasks
+  appear, and it still leaves out reference lists.
+- Completed tasks are included unless the user turns off "Include Completed". A
+  "completed since" date, when set, drops completed tasks completed before it, and
+  those with no `completed_at`.
+- Results fall into four groups in this order: open tasks whose title contains the
+  first query word, open tasks whose title does not, completed tasks whose title does,
+  completed tasks whose title does not. Only the first word is tested against the
+  title. Within a group, `order` desc, then `id` asc.
 - "Search all history" calls `GET /api/v1/search` for the tasks the mirror does not hold.
 
 ---
