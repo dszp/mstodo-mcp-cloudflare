@@ -1,0 +1,31 @@
+// Copy to deployments/<name>/deployment.jsonc (gitignored). <name> matches ^[a-z0-9][a-z0-9-]*$.
+// Every value below is a placeholder.
+{
+  // Cloudflare account ID: 32 lowercase hex characters.
+  "account_id": "00000000000000000000000000000000",
+  // The Worker's name.
+  "worker_name": "potem-example",
+  // Public https origin; becomes vars.SERVICE_BASE_URL.
+  "base_url": "https://todo.example.test",
+  // Whether the workers.dev address is enabled. Always explicit: wrangler turns it off when routes exist.
+  "workers_dev": false,
+  // Whether preview URLs are enabled. Set to the Worker's current live value.
+  "preview_urls": false,
+  // Optional. Hostnames attached as custom-domain routes.
+  "custom_domains": ["todo.example.test"],
+  // KV namespace IDs by binding name; must cover every KV binding in wrangler.example.jsonc.
+  "kv": {
+    "OAUTH_KV": "00000000000000000000000000000000",
+    "TODO_CACHE": "00000000000000000000000000000000"
+  },
+  // R2 bucket names by binding name, or null to omit the binding; must cover every R2 binding in the example.
+  "r2": {
+    "BLOBS": "potem-example-blobs"
+  },
+  // Optional. Overrides for vars that exist in wrangler.example.jsonc. SERVICE_BASE_URL is not allowed here.
+  "vars": {
+    "TIMEZONE": "UTC"
+  },
+  // Optional. 1Password account for resolving op:// references in .dev.vars.
+  "op_account": "example.1password.com"
+}
