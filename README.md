@@ -260,7 +260,7 @@ requires `SERVICE_BASE_URL` (same as upload); unset/placeholder ⇒ `download_di
 
 ## Reset
 
-Three scopes, smallest to largest. Run from the project root. First run `npm run check -- <name>`: it writes `.wrangler/deployments/<name>/rendered.json` only after every check passes, including the read of the live Worker, and removes it when a check fails. Every command below passes that file with `-c`, because `--binding` needs it to find the namespace. These direct wrangler commands get no account or identity checks beyond that `check`, so run them from a shell where `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ENV` and `WRANGLER_CI_OVERRIDE_NAME` are unset. Replace `--remote` with `--local --persist-to .wrangler/state/<name>` to operate on the local KV store that `npm run dev -- <name>` uses.
+Three scopes, smallest to largest. Run from the project root. First run `npm run check -- <name>`: it writes `.wrangler/deployments/<name>/rendered.json` only after every check passes, including the read of the live Worker, and removes it when a check fails. Every command below passes that file with `-c`, because `--binding` needs it to find the namespace. These direct wrangler commands get no account or identity checks beyond that `check`, so run them from a shell where `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ENV` and `WRANGLER_CI_OVERRIDE_NAME` are unset, and keep those variables out of a root `.env` or `.env.local`, which wrangler also loads. Replace `--remote` with `--local --persist-to .wrangler/state/<name>` to operate on the local KV store that `npm run dev -- <name>` uses.
 
 ### 1. Soft reset between test iterations
 

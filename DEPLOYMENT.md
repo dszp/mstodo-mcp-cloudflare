@@ -273,7 +273,8 @@ writes `rendered.json`.
 Run `check` before any direct `npx wrangler ... -c .wrangler/deployments/<name>/rendered.json`
 command (KV keys, `secret list`, `delete`). Those commands get no account or identity checks
 beyond that `check`, so run them from a shell where `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ENV`
-and `WRANGLER_CI_OVERRIDE_NAME` are unset. It reports a missing Worker as "no live Worker yet", which is the expected
+and `WRANGLER_CI_OVERRIDE_NAME` are unset, and keep those variables out of a root `.env` or
+`.env.local`, which wrangler also loads. It reports a missing Worker as "no live Worker yet", which is the expected
 answer before the first deploy.
 
 ### 5. Deploy
