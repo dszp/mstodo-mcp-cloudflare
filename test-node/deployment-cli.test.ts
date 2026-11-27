@@ -217,6 +217,21 @@ describe("main: render", () => {
     expect(existsSync(paths().resolvedDevVars)).toBe(false);
   });
 
+  it("deletes a stale resolved .dev.vars of another deployment too", async () => {
+    const beta = deploymentPaths(root, "beta");
+    mkdirSync(beta.renderDir, { recursive: true });
+    writeFileSync(beta.resolvedDevVars, "MS_CLIENT_SECRET=stale\n");
+    expect(await main(["render", "alpha"], harness().deps)).toBe(0);
+    expect(existsSync(beta.resolvedDevVars)).toBe(false);
+  });
+
+  it("sweeps even when the command line is refused", async () => {
+    mkdirSync(paths().renderDir, { recursive: true });
+    writeFileSync(paths().resolvedDevVars, "MS_CLIENT_SECRET=stale\n");
+    expect(await main(["deploy"], harness().deps)).toBe(1);
+    expect(existsSync(paths().resolvedDevVars)).toBe(false);
+  });
+
   it("leaves the resolved .dev.vars of a running dev alone", async () => {
     mkdirSync(paths().renderDir, { recursive: true });
     writeFileSync(paths().resolvedDevVars, "MS_CLIENT_SECRET=live\n");

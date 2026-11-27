@@ -1,6 +1,6 @@
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
-import { basename, dirname } from "node:path";
-import { DeploymentRefusal } from "./schema.ts";
+import { chmodSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { DeploymentRefusal, deploymentPaths } from "./schema.ts";
 import type { Runner } from "./runner.ts";
 
 // Keep in sync with .dev.vars.example.
@@ -140,6 +140,23 @@ export function devLockHeld(lockPath: string): boolean {
     return false;
   }
   return Number.isInteger(pid) && pid > 0 && alive(pid);
+}
+
+// A crash, SIGKILL or closed terminal during `dev` can leave resolved secrets on
+// disk, for any deployment. Every command removes each one whose dev lock is not
+// held by a live process, not only the named deployment's.
+export function sweepResolvedDevVars(repoRoot: string): void {
+  let entries;
+  try {
+    entries = readdirSync(join(repoRoot, ".wrangler", "deployments"), { withFileTypes: true });
+  } catch {
+    return; // nothing rendered yet
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const p = deploymentPaths(repoRoot, entry.name);
+    if (!devLockHeld(p.devLock)) removeResolvedDevVars(p.resolvedDevVars);
+  }
 }
 
 // One `dev` per deployment. The lock holds the pid; a dead pid is replaced.

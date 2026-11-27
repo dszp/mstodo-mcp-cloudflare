@@ -9,8 +9,10 @@ import {
   readDevVar,
   removeResolvedDevVars,
   resolveSecret,
+  sweepResolvedDevVars,
   writeResolvedDevVars,
 } from "../scripts/deployment/dev-vars.ts";
+import { deploymentPaths } from "../scripts/deployment/schema.ts";
 import { nodeRunner, type Runner } from "../scripts/deployment/runner.ts";
 
 const dirs: string[] = [];
@@ -249,6 +251,33 @@ describe("acquireDevLock", () => {
     const release = acquireDevLock(lock);
     expect(existsSync(lock)).toBe(true);
     release();
+  });
+});
+
+describe("sweepResolvedDevVars", () => {
+  const seed = (root: string, name: string, lockPid?: string): ReturnType<typeof deploymentPaths> => {
+    const p = deploymentPaths(root, name);
+    mkdirSync(p.renderDir, { recursive: true });
+    writeFileSync(p.resolvedDevVars, "MS_CLIENT_SECRET='x'\n");
+    if (lockPid !== undefined) writeFileSync(p.devLock, lockPid);
+    return p;
+  };
+
+  it("removes every deployment's resolved .dev.vars unless a live pid holds its lock", () => {
+    const root = tmp();
+    const unlocked = seed(root, "alpha");
+    const deadLock = seed(root, "beta", "999999");
+    const garbageLock = seed(root, "gamma", "garbage");
+    const live = seed(root, "delta", String(process.pid));
+    sweepResolvedDevVars(root);
+    expect(existsSync(unlocked.resolvedDevVars), "alpha").toBe(false);
+    expect(existsSync(deadLock.resolvedDevVars), "beta").toBe(false);
+    expect(existsSync(garbageLock.resolvedDevVars), "gamma").toBe(false);
+    expect(existsSync(live.resolvedDevVars), "delta").toBe(true);
+  });
+
+  it("does nothing when no deployment has rendered yet", () => {
+    expect(() => sweepResolvedDevVars(tmp())).not.toThrow();
   });
 });
 

@@ -27,6 +27,7 @@ import {
   readDevVar,
   removeResolvedDevVars,
   resolveSecret,
+  sweepResolvedDevVars,
   writeResolvedDevVars,
 } from "./dev-vars.ts";
 import { deployedContent, diffRenders } from "./diff.ts";
@@ -79,12 +80,10 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 }
 
 async function runCommand(argv: string[], deps: CliDeps): Promise<number> {
+  // First, before even the arguments: resolved secrets a dead `dev` left behind.
+  sweepResolvedDevVars(deps.repoRoot);
   const args = parseArgs(argv);
   const paths = deploymentPaths(deps.repoRoot, args.name);
-
-  // A crash or SIGKILL during `dev` can leave resolved secrets on disk; every
-  // command clears them first, unless a live `dev` for this name is using them.
-  if (!devLockHeld(paths.devLock)) removeResolvedDevVars(paths.resolvedDevVars);
 
   try {
     return await runChecked(args, paths, deps);
@@ -379,13 +378,13 @@ function spawnInteractive(repoRoot: string) {
       const forward = (signal: NodeJS.Signals) => () => {
         child.kill(signal);
       };
-      const onInt = forward("SIGINT");
-      const onTerm = forward("SIGTERM");
-      process.on("SIGINT", onInt);
-      process.on("SIGTERM", onTerm);
+      // SIGHUP is a closed terminal or SSH session; Node's default would exit at
+      // once and skip dev's cleanup of the resolved secrets.
+      const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+      const handlers = signals.map((signal) => [signal, forward(signal)] as const);
+      for (const [signal, handler] of handlers) process.on(signal, handler);
       const finish = (code: number) => {
-        process.off("SIGINT", onInt);
-        process.off("SIGTERM", onTerm);
+        for (const [signal, handler] of handlers) process.off(signal, handler);
         done(code);
       };
       child.on("error", () => finish(127));
