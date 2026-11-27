@@ -260,7 +260,10 @@ npm run check -- <name>
 
 `check` renders the config, validates it against your other deployments and the shell, and
 reads the live Worker (read-only) to compare KV bindings, custom domains, `workers_dev` and
-preview URLs. When everything passes it writes `rendered.json`.
+preview URLs. It exits 1, and writes no `rendered.json`, when a custom domain conflicts, when
+a deploy would detach a custom domain that is attached live but missing from `custom_domains`,
+or when `workers_dev` or `preview_urls` differs from the live value. When everything passes it
+writes `rendered.json`.
 
 Run `check` before any direct `npx wrangler ... -c .wrangler/deployments/<name>/rendered.json`
 command (KV keys, `secret list`, `delete`). Those commands get no account or identity checks
@@ -274,7 +277,10 @@ answer before the first deploy.
 npm run deploy -- <name>
 ```
 
-The first deploy shows what it will create and asks you to confirm. `deploy` needs an
+The first deploy shows the vars and bindings it will send (and, for a Worker that already
+exists, the live `workers_dev`, preview URL and custom-domain settings) and asks you to confirm.
+Every deploy also asks before it detaches a custom domain missing from `custom_domains` or
+changes `workers_dev` or `preview_urls` from the live value; `--non-interactive` refuses both. `deploy` needs an
 interactive terminal (stdin and stdout on a TTY, `CI` unset). From a script, pass
 `--non-interactive`, which refuses any config change you haven't seen on an earlier
 interactive deploy. Pass `--adopt` only to take over an existing Worker whose KV bindings

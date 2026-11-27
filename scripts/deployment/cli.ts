@@ -29,7 +29,7 @@ import {
   resolveSecret,
   writeResolvedDevVars,
 } from "./dev-vars.ts";
-import { diffRenders } from "./diff.ts";
+import { deployedContent, diffRenders } from "./diff.ts";
 import {
   attachedDomains,
   checkDomainChangeset,
@@ -151,6 +151,11 @@ function publishRender(ctx: Ctx): void {
   writeRender(ctx.deps.repoRoot, ctx.dep.name, ctx.rendered);
 }
 
+// "live X, file Y", marked when they differ.
+const flag = (live: boolean, file: boolean): string => `live ${live}, file ${file}${live === file ? "" : " (mismatch)"}`;
+
+// Exits 1 on anything deploy would refuse or ask about: a conflicting domain, a
+// domain the deploy would detach, or a workers.dev / preview URL mismatch.
 async function check(ctx: Ctx): Promise<number> {
   const { dep, deps } = ctx;
   deps.log("local checks OK: base_url, other deployment files, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ENV, WRANGLER_CI_OVERRIDE_NAME");
@@ -166,14 +171,34 @@ async function check(ctx: Ctx): Promise<number> {
   deps.log(`custom domains attached: ${list(await attachedDomains(api, dep))}`);
   const cs = await checkDomainChangeset(api, dep);
   deps.log(`custom domain changeset: added: ${list(cs.added)}; removed: ${list(cs.removed)}; conflicting: ${list(cs.conflicting)}`);
+  const detaches = detachedDomains(dep, cs.removed);
+  if (cs.removed.length > 0 && detaches.length === 0) {
+    deps.log("  custom_domains is empty, so deploy leaves them attached");
+  }
   const sub = await liveSubdomain(api, dep);
-  const flag = (live: boolean, file: boolean) => `live ${live}, file ${file}${live === file ? "" : " (mismatch)"}`;
   deps.log(`workers.dev: ${flag(sub.enabled, dep.workers_dev)}`);
   deps.log(`preview URLs: ${flag(sub.previews_enabled, dep.preview_urls)}`);
+
+  const ok =
+    cs.conflicting.length === 0 &&
+    detaches.length === 0 &&
+    sub.enabled === dep.workers_dev &&
+    sub.previews_enabled === dep.preview_urls;
+  if (!ok) {
+    if (!devLockHeld(ctx.paths.devLock)) removeRender(deps.repoRoot, dep.name);
+    deps.log("check failed: deploy would refuse or ask about the lines marked above");
+    return 1;
+  }
   publishRender(ctx);
   deps.log(`rendered: ${ctx.paths.rendered}`);
   return 0;
 }
+
+// Wrangler sends the custom-domain changeset with replace_state=true only when the
+// config has custom-domain routes (cli.js 166957 in wrangler 4.158); with none it
+// leaves attached domains alone, so `removed` detaches something only then.
+const detachedDomains = (dep: DeploymentFile, removed: string[]): string[] =>
+  dep.custom_domains.length > 0 ? removed : [];
 
 async function dryRun(ctx: Ctx): Promise<number> {
   // Wrangler's dry run makes no API calls, so the live check is the only one.
@@ -205,31 +230,63 @@ async function deploy(ctx: Ctx): Promise<number> {
       "not an interactive session (stdin and stdout on a terminal, CI unset); pass --non-interactive to deploy without prompts",
     );
   }
+  const refuseUnattended = (field: string, reason: string): void => {
+    if (args.nonInteractive) throw new DeploymentRefusal(file, field, `${reason}; deploy once from a terminal to confirm it`);
+  };
 
   const api = await deps.api(dep);
   const { found } = await inspectLiveWorker(api, dep, { adopt: args.adopt });
+  const last = readLastDeployed(ctx);
+  // Whatever the operator must see and confirm before wrangler runs.
+  let ask = false;
+
   // Checked in every mode: wrangler's own takeover prompt is skipped whenever it
   // decides the session is not interactive, which this script cannot fully predict.
-  // The changeset endpoint needs an uploaded script; a first deploy always shows
-  // a change, so it is confirmed interactively or refused below.
+  // The changeset and subdomain endpoints need an uploaded script; a first deploy
+  // always shows a change, so it is confirmed interactively or refused below.
   if (found) {
     const cs = await checkDomainChangeset(api, dep);
     if (cs.conflicting.length > 0) {
       throw new DeploymentRefusal(file, "custom_domains", `conflicts with existing DNS or domains: ${cs.conflicting.join(", ")}`);
     }
+    const detaches = detachedDomains(dep, cs.removed);
+    if (detaches.length > 0) {
+      deps.log(`attached to ${dep.worker_name} but not in custom_domains; this deploy detaches: ${detaches.join(", ")}`);
+      refuseUnattended("custom_domains", `the deploy would detach ${detaches.join(", ")}`);
+      ask = true;
+    }
+
+    // wrangler deploy applies workers_dev and preview_urls from the config.
+    const sub = await liveSubdomain(api, dep);
+    const devMismatch = sub.enabled !== dep.workers_dev;
+    const previewMismatch = sub.previews_enabled !== dep.preview_urls;
+    if (devMismatch || previewMismatch || last === null) {
+      deps.log(`workers.dev: ${flag(sub.enabled, dep.workers_dev)}`);
+      deps.log(`preview URLs: ${flag(sub.previews_enabled, dep.preview_urls)}`);
+    }
+    if (devMismatch) refuseUnattended("workers_dev", `live is ${sub.enabled}, the file says ${dep.workers_dev}`);
+    if (previewMismatch) refuseUnattended("preview_urls", `live is ${sub.previews_enabled}, the file says ${dep.preview_urls}`);
+    if (devMismatch || previewMismatch) ask = true;
+    if (last === null) deps.log(`custom domains attached: ${list(await attachedDomains(api, dep))}`);
   }
 
-  const changes = diffRenders(readLastDeployed(ctx), ctx.rendered);
+  const changes = diffRenders(last, ctx.rendered);
   if (changes.length > 0) {
     deps.log(`changes since the last deploy from this machine:`);
     for (const line of changes) deps.log(`  ${line}`);
+    if (last === null) {
+      deps.log("this deploy sends these vars and bindings:");
+      for (const line of deployedContent(ctx.rendered)) deps.log(`  ${line}`);
+    }
     if (args.nonInteractive) {
       throw new DeploymentRefusal(file, "(changes)", "a non-interactive deploy must have no unseen changes; deploy once from a terminal");
     }
-    if (!(await deps.confirm(`Deploy these changes to ${dep.worker_name} in account ${dep.account_id}?`))) {
-      deps.log("not deployed");
-      return 1;
-    }
+    ask = true;
+  }
+
+  if (ask && !(await deps.confirm(`Deploy to ${dep.worker_name} in account ${dep.account_id}?`))) {
+    deps.log("not deployed");
+    return 1;
   }
 
   publishRender(ctx);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { diffRenders } from "../scripts/deployment/diff.ts";
+import { deployedContent, diffRenders } from "../scripts/deployment/diff.ts";
 import type { WranglerConfig } from "../scripts/deployment/render.ts";
 
 const base = (): WranglerConfig => ({
@@ -83,5 +83,17 @@ describe("diffRenders", () => {
     next.vars = { DELTA_SYNC_INTERVAL_MIN: "30", TIMEZONE: "UTC" };
     const keys = diffRenders(base(), next).map((l) => l.split(":")[0]);
     expect(keys).toEqual(["compatibility_date", "name", "vars.DELTA_SYNC_INTERVAL_MIN"]);
+  });
+});
+
+describe("deployedContent", () => {
+  it("lists each var and every structured top-level key except paths and migrations", () => {
+    expect(deployedContent(base())).toEqual([
+      'vars.DELTA_SYNC_INTERVAL_MIN: "15"',
+      'vars.TIMEZONE: "UTC"',
+      'compatibility_flags: ["nodejs_compat"]',
+      'kv_namespaces: [{"binding":"TODO_CACHE","id":"0123"}]',
+      'triggers: {"crons":["*/15 * * * *"]}',
+    ]);
   });
 });

@@ -51,3 +51,20 @@ export function diffRenders(prev: WranglerConfig | null, next: WranglerConfig): 
   }
   return [...changes.keys()].sort().map((label) => changes.get(label) as string);
 }
+
+// What a first deploy from this machine sends, for the confirmation to show: each
+// var, then every top-level key holding an object or array (bindings, routes,
+// triggers, flags), so a binding kind the example gains later is listed too.
+// migrations is history, not configuration. Nothing here is secret: secrets are
+// never in the render.
+export function deployedContent(config: WranglerConfig): string[] {
+  const out: string[] = [];
+  const vars = isRecord(config.vars) ? config.vars : {};
+  for (const name of Object.keys(vars).sort()) out.push(`vars.${name}: ${stable(vars[name])}`);
+  for (const key of Object.keys(config).sort()) {
+    if (key === "vars" || key === "migrations" || IGNORED.has(key)) continue;
+    const v = config[key];
+    if (typeof v === "object" && v !== null) out.push(`${key}: ${stable(v)}`);
+  }
+  return out;
+}

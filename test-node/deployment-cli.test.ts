@@ -238,7 +238,9 @@ describe("main: check", () => {
         getSubdomain: async () => ({ enabled: true, previews_enabled: true }),
       }),
     });
-    expect(await main(["check", "alpha"], h.deps)).toBe(0);
+    // The preview URL mismatch fails the check; the removal alone would not, with
+    // no custom_domains in the file (wrangler then leaves attached domains alone).
+    expect(await main(["check", "alpha"], h.deps)).toBe(1);
     const out = h.logs.join("\n");
     expect(out).toMatch(/live Worker example-alpha: found, KV bindings match/);
     expect(out).toMatch(/custom domains attached: a\.example\.test$/m);
@@ -246,6 +248,42 @@ describe("main: check", () => {
     expect(out).toMatch(/preview URLs: live true, file false \(mismatch\)/);
     expect(out).toMatch(/workers\.dev: live true, file true$/m);
     expect(h.spawns).toEqual([]);
+  });
+
+  it("exits 0 when live matches the file", async () => {
+    const h = harness();
+    expect(await main(["check", "alpha"], h.deps)).toBe(0);
+  });
+
+  it("exits 1 on a conflicting custom domain", async () => {
+    const h = harness({
+      apiImpl: liveApi({ domainChangeset: async () => ({ added: [], removed: [], conflicting: ["c.example.test"] }) }),
+    });
+    expect(await main(["check", "alpha"], h.deps)).toBe(1);
+    expect(existsSync(paths().rendered)).toBe(false);
+  });
+
+  it("exits 1 when a deploy would detach a custom domain", async () => {
+    writeDeployment("alpha", { ...alphaFile, custom_domains: ["a.example.test"] });
+    const h = harness({
+      apiImpl: liveApi({ domainChangeset: async () => ({ added: [], removed: ["b.example.test"], conflicting: [] }) }),
+    });
+    expect(await main(["check", "alpha"], h.deps)).toBe(1);
+    expect(h.logs.join("\n")).toMatch(/removed: b\.example\.test/);
+  });
+
+  it("exits 0 when domains are attached live but the file lists none, which wrangler leaves alone", async () => {
+    const h = harness({
+      apiImpl: liveApi({ domainChangeset: async () => ({ added: [], removed: ["b.example.test"], conflicting: [] }) }),
+    });
+    expect(await main(["check", "alpha"], h.deps)).toBe(0);
+    expect(h.logs.join("\n")).toMatch(/custom_domains is empty, so deploy leaves them attached/);
+  });
+
+  it("exits 1 on a workers.dev mismatch", async () => {
+    const h = harness({ apiImpl: liveApi({ getSubdomain: async () => ({ enabled: false, previews_enabled: false }) }) });
+    expect(await main(["check", "alpha"], h.deps)).toBe(1);
+    expect(h.logs.join("\n")).toMatch(/workers\.dev: live false, file true \(mismatch\)/);
   });
 
   it("skips the changeset when no Worker exists yet", async () => {
@@ -343,7 +381,7 @@ describe("main: deploy", () => {
   it("asks before deploying changes, then runs wrangler deploy --strict and records the render", async () => {
     const h = harness();
     expect(await main(["deploy", "alpha", "--minify"], h.deps)).toBe(0);
-    expect(h.confirms).toEqual([`Deploy these changes to example-alpha in account ${ACCOUNT}?`]);
+    expect(h.confirms).toEqual([`Deploy to example-alpha in account ${ACCOUNT}?`]);
     expect(h.spawns).toEqual([
       { args: ["wrangler", "deploy", "--strict", "-c", paths().rendered, "--env=", "--minify"], env: CHILD_ENV },
     ]);
@@ -363,6 +401,86 @@ describe("main: deploy", () => {
     });
     expect(await main(["deploy", "alpha"], h.deps)).toBe(1);
     expect(h.spawns).toEqual([]);
+  });
+});
+
+describe("main: deploy gates what check reports", () => {
+  const withDomain = () => writeDeployment("alpha", { ...alphaFile, custom_domains: ["a.example.test"] });
+  const removing = liveApi({ domainChangeset: async () => ({ added: [], removed: ["b.example.test"], conflicting: [] }) });
+
+  it("lists a custom domain the deploy would detach and asks, even with no config change", async () => {
+    withDomain();
+    await seedLastDeployed();
+    const h = harness({ apiImpl: removing });
+    expect(await main(["deploy", "alpha"], h.deps)).toBe(0);
+    expect(h.logs.join("\n")).toMatch(/this deploy detaches: b\.example\.test$/m);
+    expect(h.confirms).toHaveLength(1);
+    expect(h.spawns).toHaveLength(1);
+  });
+
+  it("does not deploy when the operator declines the detach", async () => {
+    withDomain();
+    await seedLastDeployed();
+    const h = harness({ apiImpl: removing, confirm: async () => false });
+    expect(await main(["deploy", "alpha"], h.deps)).toBe(1);
+    expect(h.spawns).toEqual([]);
+  });
+
+  it("refuses a detach under --non-interactive", async () => {
+    withDomain();
+    await seedLastDeployed();
+    const h = harness({ interactive: false, apiImpl: removing });
+    expect(await main(["deploy", "alpha", "--non-interactive"], h.deps)).toBe(1);
+    expect(h.spawns).toEqual([]);
+    expect(h.logs.at(-1)).toMatch(/^refused: deployments\/alpha\/deployment\.jsonc: custom_domains: .*b\.example\.test/);
+  });
+
+  it("does not gate domains attached live when the file lists none", async () => {
+    await seedLastDeployed();
+    const h = harness({ apiImpl: removing });
+    expect(await main(["deploy", "alpha"], h.deps)).toBe(0);
+    expect(h.confirms).toEqual([]);
+  });
+
+  it("prints a workers.dev or preview URL mismatch and asks", async () => {
+    await seedLastDeployed();
+    const h = harness({ apiImpl: liveApi({ getSubdomain: async () => ({ enabled: true, previews_enabled: true }) }) });
+    expect(await main(["deploy", "alpha"], h.deps)).toBe(0);
+    expect(h.logs.join("\n")).toMatch(/preview URLs: live true, file false \(mismatch\)/);
+    expect(h.confirms).toHaveLength(1);
+  });
+
+  for (const [field, sub] of [
+    ["workers_dev", { enabled: false, previews_enabled: false }],
+    ["preview_urls", { enabled: true, previews_enabled: true }],
+  ] as const) {
+    it(`refuses a ${field} mismatch under --non-interactive`, async () => {
+      await seedLastDeployed();
+      const h = harness({ interactive: false, apiImpl: liveApi({ getSubdomain: async () => sub }) });
+      expect(await main(["deploy", "alpha", "--non-interactive"], h.deps)).toBe(1);
+      expect(h.spawns).toEqual([]);
+      expect(h.logs.at(-1)).toMatch(new RegExp(`^refused: deployments/alpha/deployment\\.jsonc: ${field}: `));
+    });
+  }
+
+  it("shows live against file, attached domains, vars and bindings before a first deploy to an existing Worker", async () => {
+    const h = harness({
+      apiImpl: liveApi({ listCustomDomains: async () => [{ hostname: "a.example.test", service: "example-alpha" }] }),
+    });
+    expect(await main(["deploy", "alpha"], h.deps)).toBe(0);
+    const out = h.logs.join("\n");
+    expect(out).toMatch(/workers\.dev: live true, file true$/m);
+    expect(out).toMatch(/preview URLs: live false, file false$/m);
+    expect(out).toMatch(/custom domains attached: a\.example\.test$/m);
+    expect(out).toMatch(/vars\.SERVICE_BASE_URL: "https:\/\/example-alpha\.example\.workers\.dev"/);
+    expect(out).toMatch(/kv_namespaces: .*0123456789abcdef0123456789abcda1/);
+    expect(h.confirms).toHaveLength(1);
+  });
+
+  it("shows vars and bindings before the first deploy of a new Worker", async () => {
+    const h = harness({ apiImpl: liveApi({ getWorkerKv: async () => ({ found: false }) }) });
+    expect(await main(["deploy", "alpha"], h.deps)).toBe(0);
+    expect(h.logs.join("\n")).toMatch(/kv_namespaces: .*0123456789abcdef0123456789abcda1/);
   });
 });
 

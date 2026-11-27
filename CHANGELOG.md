@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CLOUDFLARE_ACCOUNT_ID` that names another account, and a shell `CLOUDFLARE_ENV` or
   `WRANGLER_CI_OVERRIDE_NAME`. `deploy` shows the changes
   since the last deploy and needs an interactive terminal, or `--non-interactive` with no pending changes.
+  It also asks before detaching a custom domain missing from `custom_domains` or changing
+  `workers_dev` or `preview_urls` from the live value, and `--non-interactive` refuses both;
+  `check` exits 1 on those and on a conflicting domain.
 - `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `ACCESS_HANDOFF_REDIRECT_URIS`, `APPLE_TEAM_ID` and `APPLE_BUNDLE_IDS`
   are vars in `wrangler.example.jsonc`, empty by default (off). A deployment sets them under `vars`.
 
