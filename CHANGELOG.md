@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] – 2026-11-27
+
 ### Added
 - **The Claude connector uses the attachment blob store.** `get_attachment` and download
   links serve the R2 copy when there is one and keep a copy when there isn't; files
@@ -29,42 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Index schema migration v13 adds `theme_images`, `list_images` and `app_settings`.
   Self-hosters who want these features create a bucket and add the `r2_buckets` entry
   from `wrangler.example.jsonc`.
-
-### Changed
-- **MCP session objects delete themselves after a day without a request.** Each Claude
-  conversation opens its own session, and Claude never ends one, so every conversation
-  left a Durable Object behind for good (6,561 objects, 821 MB on one server). The agent
-  class is renamed `MSToDoMCP` → `MSToDoSession`, and **migration v3 deletes every object
-  of the old class**: open Claude conversations get a 404 on their next tool call and start
-  a new session. Its binding is renamed `TODO_INDEX` → `MCP_SESSION`, because Cloudflare won't delete a
-  class while a binding of the same name remains. Self-hosters need the new binding and
-  the v3 migration in their own wrangler config (see `wrangler.example.jsonc`).
-- **The push socket coalesces `changed` messages** (docs/SYNC-API.md section 7.1). The
-  first change after a quiet spell is sent at once; changes in the next 3 seconds are sent
-  as one message with the newest cursor. A `task.create` through the sync API now sends
-  two messages instead of three, and a baseline sends one every 3 seconds instead of one
-  per page.
-- **A list's class is now its sync setting** (docs/SYNC-API.md section 1.2). `todo` and
-  unclassified lists sync as before, with a Graph subscription. `reference` lists sync after
-  every todo list in each cycle, get no subscription, and have steps, links and attachments
-  fetched for open tasks only. `excluded` lists are no longer mirrored (they stay in
-  `list_lists` and readable live). A pin in `overrides` decides a list ahead of the legacy
-  `no_sync`/`archive` arrays, the flaggedEmails default and name patterns. **Deploying this
-  stops mirroring any list currently classified `excluded`**, including a Flagged Emails list
-  pinned `excluded` even when `sync_flagged_emails` is on; pin it `reference` first to keep it.
-- `list_lists` reports `type` on every list, not only when patterns or pins exist.
-- **`set_list_config` merges `overrides` per key** instead of replacing the map: the lists it
-  names change, `null` removes a pin, and other pins stay. A caller holding an old copy of the
-  map can no longer revert pins set since.
-- A list made with `create_list` or the sync API's `list.create` is pinned `todo`, so a name
-  matching an `excluded` pattern can't drop it from the mirror.
-- Reads filtered to an excluded list (`query_tasks`, `search_tasks`, `search_checklist_items`,
-  `get_pending_across_lists`, `get_recently_completed`) return `not_mirrored` with a note
-  instead of an unexplained empty result. `list_tasks` on an excluded list pages through
-  `next_cursor` instead of returning one page. `list_my_day_tasks` names every excluded list,
-  since My Day tasks in them (flagged emails, for one) are missing from it.
-
-### Added
 - **The sync API writes a list's sidebar appearance** (docs/SYNC-API.md sections 5.2 and
   10.4). `list.update` takes `theme` (`{ color, background }`, To Do's preset names) and
   `group_id` (a group's sid, or `null` to ungroup), and the new `list.reorder` op moves a
@@ -104,6 +70,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sync API: `GET /api/v1/attachments/{sid}` streams an attachment's bytes from Graph to the
   app, with an `/api/v1` token (docs/SYNC-API.md section 4.6). `GET /api/v1/sync/info`
   reports `capabilities.attachment_download`.
+
+### Changed
+- **MCP session objects delete themselves after a day without a request.** Each Claude
+  conversation opens its own session, and Claude never ends one, so every conversation
+  left a Durable Object behind for good (6,561 objects, 821 MB on one server). The agent
+  class is renamed `MSToDoMCP` → `MSToDoSession`, and **migration v3 deletes every object
+  of the old class**: open Claude conversations get a 404 on their next tool call and start
+  a new session. Its binding is renamed `TODO_INDEX` → `MCP_SESSION`, because Cloudflare won't delete a
+  class while a binding of the same name remains. Self-hosters need the new binding and
+  the v3 migration in their own wrangler config (see `wrangler.example.jsonc`).
+- **The push socket coalesces `changed` messages** (docs/SYNC-API.md section 7.1). The
+  first change after a quiet spell is sent at once; changes in the next 3 seconds are sent
+  as one message with the newest cursor. A `task.create` through the sync API now sends
+  two messages instead of three, and a baseline sends one every 3 seconds instead of one
+  per page.
+- **A list's class is now its sync setting** (docs/SYNC-API.md section 1.2). `todo` and
+  unclassified lists sync as before, with a Graph subscription. `reference` lists sync after
+  every todo list in each cycle, get no subscription, and have steps, links and attachments
+  fetched for open tasks only. `excluded` lists are no longer mirrored (they stay in
+  `list_lists` and readable live). A pin in `overrides` decides a list ahead of the legacy
+  `no_sync`/`archive` arrays, the flaggedEmails default and name patterns. **Deploying this
+  stops mirroring any list currently classified `excluded`**, including a Flagged Emails list
+  pinned `excluded` even when `sync_flagged_emails` is on; pin it `reference` first to keep it.
+- `list_lists` reports `type` on every list, not only when patterns or pins exist.
+- **`set_list_config` merges `overrides` per key** instead of replacing the map: the lists it
+  names change, `null` removes a pin, and other pins stay. A caller holding an old copy of the
+  map can no longer revert pins set since.
+- A list made with `create_list` or the sync API's `list.create` is pinned `todo`, so a name
+  matching an `excluded` pattern can't drop it from the mirror.
+- Reads filtered to an excluded list (`query_tasks`, `search_tasks`, `search_checklist_items`,
+  `get_pending_across_lists`, `get_recently_completed`) return `not_mirrored` with a note
+  instead of an unexplained empty result. `list_tasks` on an excluded list pages through
+  `next_cursor` instead of returning one page. `list_my_day_tasks` names every excluded list,
+  since My Day tasks in them (flagged emails, for one) are missing from it.
 
 ### Fixed
 - **Completion dates follow the owner's day.** Completing a task through the sync API or
