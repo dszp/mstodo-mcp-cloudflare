@@ -80,6 +80,8 @@ export interface ExistingAttachment {
   id: string;
   name?: string;
   size: number;
+  // Graph's lastModifiedDateTime, when it sends one.
+  modified?: string;
 }
 
 /**
@@ -98,7 +100,7 @@ export async function listExistingFileAttachments(
   const out: ExistingAttachment[] = [];
   for (const att of result.items) {
     if (att["@odata.type"] === "#microsoft.graph.taskFileAttachment" && typeof att.size === "number") {
-      out.push({ id: att.id, name: att.name, size: att.size });
+      out.push({ id: att.id, name: att.name, size: att.size, modified: att.lastModifiedDateTime });
     }
   }
   return out;

@@ -81,6 +81,32 @@ describe("a create's sid", () => {
     expect(c.adoptSid("step", APP, "S1")).toBe(true);
     expect(changesSince(c, pulled.cursor).changes.map((x) => x.id)).toEqual([taskSid]);
   });
+  it("logs an attachment's task again when the attachment's minted sid is retired", () => {
+    const { c } = core();
+    c.upsertTask(task("G1"), "L1");
+    c.replaceAttachments("G1", "L1", [
+      { id: "F1", name: "a.pdf", size: 1, contentType: "application/pdf", "@odata.type": "#microsoft.graph.taskFileAttachment" },
+    ] as never);
+    const pulled = changesSince(c, null);
+    const taskSid = c.syncTaskSids(["G1"]).G1;
+    expect(c.adoptSid("attachment", APP, "F1")).toBe(true);
+    const after = changesSince(c, pulled.cursor).changes;
+    expect(after.map((x) => x.id)).toEqual([taskSid]);
+    const t = after[0] as Extract<FeedChange, { kind: "task"; deleted: false }>;
+    expect(t.data.attachments.map((a) => a.id)).toEqual([APP]);
+  });
+});
+
+describe("a mutation's stored result", () => {
+  it("keeps an applied result when a later attempt finishes with a rejection", () => {
+    const { c } = core();
+    c.mutationBegin("m1", "p", 1_000, 60_000);
+    // The lease runs out and a retry takes over while the first attempt runs.
+    expect(c.mutationBegin("m1", "p", 70_000, 60_000)).toMatchObject({ state: "new", prior_at_ms: 1_000 });
+    c.mutationFinish("m1", { status: "applied", sid: APP }, []);
+    c.mutationFinish("m1", { status: "rejected", error: "sid_in_use" }, []);
+    expect(c.mutationBegin("m1", "p", 80_000, 60_000)).toEqual({ state: "done", result: { status: "applied", sid: APP } });
+  });
 });
 
 describe("a child of a parent whose create failed in the same batch", () => {
