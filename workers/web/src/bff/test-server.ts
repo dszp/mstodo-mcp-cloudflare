@@ -4,7 +4,7 @@
 
 type Client = { secret: string; redirect_uris: string[]; client_name: string };
 type Code = { client_id: string; redirect_uri: string; challenge: string; cf_access?: boolean };
-type Grant = { client_id: string; refresh_token: string; revoked: boolean };
+type Grant = { client_id: string; refresh_token: string; previous_refresh_token?: string; revoked: boolean };
 
 /** How the anonymous /api/v1/sync/info probe answers. */
 export type AccessMode = "off" | "redirect" | "forbidden";
@@ -32,6 +32,12 @@ export class TestServer {
   readonly grants: Grant[] = [];
   readonly registrations: unknown[] = [];
   readonly tokenRequests: { headers: Headers; form: URLSearchParams }[] = [];
+  /** Authenticated /api/v1 requests: path with query, and headers. */
+  readonly apiRequests: { path: string; headers: Headers }[] = [];
+  /** When set, answers authenticated /api/v1 requests instead of the default JSON echo. */
+  apiReply: ((req: Request) => Response | Promise<Response>) | null = null;
+  /** The next this-many refresh grants answer invalid_grant, as for a superseded token. */
+  refreshRefusals = 0;
   access: AccessMode = "off";
   /** When set, /token answers with this status and an empty body. */
   tokenFailure: number | null = null;
@@ -42,6 +48,8 @@ export class TestServer {
   /** When set, /register answers with this status. */
   registerFailure: number | null = null;
   #codes = new Map<string, Code>();
+  /** Issued access tokens and the grant each belongs to. */
+  #accessTokens = new Map<string, Grant>();
 
   constructor(readonly origin: string) {}
 
@@ -61,6 +69,7 @@ export class TestServer {
     if (url.pathname === "/api/v1/sync/info" && req.method === "GET" && !req.headers.has("authorization")) {
       return this.#probe();
     }
+    if (url.pathname.startsWith("/api/v1/")) return this.#api(req, url);
     return new Response("not found", { status: 404 });
   }
 
@@ -182,6 +191,7 @@ export class TestServer {
       if (grant) grant.revoked = true;
       return new Response("", { status: 200 });
     }
+    if (form.get("grant_type") === "refresh_token") return this.#refresh(form, clientId);
     if (form.get("grant_type") !== "authorization_code") {
       return json({ error: "unsupported_grant_type", error_description: "Grant type not supported" }, 400);
     }
@@ -196,9 +206,10 @@ export class TestServer {
       return json({ error: "invalid_grant", error_description: "Invalid PKCE code_verifier" }, 400);
     }
     const refresh_token = `refresh-${randomId()}`;
-    this.grants.push({ client_id: clientId, refresh_token, revoked: false });
+    const grant: Grant = { client_id: clientId, refresh_token, revoked: false };
+    this.grants.push(grant);
     return json({
-      access_token: `access-${randomId()}`,
+      access_token: this.#issueAccess(grant),
       token_type: "bearer",
       expires_in: 3600,
       scope: "",
@@ -208,6 +219,61 @@ export class TestServer {
       // started at /app/signin.
       ...(code.cf_access ? { cf_access_token: this.cfAccessTokenOverride ?? CF_ACCESS_TOKEN, cf_access_expires_at: CF_ACCESS_EXPIRES_AT } : {}),
     });
+  }
+
+  #issueAccess(grant: Grant): string {
+    const token = `access-${randomId()}`;
+    this.#accessTokens.set(token, grant);
+    return token;
+  }
+
+  // The library's handleRefreshTokenGrant (lines 3668-3826), after the client
+  // checks in #token. The presented token may be the grant's current one or the
+  // one it replaced (isPreviousToken, line 3688): that is the grace window
+  // that lets two refreshes racing with the same token both succeed. Anything
+  // else is invalid_grant "Invalid refresh token" (line 3689); a revoked grant
+  // is gone from KV, "Grant not found" (line 3683). Every success rotates: the
+  // presented token becomes the previous one and a new one is issued (lines
+  // 3789-3795), and the response always carries it (line 3823). No
+  // cf_access_token: the OAuth front adds one only when the token callback
+  // filled the handoff slot, which it does for authorization_code alone
+  // (workers/server/src/hosts/shared/oauth.ts, lines 94-98 and 234-239).
+  #refresh(form: URLSearchParams, clientId: string): Response {
+    const presented = form.get("refresh_token");
+    if (!presented) return json({ error: "invalid_request", error_description: "Refresh token is required" }, 400);
+    if (this.refreshRefusals > 0) {
+      this.refreshRefusals--;
+      return json({ error: "invalid_grant", error_description: "Invalid refresh token" }, 400);
+    }
+    const grant = this.grants.find((g) => g.refresh_token === presented || g.previous_refresh_token === presented);
+    if (!grant || grant.revoked) return json({ error: "invalid_grant", error_description: "Grant not found" }, 400);
+    if (grant.client_id !== clientId) return json({ error: "invalid_grant", error_description: "Client ID mismatch" }, 400);
+    grant.previous_refresh_token = presented;
+    grant.refresh_token = `refresh-${randomId()}`;
+    return json({
+      access_token: this.#issueAccess(grant),
+      token_type: "bearer",
+      expires_in: 3600,
+      refresh_token: grant.refresh_token,
+      scope: "",
+      resource: `${this.origin}/api/v1`,
+    });
+  }
+
+  // The resource server: an unknown or revoked bearer token is 401
+  // invalid_token with a Bearer challenge (the library's validation in
+  // oauth-provider.js, lines 4491-4494).
+  async #api(req: Request, url: URL): Promise<Response> {
+    const m = /^Bearer (\S+)$/.exec(req.headers.get("authorization") ?? "");
+    const grant = m ? this.#accessTokens.get(m[1]) : undefined;
+    if (!grant || grant.revoked) {
+      return json({ error: "invalid_token", error_description: "Invalid access token" }, 401, {
+        "www-authenticate": 'Bearer error="invalid_token"',
+      });
+    }
+    this.apiRequests.push({ path: url.pathname + url.search, headers: new Headers(req.headers) });
+    if (this.apiReply) return this.apiReply(req);
+    return json({ path: url.pathname, search: url.search });
   }
 
   #probe(): Response {

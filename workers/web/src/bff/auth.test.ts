@@ -25,6 +25,7 @@ beforeEach(() => {
     upstream: upstreamVia(SERVER, (r) => server.fetch(r)),
     now: () => NOW,
     random: (n) => crypto.getRandomValues(new Uint8Array(n)),
+    sleep: async () => {},
   };
 });
 

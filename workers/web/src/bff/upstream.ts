@@ -20,6 +20,8 @@ export type BffConfig = {
   /** Epoch seconds, like every time in the session record. */
   now(): number;
   random(n: number): Uint8Array;
+  /** Waits `ms` milliseconds; the host passes a setTimeout wrapper, tests a fake. */
+  sleep(ms: number): Promise<void>;
 };
 
 /**
