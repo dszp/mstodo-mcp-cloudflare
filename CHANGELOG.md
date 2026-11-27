@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Named deployments.** Each deployment is a gitignored folder, `deployments/<name>/`, with a
+  `deployment.jsonc` (account ID, Worker name, `base_url`, custom domains, KV IDs, R2 buckets,
+  var overrides), a `.dev.vars` and a `last-deployed.json`. `deployment.example.jsonc` shows the shape.
+- **`npm run render|check|dry-run|deploy|secrets|dev|tail -- <name>`.** The commands render
+  `wrangler.example.jsonc` plus the deployment file into `.wrangler/deployments/<name>/rendered.json`.
+  They refuse a missing or colliding deployment, a live Worker whose KV bindings differ from the
+  file, and a shell `CLOUDFLARE_ACCOUNT_ID` that names another account. `deploy` shows the changes
+  since the last deploy and needs an interactive terminal, or `--non-interactive` with no pending changes.
+
+### Changed
+- The package name is `potem-server`.
+- `npm run types` reads `wrangler.example.jsonc`, as CI does.
+- A new binding goes in `wrangler.example.jsonc` once; every deployment picks it up on its next deploy.
+
+### Removed
+- `scripts/push-secrets.sh`; `npm run secrets -- <name>` replaces it.
+- The root `wrangler.jsonc`. Deploys no longer read it, and `config-live/` is no longer used.
+
 ## [0.18.0] – 2026-11-27
 
 ### Added

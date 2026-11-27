@@ -2,9 +2,10 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "potem-server",
 
-  // Copy this file to `wrangler.jsonc` and fill in the account-specific values
-  // below. The real `wrangler.jsonc` is gitignored (it holds your account_id and
-  // KV namespace IDs). The test pool (vitest.config.ts) reads THIS example so
+  // The template every deployment is rendered from: `npm run deploy -- <name>` fills
+  // the account-specific values below from deployments/<name>/deployment.jsonc
+  // (gitignored) into .wrangler/deployments/<name>/rendered.json. Leave them as
+  // placeholders here. The test pool (vitest.config.ts) reads THIS example so
   // `npm test` works on a fresh clone without secrets.
   "account_id": "<your-cloudflare-account-id>",
   "main": "src/hosts/cloudflare/worker.ts",

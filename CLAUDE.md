@@ -9,11 +9,11 @@ The server is becoming the backend of **Potem**, a task app for macOS and iOS th
 ## Commands
 
 ```bash
-npm run dev          # wrangler dev — local Worker using .dev.vars
+npm run dev -- <name>      # wrangler dev for deployments/<name>, using its .dev.vars
 npm test             # vitest run (all tests, via @cloudflare/vitest-pool-workers)
 npm run test:watch   # vitest watch mode
-npm run types        # wrangler types — regenerate worker-configuration.d.ts after binding changes
-npm run deploy       # wrangler deploy
+npm run types        # wrangler types -c wrangler.example.jsonc — regenerate worker-configuration.d.ts after binding changes
+npm run render|check|dry-run|deploy|secrets|tail -- <name> [flags]   # named deployments, see below
 npm run build:node   # esbuild the Node host into dist/main.mjs
 npm run start:node   # node dist/main.mjs (needs SERVICE_BASE_URL + the MS_* / OWNER_EMAIL env)
 
@@ -23,24 +23,26 @@ npx vitest run --project workers                # Cloudflare pool only (test/**)
 npx vitest run --project node                   # Node host only (test-node/**)
 npx tsc --noEmit -p .                           # typecheck (Workers types)
 npx tsc -p tsconfig.node.json                   # typecheck core + Node host with Node-only types
-bash scripts/push-secrets.sh                    # push every secret from .dev.vars to the deployed Worker
 ```
 
 **Tests need no real credentials or live config.** `vitest.config.ts` defines two projects. `workers` (`test/**`) points the Cloudflare pool at the committed `wrangler.example.jsonc` and supplies fake secrets via miniflare bindings; KV and DO bindings are simulated locally. `test/_test-worker.ts` re-exports only `TodoIndex` (the `MSToDoSession` agent DO is deliberately excluded — it pulls in the MCP SDK → ajv, which the pool can't resolve). `node` (`test-node/**`) runs on plain Node 24 with in-memory `node:sqlite` databases and fake `MS_*` values passed to `buildNodeEnv`; Microsoft endpoints are stubbed with `vi.stubGlobal("fetch")`. Node ≥ 24 is required for development (`node:sqlite`).
 
 ## Deployments
 
-Each deployment has its own gitignored wrangler config: the production config is `wrangler.jsonc` at the root, and any other deployment keeps its config under `config-live/<name>/`. Deploy a non-default deployment with `npx wrangler deploy -c config-live/<name>/wrangler.jsonc`, with `CLOUDFLARE_ACCOUNT_ID` set to that deployment's account. The committed `wrangler.example.jsonc` is the template, and CI and the tests use it.
+Each deployment is a folder, `deployments/<name>/` (gitignored), holding `deployment.jsonc` (account ID, Worker name, `base_url`, custom domains, KV IDs, R2 buckets, var overrides; shape in the committed `deployment.example.jsonc`), `.dev.vars` and `last-deployed.json`. The scripts in `scripts/deployment/` render `wrangler.example.jsonc` plus that file into `.wrangler/deployments/<name>/rendered.json` and run wrangler against it with `-c`. There is no root `wrangler.jsonc`, so a bare `wrangler deploy` has no config to pick. The committed `wrangler.example.jsonc` is the one place bindings, migrations and default vars live, and CI and the tests use it.
 
+- **Commands** all take the name: `render` prints the config; `check` validates locally and reads the live Worker; `dry-run` builds without uploading; `deploy` confirms the changes since `last-deployed.json`; `secrets` pushes `.dev.vars` to the Worker (`op://` references resolved by `op`, values over stdin); `dev` and `tail` run wrangler against the rendered config. Wrangler flags pass through only when `scripts/deployment/args.ts` lists them for that command.
+- **New deployment order:** create the KV namespaces and the R2 bucket, write `deployment.jsonc` and `.dev.vars`, `npm run check`, `npm run deploy` (first deploy, interactive confirm), then `npm run secrets`, which refuses until the Worker exists, then authorize.
+- **`deploy` needs an interactive terminal** (stdin and stdout on a TTY, `CI` unset). `--non-interactive` skips the prompt and refuses any pending config change. `--adopt` is only for taking over an existing Worker whose KV bindings don't match the file.
+- **Account:** wrangler takes the account from the rendered config's `account_id`. The script also sets `CLOUDFLARE_ACCOUNT_ID` for its children and refuses to run if the shell already has a different one.
 - **Production serves the owner's real To Do account.** Don't create or edit test data there. Test against a secondary deployment, and give test lists and tasks a recognizable prefix so they can be found and deleted.
-- **A binding or migration change has to reach every gitignored config by hand.** That includes the root `wrangler.jsonc` and each config under `config-live/`. A deploy from a config that lacks a new Durable Object class or migration fails, or runs without the new binding.
 - **Changing the hostname creates new grants.** Tokens are bound to `<origin>/mcp` and `<origin>/api/v1`, and `buildOAuthFront(origin)` builds the front per request, so a second hostname on the same Worker works alongside the first, but every client must sign in again on the new one. Before moving, add `https://<new host>/auth/microsoft/callback` to the Entra app's redirect URIs. Then update `SERVICE_BASE_URL`: it sets the Graph subscription `notificationUrl` and the upload and download link origin. Retire the old hostname only after the connectors and the apps have moved.
 
 ## Worktrees and local types
 
 Do feature work in a git worktree next to the main checkout, with `node_modules` symlinked to the main checkout's copy. When you remove the worktree, delete that symlink first, or `git worktree remove` refuses because of an untracked file.
 
-Generate `worker-configuration.d.ts` (gitignored) from the example config, as CI does: `npx wrangler types -c wrangler.example.jsonc`. A copy generated from a local config, or carried over from an older checkout, can disagree with CI's. For example, a required binding the local file lacks lets a cast pass `tsc` locally and fail it in CI.
+Generate `worker-configuration.d.ts` (gitignored) from the example config, as CI does: `npm run types` (it reads `wrangler.example.jsonc`). A copy generated from a local config, or carried over from an older checkout, can disagree with CI's. For example, a required binding the local file lacks lets a cast pass `tsc` locally and fail it in CI.
 
 ## Test-driven development
 
@@ -95,9 +97,9 @@ Both clients: **host-pin** before attaching the Bearer token (prevents token lea
 Three Zod-validated blobs (`schemas.ts`) read/written to fixed `TODO_CACHE` KV keys (`config:lists`, `config:link_rules`, `config:attachments`) via `loader.ts`, **no in-memory cache** (fresh KV read per tool call). `ListsConfig` drives `classifier.ts` (regex list classification after `stripEmoji()`), `query-scope.ts` (multi-list filtering + `completed`→Graph status enum), and `aliases.ts` (alias→name→id resolution). `link-rules-engine.ts` `runLinkRules()` is pure with DoS guards (8 KB body cap, 50 ms budget); To Do allows exactly one linked resource per task so it stops at first match.
 
 ### Observability — `src/core/log.ts`, `src/core/observability/instrument.ts`
-`log.{debug,info,warn,error}(event, fields)` emits structured JSON (Workers Observability is enabled in `wrangler.jsonc`). `instrument()` emits a `tool` event with `{name, durationMs, ok, reason}`. Both Graph clients redact query strings before logging (delta tokens / `$filter` carry sensitive data).
+`log.{debug,info,warn,error}(event, fields)` emits structured JSON (Workers Observability is enabled in `wrangler.example.jsonc`). `instrument()` emits a `tool` event with `{name, durationMs, ok, reason}`. Both Graph clients redact query strings before logging (delta tokens / `$filter` carry sensitive data).
 
-### Bindings (see `wrangler.jsonc`, types in `src/hosts/cloudflare/types.ts` and `src/core/ports.ts`)
+### Bindings (see `wrangler.example.jsonc`, types in `src/hosts/cloudflare/types.ts` and `src/core/ports.ts`)
 - KV: `OAUTH_KV` (PKCE/OAuth state, upload/download capability tokens), `TODO_CACHE` (tokens, the three config blobs)
 - DO: `MCP_SESSION` (`MSToDoSession`), `TODO_INDEX_DO` (`TodoIndex`)
 - R2 (optional): `BLOBS` — the blob store (`src/core/blobs.ts`, docs/SYNC-API.md 4.9). Attachment copies under `attachments/<sid>`, app theme images under `theme-images/<id>` (id = first 32 hex of the bytes' SHA-256, also its sid). The app's download route and the connector (`src/core/attachment-cache.ts`: `get_attachment`, `/download`, upload links) read and fill the same copies. Without it, downloads stream from Graph and the theme-image routes answer 501. The cron sweeps it daily at 08:00 UTC. App-owned appearance (theme images, a list's `image_id`/`image_style`, smart-list themes in the `app_settings` entity) lives only in the index (migration v13), never in To Do.
@@ -115,8 +117,8 @@ Gated by `ENABLE_TASK_SUBSCRIPTIONS` (default ON; `"false"` disables the public 
 ### Checklist-item cache — `src/core/checklist/gate.ts` + `TodoIndex`
 Gated by `ENABLE_CHECKLIST_CACHE` (**default OFF** — opt-in; it adds a one-time per-task backfill). Makes checklist items queryable **across tasks** (Graph has no `hasChecklist` boolean and `$delta` carries no expansions, so checklist contents are never free — they're fetched per task). Same architecture as the My Day cache: migration **v3** adds a queryable `checklist_items` table + a `checklist_fts` FTS5 mirror (three triggers, `AFTER UPDATE OF display_name` so a check/uncheck toggle doesn't churn the index) + a `tasks.checklist_synced_at` marker column (excluded from `TASK_COLUMNS`, like the Substrate `committed_*` columns, so the delta UPSERT never clobbers it). The marker unifies backfill + incremental: `NULL` means "fetch this task's checklist." `#applyRows` nulls it whenever a task rides `$delta` (checklist edits bump `lastModifiedDateTime` → ride delta — **verified live**), and a **budgeted** per-task scan (`#runChecklistScanBatch`, `CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE`, **open tasks only**, newest-changed first, `shouldSkipSync` set) drains the NULL set on calm cycles via `listChecklistItems` (`src/core/graph/todo-resources.ts`) → `replaceChecklistItems`. **Independent of `ENABLE_TASK_SUBSCRIPTIONS`** — the change signal is delta (always on the timer); subscriptions only lower latency. Scan errors are **non-destructive** (leave the marker NULL, never mutate the task row), so an unreachable checklist can't corrupt cached task state; a 404'd task is reconciled by the next delta removal. **Intentional scope:** the cache covers **open tasks in non-skipped lists only** — **completed tasks are deliberately excluded** from the cross-task checklist cache (follow-ups are an open-task concern; `get_task` still returns any single task's items live), and skipped lists (`shouldSkipSync`) are never cached. There is **no** lazy-fill for completed tasks; this is by design, not a gap. The three `*_checklist_item` MCP tools write through (`upsertChecklistItem`/`deleteChecklistItem`, gated) for instant visibility; `deleteTask` cascades to `checklist_items`. New capability: `query_tasks` `has_open_checklist_item` filter; the `search_checklist_items` tool (`searchChecklistItems`: FTS over item text, or — no query — pending items oldest-first, grouped by task); and `search_tasks` `include_checklist` (default ON) which widens task FTS to checklist text via a **tiered** `search()` (title/body matches first by BM25 rank, then checklist-only matches appended — the two FTS corpora have incomparable rank scales, so they're tiered not merged). Naming stays `checklist` (matches the API + the existing tools); descriptions carry the `subtask`/`step` synonyms so the model connects the UI's "Steps" and the user's "subtask" to these tools. **Item ORDER is deliberately NOT part of this cache** — it's Substrate-only (`OrderDateTime`), null until a step is first dragged, so caching it would mostly store nulls + add a per-scan Substrate call while Graph's `createdDateTime` is the free correct fallback. Order is instead read **live on demand**: `list_checklist_items` enriches it best-effort (one Substrate `listSubtasks` round-trip when My Day/EXO is on; sorts by `OrderDateTime` desc, nulls last; adds `ordered` + per-item `orderDateTime`; falls back to Graph creation order otherwise), `get_task` does so opt-in via `include_checklist_order`, and `reorder_checklist_item` writes it. See the Substrate-client section for the read-inline / write-folder-free asymmetry.
 
-## Secrets in `.dev.vars`
-`scripts/push-secrets.sh` pushes each name to Cloudflare over stdin (never argv). A value may be a literal **or** a 1Password reference `op://<vault>/<item>[/<section>]/<field>`, resolved via the `op` CLI at push time (needs `op signin` or `OP_SERVICE_ACCOUNT_TOKEN`); surrounding quotes are stripped, so 1Password's "Copy Secret Reference" pastes in verbatim.
+## Secrets in `deployments/<name>/.dev.vars`
+`npm run secrets -- <name>` pushes `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `OWNER_EMAIL` and `OWNER_OBJECT_ID` to Cloudflare over stdin (never argv); `npm run dev -- <name>` resolves the same file into a temporary `.dev.vars` that it deletes on exit. A value may be a literal **or** a 1Password reference `op://<vault>/<item>[/<section>]/<field>`, resolved via the `op` CLI (needs `op signin` or `OP_SERVICE_ACCOUNT_TOKEN`; `op_account` in `deployment.jsonc` picks the account); surrounding quotes are stripped, so 1Password's "Copy Secret Reference" pastes in verbatim. Other secrets, such as `ACCESS_*`, go through `npx wrangler secret put <NAME> -c .wrangler/deployments/<name>/rendered.json`.
 
 ## Release process
 

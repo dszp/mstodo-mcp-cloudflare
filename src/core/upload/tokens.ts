@@ -125,7 +125,7 @@ export const MAX_DOWNLOAD_TTL_SECONDS = 5 * 60;
 
 /**
  * Cross-server download links are ON by default; set the `ENABLE_DOWNLOAD_LINKS`
- * var to "false" in wrangler.jsonc to disable both `mint_download_link` and the
+ * var to "false" in the deployment's `vars` to disable both `mint_download_link` and the
  * public `/download` endpoint (reduces attack surface for deployments that don't
  * need the server-to-server pull). Any value other than "false" leaves it on.
  */
