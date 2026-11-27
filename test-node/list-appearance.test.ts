@@ -93,7 +93,7 @@ describe("list appearance: My Day off (node)", () => {
     );
     try {
       await c.runSyncCycle();
-      expect(urls.some((u) => u.includes("substrate.office.com"))).toBe(false);
+      expect(urls.some((u) => new URL(u).hostname === "substrate.office.com")).toBe(false);
       expect(c.getList("N1")?.theme_color ?? null).toBeNull();
       const caps = (await c.syncInfo()).capabilities;
       expect(caps.list_appearance).toBe(false);

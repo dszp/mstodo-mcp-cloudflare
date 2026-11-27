@@ -568,8 +568,8 @@ describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tes
         return Response.json({ id: hit[1], title: "t", status: "notStarted", hasAttachments: false, checklistItems: [], linkedResources: [] }, { status: 200 });
       }
       if (u.endsWith("/subscriptions")) return Response.json({ value: [] }, { status: 200 });
-      if (u.includes("substrate.office.com")) return Response.json({ value: [] }, { status: 200 });
-      if (u.includes("login.microsoftonline.com")) return Response.json({ access_token: "EXO", expires_in: 3600 }, { status: 200 });
+      if (new URL(u).hostname === "substrate.office.com") return Response.json({ value: [] }, { status: 200 });
+      if (new URL(u).hostname === "login.microsoftonline.com") return Response.json({ access_token: "EXO", expires_in: 3600 }, { status: 200 });
       return new Response(`unscripted ${m} ${u}`, { status: 404 });
     }) as unknown as typeof fetch;
     await env.TODO_CACHE.put("config:lists", JSON.stringify({ sync_flagged_emails: true }));

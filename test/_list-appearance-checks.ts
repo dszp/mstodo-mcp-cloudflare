@@ -182,7 +182,7 @@ function stubMicrosoft(m: FakeMicrosoft) {
       if (url.startsWith("https://graph.microsoft.com/v1.0/me/todo/lists/") && url.includes("/tasks/delta")) {
         return json({ value: [], "@odata.deltaLink": `${url.replace(/\/next$/, "")}/next` });
       }
-      if (url.includes("login.microsoftonline.com")) {
+      if (new URL(url).hostname === "login.microsoftonline.com") {
         return m.refuseExo
           ? json({ error: "invalid_grant", error_description: "AADSTS65001: The user has not consented." }, 400)
           : json({ access_token: "EXO", expires_in: 3600, token_type: "Bearer", scope: "x" });
