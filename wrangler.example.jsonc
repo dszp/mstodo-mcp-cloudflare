@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "mstodo-mcp",
+  "name": "potem-server",
 
   // Copy this file to `wrangler.jsonc` and fill in the account-specific values
   // below. The real `wrangler.jsonc` is gitignored (it holds your account_id and

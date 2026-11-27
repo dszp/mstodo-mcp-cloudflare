@@ -1,4 +1,4 @@
-# mstodo-mcp
+# Potem server
 
 [![CI](https://github.com/dszp/potem-server/actions/workflows/ci.yml/badge.svg)](https://github.com/dszp/potem-server/actions/workflows/ci.yml)
 
@@ -8,6 +8,11 @@ Microsoft To Do account, so you can ask Claude to find, create, update, complete
 search, and organize tasks across all your lists without leaving the chat. It keeps a fast local mirror of your lists and
 tasks, so searching and querying across every list is quick and doesn't hammer
 Microsoft on each request.
+
+It is also the server behind **Potem**, a task app for macOS and iOS that replaces
+the Microsoft To Do apps. The app syncs through the client sync API under `/api/v1`,
+described in [docs/SYNC-API.md](./docs/SYNC-API.md); the app itself lives in a
+separate repository. This project was called `mstodo-mcp` until 0.18.0.
 
 It runs on either of two hosts with the same tools and sign-in flow:
 
@@ -313,7 +318,7 @@ After rotating, do a soft reset (above) so the next `/authorize` uses the new id
 For pre-launch publishability checks, or to recover from corrupted state:
 
 ```bash
-npx wrangler delete --name=mstodo-mcp                       # nukes Worker + all DO state
+npx wrangler delete --name=<worker-name>                      # nukes Worker + all DO state
 npx wrangler kv namespace delete --binding=OAUTH_KV
 npx wrangler kv namespace delete --binding=TODO_CACHE
 # Then re-create namespaces + update wrangler.jsonc + redeploy (see DEPLOYMENT.md).

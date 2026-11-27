@@ -1,6 +1,6 @@
 # Deployment guide
 
-A step-by-step walkthrough for running your own `mstodo-mcp` instance, plus a
+A step-by-step walkthrough for running your own Potem server instance, plus a
 troubleshooting section. For the feature/config reference and the MCP tool list,
 see [README.md](./README.md).
 
@@ -73,7 +73,7 @@ registration**) and collect four values for the Worker's secrets.
 
 ### 1. Create the registration
 
-- **Name:** anything (e.g. `mstodo-mcp`).
+- **Name:** anything (e.g. `potem-server`).
 - **Supported account types:** match the account you'll sign in with:
   - A single work/school tenant → *Accounts in this organizational directory only* (single tenant). `MS_TENANT_ID` = the **Directory (tenant) ID** GUID.
   - Personal Microsoft accounts / broad → use `common`, `organizations`, or `consumers` as `MS_TENANT_ID` and pick the matching account-types option.
@@ -202,7 +202,7 @@ Edit `wrangler.jsonc` and fill in:
 - `account_id` — your Cloudflare account ID (Dashboard → Workers, or `npx wrangler whoami`).
 - the two `kv_namespaces[].id` values from step 2.
 - `vars.SERVICE_BASE_URL` — the public origin this Worker is reachable at, used to build
-  web upload links. Set it to your `https://mstodo-mcp.<your-subdomain>.workers.dev` (or
+  web upload links. Set it to your `https://potem-server.<your-subdomain>.workers.dev` (or
   custom domain). It ships as a placeholder; if you don't know the URL yet, deploy once
   (step 5), then set it and re-deploy. Needed for the web upload feature **and** for Graph
   change-notification subscriptions (below) — Graph validates the `notificationUrl` it derives
@@ -255,7 +255,7 @@ keeps `create_upload_link` disabled.
 npx wrangler deploy
 ```
 
-Note the deployed URL (`https://mstodo-mcp.<your-subdomain>.workers.dev`) and the
+Note the deployed URL (`https://potem-server.<your-subdomain>.workers.dev`) and the
 **Current Version ID** (your rollback reference).
 
 ### 6. Point the Entra redirect URI at your deployment
