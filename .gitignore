@@ -22,6 +22,10 @@ wrangler.jsonc
 # sanitized templates in config-examples/ ARE committed; these real dumps aren't.
 config-live/
 
+# Named deployments: per-deployment files hold account IDs, KV IDs, hostnames
+# and secrets. deployment.example.jsonc at the root ARE committed.
+deployments/
+
 # Wrangler-generated artifacts and dependencies
 node_modules/
 .wrangler/
