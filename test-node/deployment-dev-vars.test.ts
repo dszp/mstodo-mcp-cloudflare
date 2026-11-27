@@ -109,13 +109,82 @@ describe("writeResolvedDevVars / removeResolvedDevVars", () => {
     ]);
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(statSync(join(path, "..")).mode & 0o777).toBe(0o700);
-    expect(readFileSync(path, "utf8")).toBe('A="one"\nB="two words"\n');
+    expect(readFileSync(path, "utf8")).toBe("A='one'\nB='two words'\n");
   });
 
-  it("escapes backslashes, double quotes and newlines", () => {
-    const path = join(tmp(), "d", "f");
-    writeResolvedDevVars(path, [["A", 'a"b\\c\nd']]);
-    expect(readFileSync(path, "utf8")).toBe('A="a\\"b\\\\c\\nd"\n');
+  // Copy of the dotenv 16.3.1 parse that wrangler bundles for .dev.vars
+  // (node_modules/wrangler/wrangler-dist/cli.js, "function parse17", ~line 164071).
+  const LINE =
+    /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+  const wranglerParse = (src: string): Record<string, string> => {
+    const obj: Record<string, string> = {};
+    const lines = src.replace(/\r\n?/gm, "\n");
+    const re = new RegExp(LINE.source, LINE.flags);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(lines)) !== null) {
+      let value = (m[2] || "").trim();
+      const q = value[0];
+      value = value.replace(/^(['"`])([\s\S]*)\1$/gm, "$2");
+      if (q === '"') value = value.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+      obj[m[1]!] = value;
+    }
+    return obj;
+  };
+
+  const cases: Record<string, string> = {
+    "double quote": 'a"b',
+    backslash: "a\\b",
+    "literal backslash-n": "a\\nb",
+    "trailing backslash": "abc\\",
+    hash: "a#b",
+    spaces: "  a b  ",
+    dollar: "$X and ${Y}",
+    "single quote": "it's",
+    "multi-line": "line1\nline2\n",
+    "single quote and backtick": "a'b`c",
+    empty: "",
+  };
+
+  for (const [label, value] of Object.entries(cases)) {
+    it(`round-trips through wrangler's parser: ${label}`, () => {
+      const path = join(tmp(), "d", "f");
+      // A neighbour on each side catches a value that runs into another line.
+      writeResolvedDevVars(path, [
+        ["BEFORE", "'"],
+        ["TARGET", value],
+        ["AFTER", "next'"],
+      ]);
+      const parsed = wranglerParse(readFileSync(path, "utf8"));
+      expect(parsed.TARGET, label).toBe(value);
+      expect(parsed.BEFORE).toBe("'");
+      expect(parsed.AFTER).toBe("next'");
+    });
+  }
+
+  describe("refusals", () => {
+    const refusal = (value: string): DeploymentRefusal => {
+      const path = join(tmp(), "d", "f");
+      try {
+        writeResolvedDevVars(path, [["SECRET_X", value]]);
+      } catch (e) {
+        expect(existsSync(path)).toBe(false);
+        return e as DeploymentRefusal;
+      }
+      throw new Error("expected a refusal");
+    };
+    const labelled: Record<string, string> = {
+      "carriage return": "abc\rXYZ-leak",
+      "all three quote characters": "a'b`c\"XYZ-leak",
+      "needs double quotes and holds a literal backslash-n": "a'b`c\\nXYZ-leak",
+    };
+    for (const [label, value] of Object.entries(labelled)) {
+      it(`refuses ${label} without echoing the value`, () => {
+        const err = refusal(value);
+        expect(err).toBeInstanceOf(DeploymentRefusal);
+        expect(err.field).toBe("SECRET_X");
+        expect(err.message).not.toContain("XYZ-leak");
+      });
+    }
   });
 
   it("replaces a stale file, resetting its mode to 0600", () => {
@@ -123,7 +192,7 @@ describe("writeResolvedDevVars / removeResolvedDevVars", () => {
     const path = join(dir, "f");
     writeFileSync(path, "OLD", { mode: 0o644 });
     writeResolvedDevVars(path, [["A", "new"]]);
-    expect(readFileSync(path, "utf8")).toBe('A="new"\n');
+    expect(readFileSync(path, "utf8")).toBe("A='new'\n");
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 

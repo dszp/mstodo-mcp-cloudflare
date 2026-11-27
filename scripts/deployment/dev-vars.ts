@@ -57,19 +57,59 @@ export async function resolveSecret(
   return out;
 }
 
-const quote = (v: string): string =>
-  `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r/g, "\\r").replace(/\n/g, "\\n")}"`;
+// wrangler reads .dev.vars with dotenv 16.3.1, which never unescapes \" or \\:
+// a quoted value is taken raw between its delimiters. So the delimiter is chosen
+// to be absent from the value rather than escaping inside it. Only double quotes
+// trigger dotenv's \n and \r unescaping, hence the preference order.
+function quote(name: string, value: string): string {
+  const refuse = (reason: string): never => {
+    throw new DeploymentRefusal("(dev vars)", name, reason);
+  };
+  if (value.includes("\r")) refuse("value contains a carriage return, which .dev.vars cannot hold");
+  const delim = ["'", "`", '"'].find((d) => !value.includes(d));
+  if (delim === undefined) refuse("value contains all of ' ` and \", which .dev.vars cannot quote");
+  if (delim === '"' && /\\[nr]/.test(value)) {
+    refuse("value contains a backslash-n or backslash-r sequence and needs double quotes, which .dev.vars would rewrite");
+  }
+  return `${delim}${value}${delim}`;
+}
+
+// Copy of dotenv 16.3.1's parse as bundled in wrangler (the LINE regex and the
+// quote handling), used to prove the file round-trips before it is written.
+const DOTENV_LINE =
+  /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+function dotenvParse(src: string): Record<string, string> {
+  const obj: Record<string, string> = {};
+  const text = src.replace(/\r\n?/gm, "\n");
+  const re = new RegExp(DOTENV_LINE.source, DOTENV_LINE.flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    let v = (m[2] ?? "").trim();
+    const q = v[0];
+    v = v.replace(/^(['"`])([\s\S]*)\1$/gm, "$2");
+    if (q === '"') v = v.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+    obj[m[1]!] = v;
+  }
+  return obj;
+}
 
 // The one place a resolved secret touches disk. The directory is 0700 and the
 // file is created 0600 at open, so the value is never readable by another user.
 export function writeResolvedDevVars(path: string, entries: [string, string][]): void {
+  const content = entries.map(([k, v]) => `${k}=${quote(k, v)}\n`).join("");
+  // A backslash before the closing quote can swallow it in dotenv's regex and
+  // run into a later line; check every entry survives instead of reasoning about it.
+  const parsed = dotenvParse(content);
+  for (const [k, v] of entries) {
+    if (parsed[k] !== v) throw new DeploymentRefusal("(dev vars)", k, "value does not survive wrangler's .dev.vars parsing");
+  }
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   rmSync(path, { force: true });
   const fd = openSync(path, "wx", 0o600);
   try {
-    writeSync(fd, entries.map(([k, v]) => `${k}=${quote(v)}\n`).join(""));
+    writeSync(fd, content);
   } catch (e) {
     closeSync(fd);
     rmSync(path, { force: true });
