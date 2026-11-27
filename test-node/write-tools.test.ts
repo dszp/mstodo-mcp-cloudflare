@@ -2,16 +2,16 @@
 // McpServer + Client (in-memory transport), the in-process IndexCore, and a
 // scripted fetch. Written against the pre-extraction tool handlers so the
 // snapshots pin today's output format and Graph/Substrate call sequence; the
-// src/core/ops extraction must leave every snapshot unchanged.
+// packages/core/ops extraction must leave every snapshot unchanged.
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { openDatabase } from "../src/hosts/node/sqlite-db";
 import { buildNodeEnv } from "../src/hosts/node/env";
-import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
-import { createMcpServer } from "../src/core/mcp/server";
-import { registerTools } from "../src/core/mcp/register-tools";
+import { SCOPES, storeTokens } from "@potem/core/auth/microsoft";
+import { createMcpServer } from "@potem/core/mcp/server";
+import { registerTools } from "@potem/core/mcp/register-tools";
 
 const G = "https://graph.microsoft.com/v1.0/me/todo/lists";
 const S = "https://substrate.office.com/todob2/api/v1";

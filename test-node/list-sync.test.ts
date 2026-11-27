@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 import { runListSyncChecks } from "../test/_list-sync-checks";
 import { runListSyncCycleChecks } from "../test/_list-sync-cycle-checks";
 

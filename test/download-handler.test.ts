@@ -3,12 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it
 // before calling core (see test/_app-env.ts).
 const env = testAppEnv();
-import { handleDownload } from "../src/core/upload/download-handler";
-import { createDownloadCapability, lookupDownloadCapability } from "../src/core/upload/tokens";
+import { handleDownload } from "@potem/core/upload/download-handler";
+import { createDownloadCapability, lookupDownloadCapability } from "@potem/core/upload/tokens";
 import { testAppEnv } from "./_app-env";
-import { ownerIndex } from "../src/core/owner-index";
-import { attachmentBlobKey } from "../src/core/blobs";
-import type { AppEnv } from "../src/core/ports";
+import { ownerIndex } from "@potem/core/owner-index";
+import { attachmentBlobKey } from "@potem/core/blobs";
+import type { AppEnv } from "@potem/core/ports";
 
 const TOKENS_KEY = "tokens:owner";
 const SCOPE = { list_id: "L1", task_id: "T1", attachment_id: "A1" } as const;

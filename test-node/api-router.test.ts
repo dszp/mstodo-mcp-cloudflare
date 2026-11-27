@@ -2,9 +2,9 @@
 // results to HTTP, including cases a real index can't produce yet
 // (cursor_expired: retention isn't built).
 import { describe, it, expect, vi } from "vitest";
-import { emailHint, ftsTerms, handleApiRequest, handlePublicApiRequest } from "../src/core/api/router";
-import type { AppEnv } from "../src/core/ports";
-import type { Props } from "../src/core/types";
+import { emailHint, ftsTerms, handleApiRequest, handlePublicApiRequest } from "@potem/core/api/router";
+import type { AppEnv } from "@potem/core/ports";
+import type { Props } from "@potem/core/types";
 
 const EPOCH = "e1";
 const PROPS: Partial<Props> = { epoch: EPOCH, authorized_at: Date.now() };

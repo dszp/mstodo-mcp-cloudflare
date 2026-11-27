@@ -12,13 +12,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
-import type { FeedChange } from "../src/core/index/change-feed";
-import { applyBatch, type ExecInput, type Executor } from "../src/core/sync/mutations";
+import { IndexCore } from "@potem/core/index/index-core";
+import type { FeedChange } from "@potem/core/index/change-feed";
+import { applyBatch, type ExecInput, type Executor } from "@potem/core/sync/mutations";
 import { storeOf } from "../test/_mutation-checks";
-import type { OpsContext } from "../src/core/ops/context";
-import { reorderTask } from "../src/core/ops/tasks";
-import { reorderStep } from "../src/core/ops/steps";
+import type { OpsContext } from "@potem/core/ops/context";
+import { reorderTask } from "@potem/core/ops/tasks";
+import { reorderStep } from "@potem/core/ops/steps";
 
 const task = (id: string, title = id, modified = "2026-11-24T10:00:00Z", extra: Record<string, unknown> = {}) =>
   ({ id, title, status: "notStarted", lastModifiedDateTime: modified, ...extra }) as never;

@@ -8,9 +8,9 @@
 // is built over the same KV and the same tokens are presented to it.
 import { expect } from "vitest";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { refuseMcpRequest } from "../src/core/auth/grant";
-import type { AppEnv } from "../src/core/ports";
-import type { Props } from "../src/core/types";
+import { refuseMcpRequest } from "@potem/core/auth/grant";
+import type { AppEnv } from "@potem/core/ports";
+import type { Props } from "@potem/core/types";
 import { authHandler, type ProviderEnv } from "../src/hosts/shared/auth-handler";
 import { oauthFront } from "../src/hosts/shared/oauth";
 import { ORIGIN, oauthClient } from "../test-node/_oauth-client";

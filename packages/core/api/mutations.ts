@@ -1,6 +1,6 @@
 // POST /api/v1/sync/mutations (docs/SYNC-API.md section 5): the HTTP half of
-// the mutation batch. src/core/sync/mutations.ts owns validation, idempotency
-// and conflicts; src/core/sync/executor.ts owns the Graph side. This module
+// the mutation batch. packages/core/sync/mutations.ts owns validation, idempotency
+// and conflicts; packages/core/sync/executor.ts owns the Graph side. This module
 // reads the body, builds the ops context, holds the write lease and keeps the
 // batch running if the client goes away.
 import { loadIdentity } from "../auth/microsoft";

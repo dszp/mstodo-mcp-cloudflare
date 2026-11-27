@@ -1,9 +1,9 @@
 // docs/SYNC-API.md section 18.2: immutable task IDs.
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { openDatabase, sqlDb } from "../src/hosts/node/sqlite-db";
-import { SCHEMA_DDL } from "../src/core/index/sql";
-import { applyMigrations } from "../src/core/index/migrations";
-import { GraphClient, looksImmutable } from "../src/core/graph/client";
+import { SCHEMA_DDL } from "@potem/core/index/sql";
+import { applyMigrations } from "@potem/core/index/migrations";
+import { GraphClient, looksImmutable } from "@potem/core/graph/client";
 
 const tokens = { getAccessToken: async () => "tok", forceRefresh: async () => "tok2" };
 

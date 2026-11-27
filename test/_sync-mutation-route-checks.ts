@@ -5,12 +5,12 @@
 // test-node/sync-mutations-route.test.ts. The env given here must have My Day
 // off; the checklist cache may be on or off.
 import { expect } from "vitest";
-import { GraphClient } from "../src/core/graph/client";
-import { opsContext } from "../src/core/ops/context";
-import { WriteLease } from "../src/core/ops/write-lease";
-import { createList } from "../src/core/ops/lists";
-import { ownerIndex } from "../src/core/owner-index";
-import type { AppEnv } from "../src/core/ports";
+import { GraphClient } from "@potem/core/graph/client";
+import { opsContext } from "@potem/core/ops/context";
+import { WriteLease } from "@potem/core/ops/write-lease";
+import { createList } from "@potem/core/ops/lists";
+import { ownerIndex } from "@potem/core/owner-index";
+import type { AppEnv } from "@potem/core/ports";
 import { ORIGIN, oauthClient, stubMicrosoft } from "../test-node/_oauth-client";
 
 const G = "https://graph.microsoft.com/v1.0/me/todo/lists";

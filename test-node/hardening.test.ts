@@ -7,9 +7,9 @@ import { createHandler, startScheduler } from "../src/hosts/node/http";
 import { bodyCapFor, KiB, MiB } from "../src/hosts/node/body-limit";
 import { installProcessHandlers, withTimeout } from "../src/hosts/node/lifecycle";
 import { authorizationServerOptions } from "../src/hosts/shared/oauth";
-import { UPLOAD_BODY_MAX_BYTES } from "../src/core/upload/handler";
-import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
-import { createUploadCapability } from "../src/core/upload/tokens";
+import { UPLOAD_BODY_MAX_BYTES } from "@potem/core/upload/handler";
+import { SCOPES, storeTokens } from "@potem/core/auth/microsoft";
+import { createUploadCapability } from "@potem/core/upload/tokens";
 import { ORIGIN } from "./_oauth-client";
 
 const vars = {

@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 // test/core-boundary.test.ts — reads source as text (bundled via ?raw like test/html.test.ts does)
 import { describe, it, expect } from "vitest";
-const files = import.meta.glob("../src/core/**/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+const files = import.meta.glob("../packages/core/**/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
 // Every module specifier a source names: `import … from "x"`, `export … from
 // "x"`, side-effect `import "x"`, and dynamic `import("x")`.

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { stripHtml } from "../src/core/util/html";
-import { parseDateInput } from "../src/core/util/dates";
-import { encodeCursor, decodeCursor } from "../src/core/util/cursor";
+import { stripHtml } from "@potem/core/util/html";
+import { parseDateInput } from "@potem/core/util/dates";
+import { encodeCursor, decodeCursor } from "@potem/core/util/cursor";
 
 describe("stripHtml", () => {
   it("strips tags and decodes entities for html content", () => {

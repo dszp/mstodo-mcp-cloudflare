@@ -1,7 +1,7 @@
 // Durable Object twin of test-node/list-sync.test.ts: the same checks on DO SQLite.
 import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 import { runListSyncChecks } from "./_list-sync-checks";
 import { runListSyncCycleChecks } from "./_list-sync-cycle-checks";
 

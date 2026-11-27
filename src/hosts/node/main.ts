@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { log } from "../../core/log";
+import { log } from "@potem/core/log";
 import { openDatabase } from "./sqlite-db";
 import { buildNodeEnv, InvalidConfigError, MissingConfigError, parsePublicOrigin } from "./env";
 import { createHandler, startScheduler } from "./http";

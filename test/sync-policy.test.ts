@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { applyListsConfigChange, isArchiveList, listSync, shouldSkipSync, withListSync } from "../src/core/config/sync-policy";
-import { pinClassifications } from "../src/core/config/classifier";
-import { ListsConfigSchema } from "../src/core/config/schemas";
+import { applyListsConfigChange, isArchiveList, listSync, shouldSkipSync, withListSync } from "@potem/core/config/sync-policy";
+import { pinClassifications } from "@potem/core/config/classifier";
+import { ListsConfigSchema } from "@potem/core/config/schemas";
 
 const cfg = (over: Record<string, unknown> = {}) => ListsConfigSchema.parse({ patterns: [], aliases: {}, ...over });
 const flagged = { list_id: "L1", wellknown: "flaggedEmails" };

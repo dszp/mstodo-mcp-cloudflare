@@ -2,16 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createUploadCapability,
   lookupUploadCapability,
-} from "../src/core/upload/tokens";
+} from "@potem/core/upload/tokens";
 import {
   consumeDownloadCapability,
   createDownloadCapability,
   downloadLinksEnabled,
   lookupDownloadCapability,
   MAX_DOWNLOAD_TTL_SECONDS,
-} from "../src/core/upload/tokens";
+} from "@potem/core/upload/tokens";
 import { testAppEnv } from "./_app-env";
-import type { AppEnv } from "../src/core/ports";
+import type { AppEnv } from "@potem/core/ports";
 
 // The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it
 // before calling core (see test/_app-env.ts).

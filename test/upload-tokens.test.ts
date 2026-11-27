@@ -4,7 +4,7 @@ import {
   consumeUploadCapability,
   createUploadCapability,
   lookupUploadCapability,
-} from "../src/core/upload/tokens";
+} from "@potem/core/upload/tokens";
 import { testAppEnv } from "./_app-env";
 
 // The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it

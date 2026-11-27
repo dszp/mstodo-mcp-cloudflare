@@ -6,10 +6,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { openDatabase } from "../src/hosts/node/sqlite-db";
 import { buildNodeEnv } from "../src/hosts/node/env";
-import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
-import { createMcpServer } from "../src/core/mcp/server";
-import { registerTools } from "../src/core/mcp/register-tools";
-import { attachmentBlobKey } from "../src/core/blobs";
+import { SCOPES, storeTokens } from "@potem/core/auth/microsoft";
+import { createMcpServer } from "@potem/core/mcp/server";
+import { registerTools } from "@potem/core/mcp/register-tools";
+import { attachmentBlobKey } from "@potem/core/blobs";
 import { memoryBlobs } from "./_memory-blobs";
 
 const ATT_URL = "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/attachments/";

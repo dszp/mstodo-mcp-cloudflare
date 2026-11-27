@@ -1,7 +1,7 @@
 // Durable Object twin of test-node/change-feed.test.ts: the same checks on DO SQLite.
 import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 import { runChangeFeedChecks, runLargePageChecks, runManyListFilterChecks } from "./_change-feed-checks";
 
 describe("change feed (Durable Object)", () => {

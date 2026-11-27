@@ -1,9 +1,9 @@
 import type { Connection, ConnectionContext } from "agents";
 import { McpAgent } from "agents/mcp";
-import { registerTools } from "../../core/mcp/register-tools";
-import { createMcpServer } from "../../core/mcp/server";
-import { SESSION_IDLE_MS, sessionExpiry, shouldTouch } from "../../core/mcp/session-expiry";
-import type { Props } from "../../core/types";
+import { registerTools } from "@potem/core/mcp/register-tools";
+import { createMcpServer } from "@potem/core/mcp/server";
+import { SESSION_IDLE_MS, sessionExpiry, shouldTouch } from "@potem/core/mcp/session-expiry";
+import type { Props } from "@potem/core/types";
 import { appEnv } from "./env";
 
 const LAST_ACTIVE_KEY = "session:last_active_at";

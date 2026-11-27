@@ -3,7 +3,7 @@
 import { describe, it, expect } from "vitest";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 
 const t = (id: string, m = "2026-11-24T10:00:00Z") =>
   ({ id, title: id, status: "notStarted", lastModifiedDateTime: m }) as never;

@@ -3,11 +3,11 @@
 // first, fill it from Graph on a miss, and keep a copy of what the connector
 // attaches. A real IndexCore on node SQLite and an in-memory blob store.
 import { describe, it, expect } from "vitest";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { attachmentBlobKey } from "../src/core/blobs";
-import { keepAttachment, readAttachment } from "../src/core/attachment-cache";
+import { attachmentBlobKey } from "@potem/core/blobs";
+import { keepAttachment, readAttachment } from "@potem/core/attachment-cache";
 import { memoryBlobs } from "./_memory-blobs";
 
 const BYTES = new TextEncoder().encode("receipt bytes");

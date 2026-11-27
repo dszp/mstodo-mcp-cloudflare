@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import type { SqlDb, SqlValue, Transact } from "../../core/ports";
+import type { SqlDb, SqlValue, Transact } from "@potem/core/ports";
 
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);

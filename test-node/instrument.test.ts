@@ -2,7 +2,7 @@
 // tool call. A failure is logged by its reason code only, because failure
 // payloads can carry Graph error bodies and echoed user input.
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { errResponse, extractFailureFields, instrument } from "../src/core/observability/instrument";
+import { errResponse, extractFailureFields, instrument } from "@potem/core/observability/instrument";
 
 function captureLogs() {
   const lines: string[] = [];

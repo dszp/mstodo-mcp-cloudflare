@@ -1,8 +1,8 @@
 // Shared change-feed assertions (docs/SYNC-API.md section 4), run on both
 // hosts' SQLite through IndexCore. Returns named facts so each host's test can
 // assert them one by one.
-import type { IndexCore } from "../src/core/index/index-core";
-import type { FeedChange, FeedPage } from "../src/core/index/change-feed";
+import type { IndexCore } from "@potem/core/index/index-core";
+import type { FeedChange, FeedPage } from "@potem/core/index/change-feed";
 
 const DAY = 86_400_000;
 const task = (id: string, title: string, extra: Record<string, unknown> = {}) =>

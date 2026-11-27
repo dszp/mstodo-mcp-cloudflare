@@ -4,7 +4,7 @@ import {
   SESSION_TOUCH_EVERY_MS,
   sessionExpiry,
   shouldTouch,
-} from "../src/core/mcp/session-expiry";
+} from "@potem/core/mcp/session-expiry";
 
 const now = 1_800_000_000_000;
 

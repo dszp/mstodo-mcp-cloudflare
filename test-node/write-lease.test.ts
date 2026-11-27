@@ -4,8 +4,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
-import { WriteBusyError, WriteLease, type WriteLeasePort } from "../src/core/ops/write-lease";
+import { IndexCore } from "@potem/core/index/index-core";
+import { WriteBusyError, WriteLease, type WriteLeasePort } from "@potem/core/ops/write-lease";
 
 function core(db = openDatabase(":memory:")) {
   const state = stateStore(db);

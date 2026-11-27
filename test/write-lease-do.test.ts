@@ -2,8 +2,8 @@
 // TodoIndex singleton through a stub, so the lease's results must survive
 // structured cloning and its state must be shared across callers.
 import { describe, it, expect } from "vitest";
-import { ownerIndex } from "../src/core/owner-index";
-import { WriteLease } from "../src/core/ops/write-lease";
+import { ownerIndex } from "@potem/core/owner-index";
+import { WriteLease } from "@potem/core/ops/write-lease";
 import { testAppEnv } from "./_app-env";
 
 describe("write lease on the TodoIndex Durable Object", () => {

@@ -1,6 +1,6 @@
 // The blob store's copies of task attachments, for the Claude connector's
 // paths: get_attachment, the /download link and upload links. The app's GET /api/v1/attachments/{sid} keeps its own streaming read
-// (src/core/api/attachments.ts); both store under the same key, so a copy
+// (packages/core/api/attachments.ts); both store under the same key, so a copy
 // made by either serves the other.
 //
 // An attachment can't be edited, so a sid always names the same bytes and a

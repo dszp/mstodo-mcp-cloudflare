@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AlarmScheduler, StateStore } from "../../core/ports";
+import type { AlarmScheduler, StateStore } from "@potem/core/ports";
 
 const ALARM_KEY = "__alarm__";
 

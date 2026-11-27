@@ -9,7 +9,7 @@ import {
   SCOPES,
   EXO_TASKS_SCOPE,
   SUBSTRATE_SCOPES,
-} from "../src/core/auth/microsoft";
+} from "@potem/core/auth/microsoft";
 import {
   assertSubstrateUrl,
   redactSubstrateUrl,
@@ -17,8 +17,8 @@ import {
   SubstrateError,
   SubstrateTaskSchema,
   projectSubstrateTaskDetails,
-} from "../src/core/graph/substrate-client";
-import type { AppEnv } from "../src/core/ports";
+} from "@potem/core/graph/substrate-client";
+import type { AppEnv } from "@potem/core/ports";
 
 // Minimal Env stub — these helpers only read ENABLE_MY_DAY.
 const env = (enableMyDay?: string): AppEnv => ({ ENABLE_MY_DAY: enableMyDay }) as unknown as AppEnv;

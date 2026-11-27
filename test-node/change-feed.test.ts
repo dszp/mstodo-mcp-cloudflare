@@ -2,8 +2,8 @@
 import { describe, it, expect } from "vitest";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
-import { bareDate } from "../src/core/index/change-feed";
+import { IndexCore } from "@potem/core/index/index-core";
+import { bareDate } from "@potem/core/index/change-feed";
 import { runChangeFeedChecks } from "../test/_change-feed-checks";
 
 describe("change feed (node)", async () => {

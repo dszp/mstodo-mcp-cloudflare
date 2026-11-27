@@ -1,14 +1,14 @@
-// src/core/sync/executor.ts on its own: how each thrown error and each field
+// packages/core/sync/executor.ts on its own: how each thrown error and each field
 // shape becomes an ExecOutcome. The route tests (sync-mutations-route) cover
 // the ops end to end; these reach the outcomes a scripted Graph can't.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ReauthRequiredError } from "../src/core/auth/reauth";
-import { GraphError } from "../src/core/graph/client";
-import { SubstrateError } from "../src/core/graph/substrate-client";
-import type { OpsContext } from "../src/core/ops/context";
-import { WriteBusyError } from "../src/core/ops/write-lease";
-import { completion, reorderPosition, syncExecutor, taskFields } from "../src/core/sync/executor";
-import type { ExecInput } from "../src/core/sync/mutations";
+import { ReauthRequiredError } from "@potem/core/auth/reauth";
+import { GraphError } from "@potem/core/graph/client";
+import { SubstrateError } from "@potem/core/graph/substrate-client";
+import type { OpsContext } from "@potem/core/ops/context";
+import { WriteBusyError } from "@potem/core/ops/write-lease";
+import { completion, reorderPosition, syncExecutor, taskFields } from "@potem/core/sync/executor";
+import type { ExecInput } from "@potem/core/sync/mutations";
 
 function ctxThrowing(e: unknown, vars: Record<string, string> = {}) {
   const markMyDayUnavailable = vi.fn(async () => {});

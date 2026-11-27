@@ -2,8 +2,8 @@
 import { describe, it, expect } from "vitest";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
-import { parseBatch, applyBatch } from "../src/core/sync/mutations";
+import { IndexCore } from "@potem/core/index/index-core";
+import { parseBatch, applyBatch } from "@potem/core/sync/mutations";
 import { runMutationChecks, storeOf } from "../test/_mutation-checks";
 
 function core() {

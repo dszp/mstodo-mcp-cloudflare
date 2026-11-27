@@ -5,7 +5,7 @@ import { describe, it, afterEach, vi } from "vitest";
 import { env, createExecutionContext } from "cloudflare:test";
 import { appEnv } from "../src/hosts/cloudflare/env";
 import { oauthFront } from "../src/hosts/shared/oauth";
-import { handleAppleAssociation } from "../src/core/auth/apple-association";
+import { handleAppleAssociation } from "@potem/core/auth/apple-association";
 import { ORIGIN, REDIRECT_URI } from "../test-node/_oauth-client";
 import { runAccessHalfConfiguredChecks, runAccessOffChecks, runAccessOnChecks } from "./_access-flow-checks";
 import { ACCESS_VARS, AUD } from "./_access-keys";

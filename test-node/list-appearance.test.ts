@@ -2,8 +2,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
-import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
+import { IndexCore } from "@potem/core/index/index-core";
+import { SCOPES, storeTokens } from "@potem/core/auth/microsoft";
 import {
   runListAppearanceCycleChecks,
   runListAppearanceFeedChecks,

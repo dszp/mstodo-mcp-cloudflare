@@ -7,10 +7,10 @@ import WebSocket from "ws";
 import { connect as tcpConnect } from "node:net";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore, announcing } from "../src/core/index/index-core";
+import { IndexCore, announcing } from "@potem/core/index/index-core";
 import { SocketHub, SOCKET_PATH, type SocketGrant } from "../src/hosts/node/ws-push";
-import type { ChangeNotifier } from "../src/core/ports";
-import { COALESCE_WINDOW_MS } from "../src/core/sync/coalesce";
+import type { ChangeNotifier } from "@potem/core/ports";
+import { COALESCE_WINDOW_MS } from "@potem/core/sync/coalesce";
 
 function core(notifier: ChangeNotifier) {
   const db = openDatabase(":memory:");

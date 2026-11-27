@@ -4,5 +4,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["src/core/**/*", "src/hosts/shared/**/*", "src/hosts/node/**/*", "types/node-host.d.ts", "scripts/deployment/**/*", "scripts/leak-guard.ts"]
+  "include": ["packages/core/**/*", "src/hosts/shared/**/*", "src/hosts/node/**/*", "types/node-host.d.ts", "scripts/deployment/**/*", "scripts/leak-guard.ts"]
 }

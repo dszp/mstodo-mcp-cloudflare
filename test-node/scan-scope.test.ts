@@ -1,10 +1,10 @@
 // Build step 4c (docs/SYNC-API.md sections 1.1, 1.2, 18.7a): archive lists,
 // and step order stored per checklist item.
 import { describe, it, expect } from "vitest";
-import { isArchiveList } from "../src/core/config/sync-policy";
+import { isArchiveList } from "@potem/core/config/sync-policy";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 
 const cfg = (archive: string[]) =>
   ({ patterns: [], aliases: {}, overrides: {}, no_sync: [], archive, sync_flagged_emails: true }) as never;

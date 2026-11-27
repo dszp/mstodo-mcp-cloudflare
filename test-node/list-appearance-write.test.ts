@@ -3,11 +3,11 @@
 // runs against a fake index and a fake Substrate client, so each test pins the
 // folder PATCH body and the outcome.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SubstrateError, type SubstrateFolder, type SubstrateFolderGroup } from "../src/core/graph/substrate-client";
-import type { OpsContext } from "../src/core/ops/context";
-import { syncExecutor } from "../src/core/sync/executor";
-import { wholeSecondOrder } from "../src/core/ops/lists";
-import { refsOf, type ExecInput } from "../src/core/sync/mutations";
+import { SubstrateError, type SubstrateFolder, type SubstrateFolderGroup } from "@potem/core/graph/substrate-client";
+import type { OpsContext } from "@potem/core/ops/context";
+import { syncExecutor } from "@potem/core/sync/executor";
+import { wholeSecondOrder } from "@potem/core/ops/lists";
+import { refsOf, type ExecInput } from "@potem/core/sync/mutations";
 
 type SideList = { list_id: string; group_id: string | null; order_datetime: string | null; wellknown: string | null };
 

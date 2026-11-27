@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { openDatabase } from "../src/hosts/node/sqlite-db";
 import { buildNodeEnv, type NodeEnv } from "../src/hosts/node/env";
-import { refusalDescription } from "../src/core/auth/grant";
-import { TOKENS_KEY } from "../src/core/auth/microsoft";
+import { refusalDescription } from "@potem/core/auth/grant";
+import { TOKENS_KEY } from "@potem/core/auth/microsoft";
 import { oauthFront } from "../src/hosts/shared/oauth";
-import type { Props } from "../src/core/types";
+import type { Props } from "@potem/core/types";
 import { ORIGIN, REDIRECT_URI, oauthClient, stubMicrosoft } from "./_oauth-client";
 
 // Spike (Task 9), kept as a drift guard: @cloudflare/workers-oauth-provider

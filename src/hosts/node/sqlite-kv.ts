@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { KeyValueStore } from "../../core/ports";
+import type { KeyValueStore } from "@potem/core/ports";
 
 // The KV surface @cloudflare/workers-oauth-provider uses on OAUTH_KV: core's
 // KeyValueStore plus the Workers KV spellings core never needs — get(key),

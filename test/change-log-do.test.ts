@@ -1,7 +1,7 @@
 // Durable Object twin of test-node/change-log.test.ts: the same checks on DO SQLite.
 import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 import { runChangeLogChecks } from "./_change-log-checks";
 
 describe("change log (Durable Object)", () => {

@@ -1,10 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { IndexCore, announcing, type IndexCoreMethods } from "../../core/index/index-core";
-import type { ChangeNotifier } from "../../core/ports";
+import { IndexCore, announcing, type IndexCoreMethods } from "@potem/core/index/index-core";
+import type { ChangeNotifier } from "@potem/core/ports";
 import { appEnv } from "./env";
 
 // Re-exported for existing importers; the implementations live in core.
-export { isScanDue, selectDueScanLists } from "../../core/index/index-core";
+export { isScanDue, selectDueScanLists } from "@potem/core/index/index-core";
 
 // Cloudflare host shell for the singleton index. All logic — the SQLite cache,
 // delta sync, and the sole-refresher token chain — lives in IndexCore over

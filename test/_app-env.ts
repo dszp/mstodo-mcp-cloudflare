@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { appEnv } from "../src/hosts/cloudflare/env";
-import type { AppEnv } from "../src/core/ports";
+import type { AppEnv } from "@potem/core/ports";
 
 // The cloudflare:test env wrapped the way every Cloudflare entry point wraps
 // its Env before calling core: same bindings, plus ownerIndex → the TodoIndex

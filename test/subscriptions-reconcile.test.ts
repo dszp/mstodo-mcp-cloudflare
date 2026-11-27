@@ -1,8 +1,8 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import type { TodoIndex } from "../src/hosts/cloudflare/todo-index-do";
-import { SCOPES, TOKENS_KEY } from "../src/core/auth/microsoft";
-import { parseTodoListId } from "../src/core/subscriptions/manager";
+import { SCOPES, TOKENS_KEY } from "@potem/core/auth/microsoft";
+import { parseTodoListId } from "@potem/core/subscriptions/manager";
 
 function indexStub(name: string) {
   return env.TODO_INDEX_DO.getByName(name);

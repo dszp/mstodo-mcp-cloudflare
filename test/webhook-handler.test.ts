@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 const env = testAppEnv();
-import { handleWebhook } from "../src/core/subscriptions/webhook-handler";
+import { handleWebhook } from "@potem/core/subscriptions/webhook-handler";
 import { testAppEnv } from "./_app-env";
 
 // Minimal ExecutionContext stub whose waitUntil work is awaitable via settle().

@@ -1,8 +1,8 @@
 // Shared assertions for the mutation batch (docs/SYNC-API.md sections 5 and
 // 6), run on both hosts' SQLite through IndexCore with a fake executor in
 // place of Graph. Returns named facts so each host asserts them one by one.
-import type { IndexCore } from "../src/core/index/index-core";
-import { applyBatch, type ExecInput, type Executor, type MutationStore } from "../src/core/sync/mutations";
+import type { IndexCore } from "@potem/core/index/index-core";
+import { applyBatch, type ExecInput, type Executor, type MutationStore } from "@potem/core/sync/mutations";
 
 export function storeOf(c: IndexCore): MutationStore {
   return {

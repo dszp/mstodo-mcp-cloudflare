@@ -1,10 +1,10 @@
 // Shared list sync-setting checks (docs/SYNC-API.md section 1.2), run on both
 // hosts' SQLite through IndexCore. The env needs a TODO_CACHE KV, where
 // updateListsConfig writes config:lists. Returns named facts so each host's test asserts them one by one.
-import type { IndexCore } from "../src/core/index/index-core";
-import type { FeedChange, FeedPage } from "../src/core/index/change-feed";
-import type { AppEnv } from "../src/core/ports";
-import { applyBatch, type ExecInput } from "../src/core/sync/mutations";
+import type { IndexCore } from "@potem/core/index/index-core";
+import type { FeedChange, FeedPage } from "@potem/core/index/change-feed";
+import type { AppEnv } from "@potem/core/ports";
+import { applyBatch, type ExecInput } from "@potem/core/sync/mutations";
 import { storeOf } from "./_mutation-checks";
 
 const task = (id: string, title: string) =>

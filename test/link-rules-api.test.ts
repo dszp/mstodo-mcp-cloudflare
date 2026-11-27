@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { appLinkRules, linkRulesRev } from "../src/core/api/link-rules";
-import { LinkRulesConfigSchema } from "../src/core/config/schemas";
+import { appLinkRules, linkRulesRev } from "@potem/core/api/link-rules";
+import { LinkRulesConfigSchema } from "@potem/core/config/schemas";
 
 const cfg = (rules: unknown[]) => LinkRulesConfigSchema.parse({ rules });
 const rule = (over: Record<string, unknown>) => ({

@@ -1,22 +1,22 @@
-// Unit tests for src/core/ops called directly, the way the sync mutations
+// Unit tests for packages/core/ops called directly, the way the sync mutations
 // endpoint will call them: Graph IDs in, typed results out, no MCP envelope.
 // The MCP-facing behavior is pinned by write-tools.test.ts; these cover the
 // op contract and the paths those snapshots don't reach.
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { openDatabase } from "../src/hosts/node/sqlite-db";
 import { buildNodeEnv } from "../src/hosts/node/env";
-import { GraphClient } from "../src/core/graph/client";
-import { SubstrateClient } from "../src/core/graph/substrate-client";
-import { LinkRulesConfigSchema } from "../src/core/config/schemas";
-import { storeLinkRules } from "../src/core/config/loader";
-import { opsContext, type OpsContext } from "../src/core/ops/context";
-import { WriteLease } from "../src/core/ops/write-lease";
-import { computeOrder } from "../src/core/ops/position";
-import { err, ok } from "../src/core/ops/result";
-import { createTask, moveTask, updateTask } from "../src/core/ops/tasks";
-import { createList } from "../src/core/ops/lists";
-import { createStep } from "../src/core/ops/steps";
-import { reorderMyDayTask } from "../src/core/ops/my-day";
+import { GraphClient } from "@potem/core/graph/client";
+import { SubstrateClient } from "@potem/core/graph/substrate-client";
+import { LinkRulesConfigSchema } from "@potem/core/config/schemas";
+import { storeLinkRules } from "@potem/core/config/loader";
+import { opsContext, type OpsContext } from "@potem/core/ops/context";
+import { WriteLease } from "@potem/core/ops/write-lease";
+import { computeOrder } from "@potem/core/ops/position";
+import { err, ok } from "@potem/core/ops/result";
+import { createTask, moveTask, updateTask } from "@potem/core/ops/tasks";
+import { createList } from "@potem/core/ops/lists";
+import { createStep } from "@potem/core/ops/steps";
+import { reorderMyDayTask } from "@potem/core/ops/my-day";
 
 const G = "https://graph.microsoft.com/v1.0/me/todo/lists";
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });

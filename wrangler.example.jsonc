@@ -46,7 +46,7 @@
     { "tag": "v1", "new_sqlite_classes": ["MSToDoMCP"] },
     { "tag": "v2", "new_sqlite_classes": ["TodoIndex"] },
     // Deletes every session object the old class left behind (sessions now
-    // expire after a day idle; see src/core/mcp/session-expiry.ts).
+    // expire after a day idle; see packages/core/mcp/session-expiry.ts).
     { "tag": "v3", "deleted_classes": ["MSToDoMCP"], "new_sqlite_classes": ["MSToDoSession"] }
   ],
 

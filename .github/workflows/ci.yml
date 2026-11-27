@@ -37,7 +37,7 @@ jobs:
         run: npx tsc --noEmit
 
       # The Node host's own check: Node types only, no Workers globals, so a
-      # Workers-only API reaching src/core or src/hosts/node fails here.
+      # Workers-only API reaching packages/core or src/hosts/node fails here.
       - name: Typecheck (Node host)
         run: npx tsc -p tsconfig.node.json
 

@@ -1,6 +1,6 @@
 // sync/coalesce.ts: one `changed` per burst (docs/SYNC-API.md section 7.1).
 import { describe, it, expect } from "vitest";
-import { coalescing, type Timers } from "../src/core/sync/coalesce";
+import { coalescing, type Timers } from "@potem/core/sync/coalesce";
 
 function clock() {
   let now = 1_000_000;

@@ -2,9 +2,9 @@
 import { describe, it, expect } from "vitest";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { IndexCore } from "../src/core/index/index-core";
-import { SCHEMA_DDL } from "../src/core/index/sql";
-import { applyMigrations } from "../src/core/index/migrations";
+import { IndexCore } from "@potem/core/index/index-core";
+import { SCHEMA_DDL } from "@potem/core/index/sql";
+import { applyMigrations } from "@potem/core/index/migrations";
 import { runChangeLogChecks } from "../test/_change-log-checks";
 
 function core() {

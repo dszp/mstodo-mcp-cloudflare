@@ -4,11 +4,11 @@
 // Workers, the in-process IndexCore on Node). Run by
 // test/api-routes.test.ts and test-node/api-routes.test.ts.
 import { expect } from "vitest";
-import { storeLinkRules } from "../src/core/config/loader";
-import { LinkRulesConfigSchema } from "../src/core/config/schemas";
-import { ownerIndex } from "../src/core/owner-index";
-import type { AppEnv } from "../src/core/ports";
-import { VERSION } from "../src/core/version";
+import { storeLinkRules } from "@potem/core/config/loader";
+import { LinkRulesConfigSchema } from "@potem/core/config/schemas";
+import { ownerIndex } from "@potem/core/owner-index";
+import type { AppEnv } from "@potem/core/ports";
+import { VERSION } from "@potem/core/version";
 import { ORIGIN, oauthClient } from "../test-node/_oauth-client";
 
 const task = (id: string, title: string) =>

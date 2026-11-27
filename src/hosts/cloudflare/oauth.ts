@@ -1,7 +1,7 @@
 import { MSToDoSession } from "./mcp-agent";
 import { MCP_PATH, oauthFront } from "../shared/oauth";
 import { appEnv } from "./env";
-import { OWNER_DO_NAME } from "../../core/index/sql";
+import { OWNER_DO_NAME } from "@potem/core/index/sql";
 
 // serve(path, { binding }) — agents/mcp defaults binding to "MCP_OBJECT", but
 // our DO binding (wrangler.example.jsonc) is named MCP_SESSION. Without this arg the SDK

@@ -28,11 +28,14 @@ const poolOptions = {
   },
 };
 
+const coreAlias = { "@potem/core": new URL("./packages/core", import.meta.url).pathname };
+
 export default defineConfig({
   test: {
     projects: [
       {
         plugins: [cloudflareTest(poolOptions)],
+        resolve: { alias: coreAlias },
         test: {
           name: "workers",
           include: ["test/**/*.test.ts"],
@@ -52,6 +55,7 @@ export default defineConfig({
         },
         resolve: {
           alias: {
+            ...coreAlias,
             "cloudflare:workers": new URL("./src/hosts/node/cloudflare-workers-shim.ts", import.meta.url).pathname,
           },
         },

@@ -4,14 +4,14 @@ import {
   OAuthResourceServer,
   type OAuthAuthorizationServerOptions,
 } from "@cloudflare/workers-oauth-provider";
-import { log } from "../../core/log";
-import { grantRefusal, refuseMcpRequest, refusalDescription } from "../../core/auth/grant";
-import { API_PATH, handleApiRequest, handlePublicApiRequest } from "../../core/api/router";
-import { refuseApiRequest } from "../../core/auth/grant";
-import type { AppEnv } from "../../core/ports";
-import type { Props } from "../../core/types";
+import { log } from "@potem/core/log";
+import { grantRefusal, refuseMcpRequest, refusalDescription } from "@potem/core/auth/grant";
+import { API_PATH, handleApiRequest, handlePublicApiRequest } from "@potem/core/api/router";
+import { refuseApiRequest } from "@potem/core/auth/grant";
+import type { AppEnv } from "@potem/core/ports";
+import type { Props } from "@potem/core/types";
 import { authHandler, isAuthUiPath, type ProviderEnv } from "./auth-handler";
-import { accessRefusalResponse, checkAccess } from "../../core/auth/access";
+import { accessRefusalResponse, checkAccess } from "@potem/core/auth/access";
 import {
   APP_SIGNIN_PATH,
   HANDOFF_PROP,

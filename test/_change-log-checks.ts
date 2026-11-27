@@ -1,8 +1,8 @@
 // Shared change-log assertions (docs/SYNC-API.md section 3), run on both hosts'
 // SQLite through IndexCore. Returns named facts so each host's test can assert
 // them one by one.
-import type { IndexCore } from "../src/core/index/index-core";
-import type { SqlDb } from "../src/core/ports";
+import type { IndexCore } from "@potem/core/index/index-core";
+import type { SqlDb } from "@potem/core/ports";
 
 const t = (id: string, title: string, modified: string) =>
   ({ id, title, status: "notStarted", lastModifiedDateTime: modified }) as never;

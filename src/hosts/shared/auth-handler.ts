@@ -4,10 +4,10 @@ import {
   type AuthRequest,
   type OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
-import { readBounded } from "../../core/util/body";
-import { log } from "../../core/log";
-import { ownerIndex } from "../../core/owner-index";
-import { consentRememberSecret } from "../../core/auth/crypto";
+import { readBounded } from "@potem/core/util/body";
+import { log } from "@potem/core/log";
+import { ownerIndex } from "@potem/core/owner-index";
+import { consentRememberSecret } from "@potem/core/auth/crypto";
 import { consentPage, errorPage } from "./consent-page";
 import {
   buildAnchorMailbox,
@@ -24,8 +24,8 @@ import {
   tokensFromResponse,
   wipeIdentityScopedState,
   TokenExchangeError,
-} from "../../core/auth/microsoft";
-import type { AppEnv } from "../../core/ports";
+} from "@potem/core/auth/microsoft";
+import type { AppEnv } from "@potem/core/ports";
 import { attachAccessHandoff, HANDOFF_PROP } from "./app-signin";
 
 // OAUTH_PROVIDER is the authorization server's helper API, which the OAuth

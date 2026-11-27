@@ -1,7 +1,7 @@
 // test/index-core.test.ts
 import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 
 describe("IndexCore", () => {
   it("runs over injected ports", async () => {

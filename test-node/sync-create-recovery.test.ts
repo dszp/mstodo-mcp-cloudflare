@@ -2,11 +2,11 @@
 // 5.4): a create whose earlier attempt may have reached Graph adopts what that
 // attempt made instead of making a second one.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { GraphError } from "../src/core/graph/client";
-import { IndexCore } from "../src/core/index/index-core";
-import type { OpsContext } from "../src/core/ops/context";
-import { syncExecutor } from "../src/core/sync/executor";
-import { applyBatch, type ExecInput } from "../src/core/sync/mutations";
+import { GraphError } from "@potem/core/graph/client";
+import { IndexCore } from "@potem/core/index/index-core";
+import type { OpsContext } from "@potem/core/ops/context";
+import { syncExecutor } from "@potem/core/sync/executor";
+import { applyBatch, type ExecInput } from "@potem/core/sync/mutations";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
 import { storeOf } from "../test/_mutation-checks";

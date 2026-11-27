@@ -18,3 +18,7 @@ src/**/*.*
 src/**/.*
 src/**/Dockerfile
 !src/**/*.ts
+!packages/
+packages/**/*.*
+packages/**/.*
+!packages/**/*.ts

@@ -1,15 +1,15 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import type { TodoTask, TodoTaskList } from "../src/core/graph/types";
+import type { TodoTask, TodoTaskList } from "@potem/core/graph/types";
 import type { TodoIndex } from "../src/hosts/cloudflare/todo-index-do";
-import { OWNER_DO_NAME } from "../src/core/index/sql";
+import { OWNER_DO_NAME } from "@potem/core/index/sql";
 import {
   TOKENS_KEY,
   IDENTITY_KEY,
   SCOPES,
   wipeIdentityScopedState,
   loadTokens,
-} from "../src/core/auth/microsoft";
+} from "@potem/core/auth/microsoft";
 import { testAppEnv } from "./_app-env";
 
 function indexStub(name = OWNER_DO_NAME) {

@@ -2,8 +2,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { openDatabase } from "../src/hosts/node/sqlite-db";
 import { buildNodeEnv, InvalidConfigError, MissingConfigError } from "../src/hosts/node/env";
 import { backgroundTasks, createHandler, startScheduler, toPublicOrigin } from "../src/hosts/node/http";
-import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
-import { MAX_TOOL_INPUT_ELEMENTS } from "../src/core/mcp/server";
+import { SCOPES, storeTokens } from "@potem/core/auth/microsoft";
+import { MAX_TOOL_INPUT_ELEMENTS } from "@potem/core/mcp/server";
 import { ORIGIN, oauthClient, stubMicrosoft } from "./_oauth-client";
 
 const vars = {

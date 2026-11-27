@@ -3,11 +3,11 @@
 // TODO_CACHE KV and MS_CLIENT_SECRET (tokens are sealed). Each check gets its
 // own lists, so they share one IndexCore. Returns named facts.
 import { vi } from "vitest";
-import type { IndexCore } from "../src/core/index/index-core";
-import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
-import { storeListsConfig } from "../src/core/config/loader";
-import { ListsConfigSchema } from "../src/core/config/schemas";
-import type { AppEnv } from "../src/core/ports";
+import type { IndexCore } from "@potem/core/index/index-core";
+import { SCOPES, storeTokens } from "@potem/core/auth/microsoft";
+import { storeListsConfig } from "@potem/core/config/loader";
+import { ListsConfigSchema } from "@potem/core/config/schemas";
+import type { AppEnv } from "@potem/core/ports";
 
 const LISTS = "https://graph.microsoft.com/v1.0/me/todo/lists/delta";
 const tasksDelta = (id: string) => `https://graph.microsoft.com/v1.0/me/todo/lists/${id}/tasks/delta`;

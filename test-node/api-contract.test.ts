@@ -4,11 +4,11 @@
 // When this fails, change the doc or the code in the same commit.
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { OPS, UPDATABLE } from "../src/core/sync/mutations";
-import type { FeedChange } from "../src/core/index/change-feed";
+import { OPS, UPDATABLE } from "@potem/core/sync/mutations";
+import type { FeedChange } from "@potem/core/index/change-feed";
 
 const DOC = readFileSync(new URL("../docs/SYNC-API.md", import.meta.url).pathname, "utf8");
 

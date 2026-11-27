@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { openDatabase, sqlDb } from "../src/hosts/node/sqlite-db";
 import { sqliteKv } from "../src/hosts/node/sqlite-kv";
 import { stateStore } from "../src/hosts/node/state-store";
-import { SCHEMA_DDL } from "../src/core/index/sql";
-import { applyMigrations } from "../src/core/index/migrations";
+import { SCHEMA_DDL } from "@potem/core/index/sql";
+import { applyMigrations } from "@potem/core/index/migrations";
 
 describe("sqlDb", () => {
   it("runs multi-statement DDL and parameterized queries", () => {

@@ -3,18 +3,18 @@
 // attachment.delete op and the sweep. A real IndexCore on node SQLite, the
 // real mutation pipeline and executor, and an in-memory blob store.
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 import { openDatabase, sqlDb, transactor } from "../src/hosts/node/sqlite-db";
 import { stateStore } from "../src/hosts/node/state-store";
-import { applyBatch } from "../src/core/sync/mutations";
-import { syncExecutor } from "../src/core/sync/executor";
-import { sweepBlobs, themeImageId, THEME_IMAGE_IDLE_MS } from "../src/core/blobs";
-import { themeImageBytes, uploadAttachment, uploadThemeImage } from "../src/core/api/uploads";
-import { attachmentBySid } from "../src/core/api/attachments";
-import type { AppEnv } from "../src/core/ports";
+import { applyBatch } from "@potem/core/sync/mutations";
+import { syncExecutor } from "@potem/core/sync/executor";
+import { sweepBlobs, themeImageId, THEME_IMAGE_IDLE_MS } from "@potem/core/blobs";
+import { themeImageBytes, uploadAttachment, uploadThemeImage } from "@potem/core/api/uploads";
+import { attachmentBySid } from "@potem/core/api/attachments";
+import type { AppEnv } from "@potem/core/ports";
 import { memoryBlobs } from "./_memory-blobs";
-import type { OpsContext } from "../src/core/ops/context";
-import type { FeedChange } from "../src/core/index/change-feed";
+import type { OpsContext } from "@potem/core/ops/context";
+import type { FeedChange } from "@potem/core/index/change-feed";
 
 function setup(opts: { blobs?: boolean } = {}) {
   const db = openDatabase(":memory:");

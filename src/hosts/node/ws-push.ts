@@ -4,8 +4,8 @@
 import type { IncomingHttpHeaders, IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { ChangeNotifier } from "../../core/ports";
-import { log } from "../../core/log";
+import type { ChangeNotifier } from "@potem/core/ports";
+import { log } from "@potem/core/log";
 
 export const SOCKET_PATH = "/api/v1/sync/socket";
 // The protocol only carries pings.

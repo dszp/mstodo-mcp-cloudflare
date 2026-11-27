@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import type { KeyValueStore, AppEnv } from "../src/core/ports";
+import type { KeyValueStore, AppEnv } from "@potem/core/ports";
 import { appEnv } from "../src/hosts/cloudflare/env";
 
 describe("ports", () => {

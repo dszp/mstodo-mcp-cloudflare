@@ -22,11 +22,11 @@
 // The Access token never appears in a redirect URL (section 18.7). Off (Access
 // not configured), /app/signin is not served and no handle is ever attached.
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
-import { checkAccess, handoffRedirectAllowed } from "../../core/auth/access";
-import { seal, unseal } from "../../core/auth/crypto";
-import { log } from "../../core/log";
-import type { AppEnv } from "../../core/ports";
-import { API_PATH } from "../../core/api/router";
+import { checkAccess, handoffRedirectAllowed } from "@potem/core/auth/access";
+import { seal, unseal } from "@potem/core/auth/crypto";
+import { log } from "@potem/core/log";
+import type { AppEnv } from "@potem/core/ports";
+import { API_PATH } from "@potem/core/api/router";
 import { errorPage } from "./consent-page";
 
 export const APP_SIGNIN_PATH = "/app/signin";

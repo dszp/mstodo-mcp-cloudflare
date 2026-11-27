@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it
 // before calling core (see test/_app-env.ts).
 const env = testAppEnv();
-import { handleUpload } from "../src/core/upload/handler";
-import { createUploadCapability } from "../src/core/upload/tokens";
+import { handleUpload } from "@potem/core/upload/handler";
+import { createUploadCapability } from "@potem/core/upload/tokens";
 import { testAppEnv } from "./_app-env";
-import { ownerIndex } from "../src/core/owner-index";
-import { attachmentBlobKey } from "../src/core/blobs";
+import { ownerIndex } from "@potem/core/owner-index";
+import { attachmentBlobKey } from "@potem/core/blobs";
 
 const TOKENS_KEY = "tokens:owner";
 const SCOPE = { list_id: "L1", task_id: "T1" } as const;

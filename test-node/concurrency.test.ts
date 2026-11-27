@@ -1,6 +1,6 @@
-// mapPool (src/core/graph/concurrency.ts): bounded parallel Graph calls.
+// mapPool (packages/core/graph/concurrency.ts): bounded parallel Graph calls.
 import { describe, it, expect } from "vitest";
-import { mapPool } from "../src/core/graph/concurrency";
+import { mapPool } from "@potem/core/graph/concurrency";
 
 const tick = () => new Promise((r) => setTimeout(r, 1));
 

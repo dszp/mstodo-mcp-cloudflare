@@ -3,7 +3,7 @@
 // supports UPDATE ... FROM, used for the merge branch).
 import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import { IndexCore } from "../src/core/index/index-core";
+import { IndexCore } from "@potem/core/index/index-core";
 
 describe("IndexCore.moveTask on DO SQLite", () => {
   it("re-keys and merges inside one transaction", async () => {

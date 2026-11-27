@@ -3,9 +3,9 @@
 // scripted per check. Run by test/attachment-route.test.ts and
 // test-node/attachment-route.test.ts.
 import { expect } from "vitest";
-import { ownerIndex } from "../src/core/owner-index";
-import type { AppEnv } from "../src/core/ports";
-import { contentDisposition } from "../src/core/upload/handler";
+import { ownerIndex } from "@potem/core/owner-index";
+import type { AppEnv } from "@potem/core/ports";
+import { contentDisposition } from "@potem/core/upload/handler";
 import { ORIGIN, oauthClient } from "../test-node/_oauth-client";
 
 const task = (id: string, title: string) =>

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { checklistCacheEnabled, checklistScanMaxTasksPerCycle } from "../src/core/checklist/gate";
-import type { AppEnv } from "../src/core/ports";
+import { checklistCacheEnabled, checklistScanMaxTasksPerCycle } from "@potem/core/checklist/gate";
+import type { AppEnv } from "@potem/core/ports";
 
 const base = {} as unknown as AppEnv;
 

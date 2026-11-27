@@ -1,7 +1,7 @@
 // test-node/register-tools.test.ts
 import { describe, it, expect } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { registerTools } from "../src/core/mcp/register-tools";
+import { registerTools } from "@potem/core/mcp/register-tools";
 
 describe("registerTools", () => {
   it("registers every tool with all three core hints", () => {

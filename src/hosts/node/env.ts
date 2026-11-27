@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AppEnv, IndexBackend } from "../../core/ports";
-import { IndexCore, announcing } from "../../core/index/index-core";
+import type { AppEnv, IndexBackend } from "@potem/core/ports";
+import { IndexCore, announcing } from "@potem/core/index/index-core";
 import { SocketHub } from "./ws-push";
 import { sqlDb, transactor } from "./sqlite-db";
 import { sqliteKv, type OAuthKvStore } from "./sqlite-kv";

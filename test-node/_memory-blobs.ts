@@ -1,5 +1,5 @@
 // An in-memory BlobStore for node tests: what R2 does, minus the network.
-import type { BlobStore } from "../src/core/ports";
+import type { BlobStore } from "@potem/core/ports";
 
 export function memoryBlobs() {
   const objects = new Map<string, { bytes: Uint8Array; type?: string; uploaded: Date }>();

@@ -1,15 +1,15 @@
 import { MSToDoSession } from "./mcp-agent";
 import { TodoIndex } from "./todo-index-do";
-import { ownerIndex } from "../../core/owner-index";
+import { ownerIndex } from "@potem/core/owner-index";
 import { appEnv } from "./env";
 import { buildOAuthFront } from "./oauth";
-import { handleUpload } from "../../core/upload/handler";
-import { handleDownload } from "../../core/upload/download-handler";
-import { handleWebhook } from "../../core/subscriptions/webhook-handler";
-import { VERSION } from "../../core/version";
-import { handleAppleAssociation } from "../../core/auth/apple-association";
-import { sweepBlobs } from "../../core/blobs";
-import { log } from "../../core/log";
+import { handleUpload } from "@potem/core/upload/handler";
+import { handleDownload } from "@potem/core/upload/download-handler";
+import { handleWebhook } from "@potem/core/subscriptions/webhook-handler";
+import { VERSION } from "@potem/core/version";
+import { handleAppleAssociation } from "@potem/core/auth/apple-association";
+import { sweepBlobs } from "@potem/core/blobs";
+import { log } from "@potem/core/log";
 
 const BLOB_SWEEP_HOUR_UTC = 8;
 

@@ -1,4 +1,4 @@
-// The Cloudflare Access JWT check (src/core/auth/access.ts), defined once and
+// The Cloudflare Access JWT check (packages/core/auth/access.ts), defined once and
 // run on both pools: test/access-verifier.test.ts (workerd's WebCrypto) and
 // test-node/access-verifier.test.ts (Node's).
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -15,7 +15,7 @@ import {
   KEYS_REFETCH_MIN_MS,
   ACCESS_CLOCK_SKEW_SEC,
   type AccessConfig,
-} from "../src/core/auth/access";
+} from "@potem/core/auth/access";
 import { ACCESS_VARS, AUD, CERTS_URL, ISSUER, OWNER, goodClaims, makeKey, signJwt, stubCerts, type TestKey } from "./_access-keys";
 
 const CONFIG: AccessConfig = { issuer: ISSUER, certsUrl: CERTS_URL, aud: AUD };

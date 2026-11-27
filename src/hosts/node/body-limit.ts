@@ -1,5 +1,5 @@
-import { UPLOAD_BODY_MAX_BYTES } from "../../core/upload/handler";
-import { PER_FILE_MAX_BYTES } from "../../core/upload/graph-upload";
+import { UPLOAD_BODY_MAX_BYTES } from "@potem/core/upload/handler";
+import { PER_FILE_MAX_BYTES } from "@potem/core/upload/graph-upload";
 
 // Request body caps for the Node host. On Cloudflare the platform bounds every
 // request body; a Node process has no such limit, and several routes buffer the

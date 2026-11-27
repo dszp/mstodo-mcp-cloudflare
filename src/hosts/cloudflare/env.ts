@@ -1,5 +1,5 @@
-import type { AppEnv, IndexBackend } from "../../core/ports";
-import { OWNER_DO_NAME } from "../../core/index/sql";
+import type { AppEnv, IndexBackend } from "@potem/core/ports";
+import { OWNER_DO_NAME } from "@potem/core/index/sql";
 
 // Every Cloudflare entry point (Worker fetch/scheduled, the TodoIndex DO, the
 // MCP agent, the OAuth callbacks) wraps its raw Env with this before handing it

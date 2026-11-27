@@ -3,8 +3,8 @@
 // code redemption, the socket upgrade, and what stays outside Access. Run by
 // test/access-flow.test.ts and test-node/access-flow.test.ts.
 import { expect } from "vitest";
-import { resetAccessKeyCache } from "../src/core/auth/access";
-import type { AppEnv } from "../src/core/ports";
+import { resetAccessKeyCache } from "@potem/core/auth/access";
+import type { AppEnv } from "@potem/core/ports";
 import { ORIGIN, REDIRECT_URI, oauthClient, stubMicrosoft } from "../test-node/_oauth-client";
 
 // Another redirect URI the test client registers, never in the allowlist.

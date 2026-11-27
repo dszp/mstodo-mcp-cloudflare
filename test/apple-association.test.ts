@@ -1,6 +1,6 @@
 // /.well-known/apple-app-site-association (docs/SYNC-API.md section 8).
 import { describe, it, expect, vi } from "vitest";
-import { appleAppIds, handleAppleAssociation } from "../src/core/auth/apple-association";
+import { appleAppIds, handleAppleAssociation } from "@potem/core/auth/apple-association";
 import { testAppEnv } from "./_app-env";
 
 const URL_ = "https://mcp.test/.well-known/apple-app-site-association";

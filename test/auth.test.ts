@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
-import { OWNER_DO_NAME } from "../src/core/index/sql";
-import { seal, unseal, isSealed } from "../src/core/auth/crypto";
+import { OWNER_DO_NAME } from "@potem/core/index/sql";
+import { seal, unseal, isSealed } from "@potem/core/auth/crypto";
 import {
   TOKENS_KEY,
   IDENTITY_KEY,
@@ -11,16 +11,16 @@ import {
   reauthReasonFromTokenError,
   TokenExchangeError,
   type StoredTokens,
-} from "../src/core/auth/microsoft";
-import { parseClaimsChallenge, ReauthRequiredError, isReauthRequired } from "../src/core/auth/reauth";
-import { grantRefusal, refuseMcpRequest, MAX_GRANT_AGE_MS } from "../src/core/auth/grant";
-import { GraphClient } from "../src/core/graph/client";
+} from "@potem/core/auth/microsoft";
+import { parseClaimsChallenge, ReauthRequiredError, isReauthRequired } from "@potem/core/auth/reauth";
+import { grantRefusal, refuseMcpRequest, MAX_GRANT_AGE_MS } from "@potem/core/auth/grant";
+import { GraphClient } from "@potem/core/graph/client";
 import { consentPage } from "../src/hosts/shared/consent-page";
 import { authHandler, type ProviderEnv } from "../src/hosts/shared/auth-handler";
 import { appEnv } from "../src/hosts/cloudflare/env";
-import type { Props } from "../src/core/types";
+import type { Props } from "@potem/core/types";
 import { testAppEnv } from "./_app-env";
-import type { AppEnv } from "../src/core/ports";
+import type { AppEnv } from "@potem/core/ports";
 
 const E = testAppEnv();
 const AuthHandler = authHandler<Env & ProviderEnv>(appEnv);

@@ -3,13 +3,13 @@
 // Shared by both hosts; each function returns named facts so each host's test
 // asserts them one by one.
 import { vi } from "vitest";
-import type { IndexCore } from "../src/core/index/index-core";
-import type { FeedChange, FeedPage } from "../src/core/index/change-feed";
-import type { AppEnv, SqlDb, SqlValue } from "../src/core/ports";
-import { SCOPES, storeTokens } from "../src/core/auth/microsoft";
-import { ListsConfigSchema } from "../src/core/config/schemas";
-import { SCHEMA_DDL } from "../src/core/index/sql";
-import { applyMigrations } from "../src/core/index/migrations";
+import type { IndexCore } from "@potem/core/index/index-core";
+import type { FeedChange, FeedPage } from "@potem/core/index/change-feed";
+import type { AppEnv, SqlDb, SqlValue } from "@potem/core/ports";
+import { SCOPES, storeTokens } from "@potem/core/auth/microsoft";
+import { ListsConfigSchema } from "@potem/core/config/schemas";
+import { SCHEMA_DDL } from "@potem/core/index/sql";
+import { applyMigrations } from "@potem/core/index/migrations";
 
 function walk(c: IndexCore, cursor: string | null) {
   const all: FeedChange[] = [];

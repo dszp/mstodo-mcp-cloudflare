@@ -1,5 +1,5 @@
 import { expect, vi } from "vitest";
-import { SCOPES } from "../src/core/auth/microsoft";
+import { SCOPES } from "@potem/core/auth/microsoft";
 
 // A browser + MCP client driving the OAuth front (DCR → consent → Microsoft
 // callback → /token) through any fetch function, with a cookie jar. Shared by

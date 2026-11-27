@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { log } from "../../core/log";
+import { log } from "@potem/core/log";
 
 // One process per database file. The token refresh chain and the sync loop in
 // IndexCore are serialized in memory, so a second process on the same file

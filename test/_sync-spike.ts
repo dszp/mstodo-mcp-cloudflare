@@ -1,6 +1,6 @@
 // Shared spike body, run against both hosts' SQLite (see the two
 // sync-spike-sqlite tests). Uses only the SqlDb port, so it is host-neutral.
-import type { SqlDb } from "../src/core/ports";
+import type { SqlDb } from "@potem/core/ports";
 
 export function runSyncLogSpike(sql: SqlDb) {
   sql.exec(`CREATE TABLE IF NOT EXISTS spike_items (id TEXT PRIMARY KEY, title TEXT, marker INTEGER)`);

@@ -1,4 +1,4 @@
-import { log } from "../../core/log";
+import { log } from "@potem/core/log";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 

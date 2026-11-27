@@ -11,11 +11,11 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY scripts/build-node.mjs ./scripts/
-COPY src/core ./src/core
+COPY packages/core ./packages/core
 COPY src/hosts/shared ./src/hosts/shared
 COPY src/hosts/node ./src/hosts/node
 # Guard for what .dockerignore can't express: refuse anything but TypeScript.
-RUN if find src -type f ! -name '*.ts' | grep .; then echo "non-source file in build context" >&2; exit 1; fi
+RUN if find src packages -type f ! -name '*.ts' | grep .; then echo "non-source file in build context" >&2; exit 1; fi
 RUN npm run build:node
 
 FROM node:24-slim

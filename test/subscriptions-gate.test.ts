@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { taskSubscriptionsEnabled, webhookUrl } from "../src/core/subscriptions/gate";
-import type { AppEnv } from "../src/core/ports";
+import { taskSubscriptionsEnabled, webhookUrl } from "@potem/core/subscriptions/gate";
+import type { AppEnv } from "@potem/core/ports";
 
 const base = { SERVICE_BASE_URL: "https://h.example.com" } as unknown as AppEnv;
 
