@@ -89,7 +89,7 @@ export function toPublicOrigin(req: Request, origin: string): Request {
   } as RequestInit);
 }
 
-// Same routing order as the Worker (src/hosts/cloudflare/worker.ts): /health,
+// Same routing order as the Worker (workers/server/src/hosts/cloudflare/worker.ts): /health,
 // the Apple association file, the three public capability/webhook endpoints, then the OAuth front, which
 // owns /authorize, /token, /register, /.well-known/*, /mcp and /api/v1.
 // publicOrigin is required (SERVICE_BASE_URL in main.ts): throws

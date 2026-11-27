@@ -16,7 +16,7 @@ export type GrantRefusal = "grant_revoked" | "grant_expired" | "reauth_required"
 // Callers must pass the props of the token on THIS request. McpAgent's
 // this.props is the props of the token that first started the session and is
 // never refreshed afterwards, so it can't be used here — each host's /mcp
-// resource server (oauthFront in src/hosts/shared/oauth.ts, and
+// resource server (oauthFront in workers/server/src/hosts/shared/oauth.ts, and
 // handleApiRequest in core/api/router.ts for /api/v1) runs this check with
 // that request's props instead.
 export async function grantRefusal(env: AppEnv, props: Partial<Props> | undefined): Promise<GrantRefusal | null> {
@@ -31,7 +31,7 @@ export async function grantRefusal(env: AppEnv, props: Partial<Props> | undefine
 
 // The HTTP-layer gate for /mcp: null to let the request through, or the 401
 // invalid_token response for a refused grant (see oauthFront in
-// src/hosts/shared/oauth.ts).
+// workers/server/src/hosts/shared/oauth.ts).
 export function refuseMcpRequest(env: AppEnv, props: Partial<Props> | undefined): Promise<Response | null> {
   return refuseRequest(env, props, "mcp_request_refused");
 }

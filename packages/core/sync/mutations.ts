@@ -2,7 +2,7 @@
 // (docs/SYNC-API.md sections 5 and 6). This module validates a batch, applies
 // idempotency, drops fields a newer edit already set, and hands each mutation
 // to an executor that does the write-through. The executor is the ops layer
-// (src/core/ops/), the same code the MCP tools use.
+// (packages/core/ops/), the same code the MCP tools use.
 
 import { SMART_LISTS } from "../index/change-feed";
 

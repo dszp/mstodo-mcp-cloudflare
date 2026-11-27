@@ -78,7 +78,7 @@ import {
 } from "../subscriptions/manager";
 
 // Phase 5 — IndexCore (hosted on Cloudflare by the TodoIndex singleton Durable
-// Object, src/hosts/cloudflare/todo-index-do.ts): the single source of truth for
+// Object, workers/server/src/hosts/cloudflare/todo-index-do.ts): the single source of truth for
 // Microsoft To Do state. SQLite `tasks` (+ `tasks_fts` FTS5 mirror) + `lists`
 // roster + `sync_state`. Addressed via ownerIndex(env) from the agent
 // and the Worker scheduled() heartbeat.
@@ -1953,7 +1953,7 @@ export class IndexCore implements TokenProvider {
   }
 
   // A file attachment's sid and metadata by its Graph id: what the connector
-  // needs to find or keep the blob store's copy (src/core/attachment-cache.ts).
+  // needs to find or keep the blob store's copy (packages/core/attachment-cache.ts).
   // Null when the mirror doesn't have it, it's a reference attachment (no
   // bytes), or its list is excluded (nothing from an excluded list is kept).
   attachmentBlobRef(attachmentId: string): { sid: string; task_id: string; name: string | null; size: number | null; content_type: string | null } | null {
@@ -2135,7 +2135,7 @@ export class IndexCore implements TokenProvider {
   }
 
   // ---- Client sync API, write side (docs/SYNC-API.md sections 5 and 6) ----
-  // The idempotency record and field clocks; src/core/sync/mutations.ts runs
+  // The idempotency record and field clocks; packages/core/sync/mutations.ts runs
   // the batch and calls these. Each is one synchronous SQLite step.
 
   // Claims a mutation id. `done` returns the stored result (a retry); a live
@@ -3709,7 +3709,7 @@ export class IndexCore implements TokenProvider {
   // releases it. Waiting happens HERE, in a FIFO of pending acquires, so a
   // burst of writes queues in arrival order instead of polling; only the
   // wait crosses RPC. A writer that dies stops renewing and the TTL hands the
-  // lease to the next waiter. Client side: src/core/ops/write-lease.ts.
+  // lease to the next waiter. Client side: packages/core/ops/write-lease.ts.
   //
   // {holder, expiresAt} is persisted in the StateStore so a restart of the
   // object (it can be evicted between a holder's renewals) doesn't drop a live

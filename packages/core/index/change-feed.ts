@@ -169,7 +169,7 @@ const iso = (ms: number | null): string | null => (ms == null ? null : new Date(
 
 // Due and start are dates, stored either at UTC midnight (Graph write-through)
 // or at local midnight in the owner's zone (the To Do app; see
-// src/core/util/dates.ts). An exact UTC midnight is read as a UTC date; any
+// packages/core/util/dates.ts). An exact UTC midnight is read as a UTC date; any
 // other instant is local midnight, read in `timeZone`. (Local midnight is never
 // an exact UTC midnight except in UTC itself, where both readings agree.)
 export function bareDate(ms: number | null, timeZone: string): string | null {

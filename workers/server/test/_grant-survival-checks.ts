@@ -4,7 +4,7 @@
 // (Workers KV + the TodoIndex DO) and test-node/grant-survival.test.ts (SQLite).
 //
 // Grants are issued under the OLD configuration, frozen below exactly as
-// src/hosts/shared/oauth.ts built it before the switch, then the NEW front
+// workers/server/src/hosts/shared/oauth.ts built it before the switch, then the NEW front
 // is built over the same KV and the same tokens are presented to it.
 import { expect } from "vitest";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";

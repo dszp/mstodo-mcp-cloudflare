@@ -87,7 +87,7 @@ registration**) and collect four values for the Worker's secrets.
 ### 2. API permissions
 
 Add these **Microsoft Graph → Delegated** permissions (they must equal the `SCOPES`
-constant in `src/core/auth/microsoft.ts`: `Tasks.ReadWrite offline_access User.Read`):
+constant in `packages/core/auth/microsoft.ts`: `Tasks.ReadWrite offline_access User.Read`):
 
 | Permission | Why |
 |---|---|
@@ -199,7 +199,7 @@ optional: set `"BLOBS": null` in step 3 to leave it out.
 
 Each deployment is a folder under `deployments/<name>/`, which is gitignored because it
 holds account-specific IDs. `<name>` is lowercase letters, digits and hyphens. The
-commands below render `wrangler.example.jsonc` plus this folder's `deployment.jsonc` into
+commands below render `workers/server/wrangler.example.jsonc` plus this folder's `deployment.jsonc` into
 a wrangler config, check it, write it to `.wrangler/deployments/<name>/rendered.json` and run
 wrangler against it. A deployment that fails a check gets no `rendered.json`, and a stale one
 is removed. `npm run render -- <name>` prints the config without writing it. There is no root
@@ -226,7 +226,7 @@ Edit `deployment.jsonc` and fill in:
   subscription, so it must be a reachable https URL.
 - `workers_dev` and `preview_urls`: whether the `workers.dev` address and preview URLs are on.
 - `kv`: the two namespace IDs from step 2. `r2`: the bucket name from step 2, or `null`.
-- `vars` (optional): overrides for any var in `wrangler.example.jsonc`, as strings. The
+- `vars` (optional): overrides for any var in `workers/server/wrangler.example.jsonc`, as strings. The
   other vars, including `ENABLE_TASK_SUBSCRIPTIONS`, keep the example's values.
 
 `vars.ENABLE_TASK_SUBSCRIPTIONS` is **ON by default.** Graph change-notification subscriptions
@@ -240,7 +240,7 @@ budget (shared across all apps in the tenant) is spoken for. (`todoTask` has no 
 per-resource cap: one subscription per list, e.g. ~38 here; if any tenant limit is ever hit, Graph
 returns `403` and that list quietly falls back to timer-only.)
 
-The committed `wrangler.example.jsonc` is the template for every deployment and what the test
+The committed `workers/server/wrangler.example.jsonc` is the template for every deployment and what the test
 pool and CI read, so `npm test` works without any deployment. A new binding added there reaches
 every deployment on its next deploy, once the deployment file supplies its ID.
 
@@ -527,14 +527,14 @@ official To Do client's network calls. Microsoft may change it without notice.
 | **Tools return empty right after deploy** | The index is still warming. `query_tasks`/`search_tasks` are empty until the first baseline lands; retry shortly or check `sync_status`. |
 | **Claude.ai can't reconnect after changes** | Clear the Claude.ai-side OAuth grants (DCR sessions) — see [README → Reset](./README.md#reset) — then re-add the connector. |
 | **Switched Microsoft accounts and data looks wiped** | Expected: the identity-change auto-wipe clears the prior account's index + tokens + aliases (see [README → Identity-change auto-wipe](./README.md#identity-change-auto-wipe-built-in)). The new account re-baselines on the next sync. |
-| **Local `tsc` errors about `Env` / bindings** | The binding types live in the gitignored, generated `worker-configuration.d.ts`. Run `npm run types` (it reads `wrangler.example.jsonc`, as CI does) after any change to the example's bindings. |
+| **Local `tsc` errors about `Env` / bindings** | The binding types live in the gitignored, generated `worker-configuration.d.ts`. Run `npm run types` (it reads `workers/server/wrangler.example.jsonc`, as CI does) after any change to the example's bindings. |
 
 ## Local development
 
 ```bash
-npm run types             # (re)generate worker-configuration.d.ts from wrangler.example.jsonc
+npm run types             # (re)generate worker-configuration.d.ts from workers/server/wrangler.example.jsonc
 npx tsc --noEmit          # typecheck
-npm test                  # vitest (uses wrangler.example.jsonc; no secrets needed)
+npm test                  # vitest (uses workers/server/wrangler.example.jsonc; no secrets needed)
 npm run dev -- <name>     # local Worker using deployments/<name>/.dev.vars
 ```
 

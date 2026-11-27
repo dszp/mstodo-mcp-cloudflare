@@ -2,7 +2,7 @@
 # directory also holds gitignored secrets and local config (.dev.vars,
 # deployments/, ...), and the Compose .env sits in
 # workers/server/src/hosts/node/; none of it may reach an image. Only TypeScript source is
-# re-included from workers/server/src/. Buildah/Podman drop an excluded directory together
+# re-included from packages/ and workers/server/src/. Buildah/Podman drop an excluded directory together
 # with everything under it, so directories can't be excluded and re-entered;
 # instead every file with a dot in its name (.env, .env.*, *.sqlite*,
 # compose.yaml, ...) and every dotfile is dropped, then *.ts is restored.

@@ -163,7 +163,7 @@ export async function handleUpload(req: Request, env: AppEnv): Promise<Response 
   // rides in the query string (as the upload page sends it) it is checked first.
   // A body sent without a declared length is NOT bounded here: the host must
   // bound request bodies. Cloudflare's platform does; the Node host caps them
-  // in createHandler (src/hosts/node/body-limit.ts).
+  // in createHandler (workers/server/src/hosts/node/body-limit.ts).
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (declared > UPLOAD_BODY_MAX_BYTES) {
     return json({ ok: false, reason: "too_large_batch", max: TOTAL_BATCH_MAX_BYTES }, 413);

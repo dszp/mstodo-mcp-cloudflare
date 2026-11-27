@@ -3,7 +3,7 @@ import type { IndexBackend } from "../ports";
 
 // The single write queue (docs/SYNC-API.md section 18.4), client side.
 //
-// Every op in src/core/ops runs inside ctx.writes.run(), so an MCP tool, a sync
+// Every op in packages/core/ops runs inside ctx.writes.run(), so an MCP tool, a sync
 // mutation and (later) an n8n route never interleave their Graph/Substrate
 // calls. Each Graph call yields, so without this a retried sync batch, a second
 // device and an MCP tool could all be mid-write on the same task at once.

@@ -1,4 +1,4 @@
-// instrument() (src/core/observability/instrument.ts): one log event per MCP
+// instrument() (packages/core/observability/instrument.ts): one log event per MCP
 // tool call. A failure is logged by its reason code only, because failure
 // payloads can carry Graph error bodies and echoed user input.
 import { afterEach, describe, it, expect, vi } from "vitest";

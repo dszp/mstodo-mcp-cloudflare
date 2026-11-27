@@ -1,6 +1,6 @@
 // The client sync API's routes (docs/SYNC-API.md sections 4, 5, 14.1, 18.7),
 // shared by both hosts: the reads here, POST /sync/mutations in ./mutations.ts.
-// The OAuth front (src/hosts/shared/oauth.ts) mounts them: handlePublicApiRequest before the /api/v1 resource server, and
+// The OAuth front (workers/server/src/hosts/shared/oauth.ts) mounts them: handlePublicApiRequest before the /api/v1 resource server, and
 // handleApiRequest as that resource server's handler, so every request that
 // reaches handleApiRequest carries a valid token whose audience is /api/v1.
 import { refuseApiRequest } from "../auth/grant";

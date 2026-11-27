@@ -9,7 +9,7 @@ import { ORIGIN, REDIRECT_URI, oauthClient, stubMicrosoft } from "./_oauth-clien
 
 // Spike (Task 9), kept as a drift guard: @cloudflare/workers-oauth-provider
 // runs on Node with the SAME OAuth front both hosts use (oauthFront in
-// src/hosts/shared/oauth.ts) driving OUR auth flow
+// workers/server/src/hosts/shared/oauth.ts) driving OUR auth flow
 // (consent page, Microsoft callback, OWNER_EMAIL gate, grant epoch) over
 // SQLite-backed KV and an in-process IndexCore. Only the /mcp handler differs:
 // it echoes the grant's epoch instead of serving MCP.

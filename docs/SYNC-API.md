@@ -118,7 +118,7 @@ A list nothing classifies (`unclassified` in `list_lists`) syncs as `todo`. Noth
 depends on `reference` existing: if it is dropped later, the setting is `todo` or
 `excluded`.
 
-**Where the setting comes from**, first hit wins (`classifyList`, `src/core/config/classifier.ts`):
+**Where the setting comes from**, first hit wins (`classifyList`, `packages/core/config/classifier.ts`):
 
 1. An ID pin in `config:lists.overrides`. `set_list_config` and the app's
    `list.update` both write here, so a pin is the normal way to set a list. A list
@@ -940,7 +940,7 @@ owner. An update or delete is safe to repeat as-is.
 
 The MCP tool handlers in `register-tools.ts` (about 4,800 lines) are closures bound to
 `McpServer`. Neither this API nor ROADMAP §1 can reuse them as they stand. The first
-build step extracts the write logic into `src/core/ops/` — plain functions taking a
+build step extracts the write logic into `packages/core/ops/` — plain functions taking a
 `GraphClient`, an optional `SubstrateClient`, and the index — and makes the MCP tools
 call them. Existing MCP tests guard the refactor. The sync mutation handler and the
 §1 routes then call the same functions, so the three surfaces can't drift.
@@ -1154,7 +1154,7 @@ OAuth issuer, so a `client_id` built into the app would only work on one server
 grant list show the app the same way on every server.
 
 **Token lifetimes.** Access tokens last one hour, and refresh tokens slide to 14 days
-from last use (`src/hosts/shared/oauth.ts`). An iPhone app left unused for two weeks
+from last use (`workers/server/src/hosts/shared/oauth.ts`). An iPhone app left unused for two weeks
 has to sign in again. That's the existing connector policy; changing it for the app
 alone is possible later through the `tokenExchangeCallback`.
 
@@ -1174,7 +1174,7 @@ test that existing `/mcp` grants survive the change (the library keeps
 ### 8.1 Cloudflare Access in front of the app
 
 **Status: built, off by default.** The server-side half is in the code
-(`src/core/auth/access.ts`, `src/hosts/shared/app-signin.ts`). It stays off until the
+(`packages/core/auth/access.ts`, `workers/server/src/hosts/shared/app-signin.ts`). It stays off until the
 owner sets `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`; with neither set, every path behaves
 as it did before. The Access application itself is account configuration, which the
 owner sets up (see **Turning it on** below).
@@ -1322,12 +1322,12 @@ sign-in. Section 9 covers it.
 Both surfaces live under `/api/v1`, behind one router and one auth layer:
 
 ```
-src/core/api/
+packages/core/api/
   router.ts     # /api/v1/* path → handler; both hosts mount it
   auth.ts       # resolves a request to { principal, scopes } or a 401/403
   sync/         # changes, mutations, socket, attachments
   routes/       # the ROADMAP §1 per-tool routes (built later)
-src/core/ops/   # write logic shared by MCP tools, the sync API and §1 routes (section 5.5)
+packages/core/ops/   # write logic shared by MCP tools, the sync API and §1 routes (section 5.5)
 ```
 
 - The OAuth provider moves to the library's role-based form, with `/mcp` and
@@ -1337,7 +1337,7 @@ src/core/ops/   # write logic shared by MCP tools, the sync API and §1 routes (
   `/api/v1` routes n8n uses, never the sync routes (to verify: how the role-based form
   exposes `resolveExternalToken`). Cloudflare Access service tokens, the other §1 option, are
   checked at the edge before the Worker runs and need no code here.
-- `router.ts` is in `src/core`, so both hosts get it. On Node it is mounted in
+- `router.ts` is in `packages/core`, so both hosts get it. On Node it is mounted in
   `createHandler`, behind the existing body caps.
 
 Building the §1 routes isn't part of this work. Only the shared router, auth layer and
@@ -1655,7 +1655,7 @@ So the design separates them:
 
 - **An identity provider** answers "who is signing in". It is the upstream of this
   server's OAuth flow (`beginUpstream` / `finishUpstream` in
-  `src/hosts/shared/auth-handler.ts`, which today always goes to Microsoft).
+  `workers/server/src/hosts/shared/auth-handler.ts`, which today always goes to Microsoft).
 - **A data source** answers "where do tasks come from". Graph is the only one built
   (`SYNC_SOURCE=graph`); `local` comes later (section 10). Connecting Graph remains a
   Microsoft authorization, but it becomes a connection the owner makes, not the
@@ -1703,7 +1703,7 @@ that an email alone can't be trusted (`/me.mail` is admin-settable; the UPN chec
 
 ## 16. Running without Cloudflare
 
-The Node host (`src/hosts/node`, `docs/NODE-HOSTING.md`) already runs the MCP server
+The Node host (`workers/server/src/hosts/node`, `docs/NODE-HOSTING.md`) already runs the MCP server
 with no Cloudflare services. Everything in this document is designed to work there
 too:
 

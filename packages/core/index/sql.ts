@@ -10,7 +10,7 @@ import type { ChecklistItem, TodoTask, TodoTaskList } from "../graph/types";
 import { stripHtml } from "../util/html";
 
 // Name the Cloudflare host addresses the singleton index Durable Object by
-// (src/hosts/cloudflare/env.ts). Core reaches the index via ownerIndex(env).
+// (workers/server/src/hosts/cloudflare/env.ts). Core reaches the index via ownerIndex(env).
 export const OWNER_DO_NAME = "owner";
 
 // ---------------------------------------------------------------------------

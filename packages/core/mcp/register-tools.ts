@@ -91,7 +91,7 @@ const GraphTasksPageSchema = z
 // configured TIMEZONE (an IANA name). en-CA formats as YYYY-MM-DD.
 const MY_DAY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-// Another write held the write lease past the wait (src/core/ops/write-lease.ts).
+// Another write held the write lease past the wait (packages/core/ops/write-lease.ts).
 function writeBusyResponse(): McpResponse {
   return errResponse("write_busy", { hint: "Another change to To Do is in progress. Retry in a few seconds." });
 }
@@ -919,7 +919,7 @@ class ToDoTools implements TokenProvider {
           );
           // Single-call $expand for all three nav properties. If step 9 smoke
           // shows Graph rejects any expansion on /v1.0, fall back to parallel
-          // sub-collection fetches via mapPool (src/core/graph/concurrency.ts).
+          // sub-collection fetches via mapPool (packages/core/graph/concurrency.ts).
           url.searchParams.set(
             "$expand",
             "checklistItems,linkedResources,attachments",

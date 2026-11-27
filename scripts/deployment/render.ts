@@ -1,5 +1,5 @@
 // Renders the wrangler config for one named deployment from the committed
-// wrangler.example.jsonc plus that deployment's deployment.jsonc. The example stays
+// workers/server/wrangler.example.jsonc plus that deployment's deployment.jsonc. The example stays
 // the single source of structure (bindings, migrations, vars, crons); the deployment
 // file only supplies what differs. Erasable TypeScript only: this runs on bare Node.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
