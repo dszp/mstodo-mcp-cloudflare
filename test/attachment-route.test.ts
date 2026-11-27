@@ -15,7 +15,9 @@ describe("attachment download route (workers)", () => {
     stubMicrosoft("test-owner@example.com", graphAttachments);
     // The streaming path: no blob store, so every download reaches Graph.
     // test-node/blob-store.test.ts covers the stored copy.
-    const raw = { ...(env as unknown as Env), BLOBS: undefined } as Env;
+    // Env types BLOBS as required (it is declared in wrangler.example.jsonc),
+    // and this test runs without a blob store; hence the cast through unknown.
+    const raw = { ...(env as unknown as Env), BLOBS: undefined } as unknown as Env;
     const front = oauthFront<Env>({
       origin: ORIGIN,
       toAppEnv: appEnv,
