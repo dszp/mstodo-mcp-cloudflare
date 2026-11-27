@@ -53,3 +53,7 @@ docs/superpowers/
 
 # Claude Code per-user files: they can hold tokens copied from approved commands
 **/CLAUDE.local.md
+
+# Local agent and tool scratch: browser-automation captures and agent working notes
+.playwright-mcp/
+.superpowers/
