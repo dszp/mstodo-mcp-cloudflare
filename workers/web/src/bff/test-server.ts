@@ -35,6 +35,8 @@ export class TestServer {
   access: AccessMode = "off";
   /** When set, /token answers with this status and an empty body. */
   tokenFailure: number | null = null;
+  /** When set, the anonymous /api/v1/sync/info probe answers with this status. */
+  probeFailure: number | null = null;
   /** When set, replaces the cf_access_token in a token response. */
   cfAccessTokenOverride: string | null = null;
   /** When set, /register answers with this status. */
@@ -209,6 +211,7 @@ export class TestServer {
   }
 
   #probe(): Response {
+    if (this.probeFailure) return json({ error: "access_unavailable" }, this.probeFailure);
     if (this.access === "redirect") {
       return new Response(null, {
         status: 302,

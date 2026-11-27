@@ -84,15 +84,19 @@ export function csrfOk(req: Request, cfg: BffConfig): boolean {
  * as another host) fall back.
  */
 function safeReturnTo(raw: string | null, webOrigin: string): string {
-  if (!raw || raw.length > MAX_RETURN_TO || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) {
-    return "/";
-  }
+  if (!raw || !raw.startsWith("/")) return "/";
+  let path: string;
   try {
     const u = new URL(raw, webOrigin);
-    return u.origin === webOrigin ? u.pathname + u.search + u.hash : "/";
+    if (u.origin !== webOrigin) return "/";
+    path = u.pathname + u.search + u.hash;
   } catch {
     return "/";
   }
+  // Checked again after normalising: percent-encoding can grow the value past
+  // the cap, and dot segments can turn "/.//host" into "//host".
+  const ok = path.length <= MAX_RETURN_TO && path.startsWith("/") && !path.startsWith("//") && !path.startsWith("/\\");
+  return ok ? path : "/";
 }
 
 const escapeHtml = (s: string) =>

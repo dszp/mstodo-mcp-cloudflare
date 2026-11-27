@@ -163,6 +163,44 @@ describe("GET /auth/login", () => {
     });
   }
 
+  it("falls back to / for a return_to that grows past the cap when normalised, and keeps the new device", async () => {
+    const jar = new Jar();
+    const res = await jar.login("/" + "\u00e9".repeat(1023));
+    expect(res.status).toBe(302);
+    expect((await jar.unseal<Login>(LOGIN_COOKIE))?.return_to).toBe("/");
+    expect(jar.values.has(DEVICE_COOKIE)).toBe(true);
+  });
+
+  it("falls back to / for a return_to that normalises to //host", async () => {
+    const jar = new Jar();
+    await jar.login("/.//evil.example");
+    expect((await jar.unseal<Login>(LOGIN_COOKIE))?.return_to).toBe("/");
+  });
+
+  it("shows a 502 page when the Access probe answers 5xx, keeping a new registration", async () => {
+    server.probeFailure = 503;
+    const jar = new Jar();
+    const res = await jar.login();
+    expect(res.status).toBe(502);
+    const set = res.headers.getSetCookie();
+    expect(set.filter((l) => l.startsWith(`${LOGIN_COOKIE}=`))).toEqual([
+      expect.stringMatching(new RegExp(`^${LOGIN_COOKIE}=;.*Max-Age=0`)),
+    ]);
+    expect(set.filter((l) => !l.startsWith(`${LOGIN_COOKIE}=`) && !l.startsWith(`${DEVICE_COOKIE}=`))).toEqual([]);
+    expect(jar.values.has(DEVICE_COOKIE)).toBe(true);
+  });
+
+  it("shows a 502 page when the Access probe answers 5xx, keeping a stored device unchanged", async () => {
+    const jar = new Jar();
+    await jar.login();
+    const device = jar.values.get(DEVICE_COOKIE);
+    server.probeFailure = 500;
+    const res = await jar.login();
+    expect(res.status).toBe(502);
+    expect(res.headers.getSetCookie()).toEqual([expect.stringMatching(new RegExp(`^${LOGIN_COOKIE}=;.*Max-Age=0`))]);
+    expect(jar.values.get(DEVICE_COOKIE)).toBe(device);
+  });
+
   it("treats a device cookie sealed for another server as absent", async () => {
     const jar = new Jar();
     const s = await sealer(SECRET);

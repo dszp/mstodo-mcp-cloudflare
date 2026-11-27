@@ -53,10 +53,16 @@ export function basicAuth(device: Pick<Device, "client_id" | "client_secret">): 
  *   (packages/core/auth/access.ts, checkAccess and accessRefusalResponse), when
  *   the request skipped the edge, as through a service binding;
  * - 200 {server_id}, when Access is off.
- * Throws when the server can't be reached.
+ * Throws when the server can't be reached or answers 5xx (including
+ * Access's own 503 access_unavailable / access_misconfigured), so sign-in
+ * stops instead of guessing.
  */
 export async function serverUsesAccess(upstream: Upstream): Promise<boolean> {
   const res = await upstream("/api/v1/sync/info", { method: "GET" });
+  if (res.status >= 500) {
+    await res.body?.cancel();
+    throw new Error(`access probe answered ${res.status}`);
+  }
   if (res.status >= 300 && res.status < 400) {
     await res.body?.cancel();
     const location = res.headers.get("location");
