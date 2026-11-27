@@ -16,7 +16,7 @@ export interface RosterEntry {
 //      Example: "inbox" -> Graph list ID stored by set_list_alias.
 //   2. Display-name match — emoji-stripped, case-insensitive comparison against
 //      the supplied roster. Empty roster (cold index) simply skips this step.
-//      Example: "PERSONAL" matches "🏠PERSONAL".
+//      Example: "HOME" matches "🏠HOME".
 //   3. Raw passthrough — returns the input unchanged. Lets callers who already
 //      hold a Graph list ID skip resolution; an invalid value surfaces as a
 //      Graph 404 at call time.

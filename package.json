@@ -19,7 +19,8 @@
     "start:node": "node dist/main.mjs",
     "types": "wrangler types -c wrangler.example.jsonc",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "leak-guard": "node scripts/leak-guard.ts"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.2.3",

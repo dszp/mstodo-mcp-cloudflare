@@ -11,7 +11,7 @@ const config = (aliases: Record<string, string>): ListsConfig => ({
 });
 
 const roster: RosterEntry[] = [
-  { id: "id-personal", displayName: "🏠PERSONAL" },
+  { id: "id-home", displayName: "🏠HOME" },
   { id: "id-work", displayName: "Work" },
 ];
 
@@ -21,7 +21,7 @@ describe("resolveListId", () => {
   });
 
   it("matches a display name emoji-stripped and case-insensitively", () => {
-    expect(resolveListId("personal", config({}), roster)).toBe("id-personal");
+    expect(resolveListId("home", config({}), roster)).toBe("id-home");
     expect(resolveListId("WORK", config({}), roster)).toBe("id-work");
   });
 
@@ -30,6 +30,6 @@ describe("resolveListId", () => {
   });
 
   it("degrades to passthrough when the roster is empty (cold index)", () => {
-    expect(resolveListId("personal", config({}), [])).toBe("personal");
+    expect(resolveListId("home", config({}), [])).toBe("home");
   });
 });

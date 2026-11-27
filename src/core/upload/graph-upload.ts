@@ -302,7 +302,7 @@ async function cancelSession(uploadUrl: string, accessToken: string): Promise<vo
  * must enforce PER_FILE_MAX_BYTES before calling.
  *
  * Graph can answer 500 generalException to an inline POST (seen live,
- * 2026-11-24: every inline POST on the Servant Voice account, whatever the task
+ * 2026-11-24: every inline POST on the test account, whatever the task
  * ID form or Prefer header, with nothing stored). On an inline 5xx we look once
  * for a new attachment of this name, then send the file through an upload
  * session, whose 5xx handling is in sessionAttach. Without a same-name snapshot
