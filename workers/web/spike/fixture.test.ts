@@ -3,8 +3,8 @@ import { generateFeed, pageOf } from "./fixture";
 import type { FeedChange } from "../src/sync/feed";
 
 const SIZES = [
-  { totalTasks: 545, openTasks: 400, lists: 12 },
-  { totalTasks: 2400, openTasks: 1100, lists: 25 },
+  { totalTasks: 2400, openTasks: 545, lists: 12 },
+  { totalTasks: 13000, openTasks: 545, lists: 25 },
   { totalTasks: 13000, openTasks: 3000, lists: 40 },
 ];
 
@@ -29,6 +29,19 @@ describe("generateFeed", () => {
     });
   }
 
+  for (const s of SIZES) {
+    it(`has recently completed tasks and sane dates (${s.openTasks}/${s.totalTasks})`, () => {
+      const tasks = generateFeed({ ...s, seed: 1 }).flatMap((c) => (c.kind === "task" && !c.deleted ? [c.data] : []));
+      const recent = tasks.filter((t) => t.status === "completed" && t.completed_at! >= "2026-10-28");
+      expect(recent.length).toBeGreaterThanOrEqual(1);
+      for (const t of tasks) {
+        expect(t.modified_at! <= "2026-11-27T23:59:59.999Z").toBe(true);
+        expect(t.created_at! <= t.modified_at!).toBe(true);
+        if (t.completed_at) expect(t.created_at!.slice(0, 10) <= t.completed_at).toBe(true);
+      }
+    });
+  }
+
   it("sets realistic fields", () => {
     const feed = generateFeed({ totalTasks: 2000, openTasks: 1000, lists: 20, seed: 3 });
     const lists = feed.flatMap((c) => (c.kind === "list" && !c.deleted ? [c.data] : []));
@@ -44,6 +57,23 @@ describe("generateFeed", () => {
 });
 
 describe("pageOf", () => {
+  it("cuts a page at 1 MB before the limit, keeping the whole page under budget", () => {
+    const all = generateFeed({ totalTasks: 13000, openTasks: 3000, lists: 40, seed: 5 });
+    const ids: string[] = [];
+    let cut = false;
+    let cursor: string | null = null;
+    for (;;) {
+      const page = pageOf(all, cursor, 5000);
+      expect(new TextEncoder().encode(JSON.stringify(page)).length).toBeLessThanOrEqual(1_000_000);
+      if (page.has_more && page.changes.length < 5000) cut = true;
+      ids.push(...page.changes.map((c) => c.id));
+      if (!page.has_more) break;
+      cursor = page.cursor;
+    }
+    expect(cut).toBe(true);
+    expect(ids).toEqual(all.map((c) => c.id));
+  });
+
   for (const s of SIZES) {
     it(`pages never exceed limit or 1 MB and cover every change exactly once (${s.totalTasks})`, () => {
       const all = generateFeed({ ...s, seed: 5 });
@@ -54,7 +84,7 @@ describe("pageOf", () => {
         const page = pageOf(all, cursor, 500);
         expect(page.changes.length).toBeLessThanOrEqual(500);
         expect(page.changes.length).toBeGreaterThan(0);
-        if (page.changes.length > 1) expect(new TextEncoder().encode(JSON.stringify(page.changes)).length).toBeLessThanOrEqual(1_000_000);
+        if (page.changes.length > 1) expect(new TextEncoder().encode(JSON.stringify(page)).length).toBeLessThanOrEqual(1_000_000);
         expect(page.backfill).toEqual({ remaining: 0 });
         seen.push(...page.changes);
         if (!page.has_more) {

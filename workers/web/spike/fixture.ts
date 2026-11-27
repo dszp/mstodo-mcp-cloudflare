@@ -105,8 +105,15 @@ export function generateFeed(opts: FixtureOpts): FeedChange[] {
   let myDayOrder = 0;
   for (let i = 0; i < opts.totalTasks; i++) {
     const open = openFlags[i];
-    const created = new Date(todayMs - (1 + int(730)) * DAY_MS - int(DAY_MS)).toISOString();
-    const modified = new Date(Date.parse(created) + int(30) * DAY_MS).toISOString();
+    // Completions skew recent (exponential, mean ~120 days, capped at 2 years);
+    // created precedes completion, and nothing is modified after today.
+    const completedAgo = Math.min(730, Math.floor(-Math.log(1 - rnd()) * 120));
+    const createdMs = open
+      ? todayMs - (1 + int(730)) * DAY_MS - int(DAY_MS)
+      : todayMs - completedAgo * DAY_MS - (1 + int(365)) * DAY_MS - int(DAY_MS);
+    const created = new Date(createdMs).toISOString();
+    const modifiedMs = open ? createdMs + int(30) * DAY_MS : todayMs - completedAgo * DAY_MS + int(DAY_MS);
+    const modified = new Date(Math.min(modifiedMs, todayMs)).toISOString();
     const inMyDay = open && chance(0.05);
     const nSteps = chance(0.4) ? 1 + int(stepsMax) : 0;
     const data: FeedTask = {
@@ -119,7 +126,7 @@ export function generateFeed(opts: FixtureOpts): FeedChange[] {
       due: chance(0.15) ? day(int(60) - 10) : null,
       start: null,
       reminder: { on: false, at: null },
-      completed_at: open ? null : day(-int(730)),
+      completed_at: open ? null : day(-completedAgo),
       recurrence: null,
       created_at: created,
       modified_at: modified,
@@ -130,14 +137,17 @@ export function generateFeed(opts: FixtureOpts): FeedChange[] {
         postponed_day: null,
       },
       subresources_complete: true,
-      steps: Array.from({ length: nSteps }, (_, s) => ({
-        id: uuid(),
-        title: cap(words(2 + int(4))),
-        checked: chance(0.3),
-        checked_at: null,
-        created_at: created,
-        order: order(s),
-      })),
+      steps: Array.from({ length: nSteps }, (_, s) => {
+        const checked = chance(0.3);
+        return {
+          id: uuid(),
+          title: cap(words(2 + int(4))),
+          checked,
+          checked_at: checked ? modified : null,
+          created_at: created,
+          order: order(s),
+        };
+      }),
       links: [],
       attachments: [],
     };
@@ -151,7 +161,8 @@ export function generateFeed(opts: FixtureOpts): FeedChange[] {
 export function pageOf(all: FeedChange[], cursor: string | null, limit: number): FeedPage {
   const start = cursor === null ? 0 : Math.min(Math.max(0, Number(cursor) | 0), all.length);
   const changes: FeedChange[] = [];
-  let bytes = 2;
+  // Reserve the wrapper (cursor, has_more, backfill) so the whole page fits.
+  let bytes = JSON.stringify({ cursor: String(all.length), has_more: true, changes: [], backfill: { remaining: 0 } }).length;
   let i = start;
   while (i < all.length && changes.length < limit) {
     const size = JSON.stringify(all[i]).length + 1;
