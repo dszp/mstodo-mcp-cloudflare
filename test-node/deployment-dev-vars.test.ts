@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeploymentRefusal } from "../scripts/deployment/schema.ts";
@@ -282,6 +282,12 @@ describe("nodeRunner", () => {
     } finally {
       delete process.env.RUNNER_TEST_KEEP;
     }
+  });
+
+  it("runs the child in opts.cwd", async () => {
+    const dir = tmp();
+    const r = await nodeRunner(node, ["-e", "process.stdout.write(process.cwd())"], { cwd: dir });
+    expect(realpathSync(r.stdout)).toBe(realpathSync(dir));
   });
 
   it("does not use a shell", async () => {

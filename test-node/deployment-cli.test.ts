@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 type SpawnCall = { args: string[]; env: Record<string, string> };
-type RunCall = { cmd: string; args: string[]; opts?: { stdin?: string; env?: Record<string, string> } };
+type RunCall = { cmd: string; args: string[]; opts?: { stdin?: string; env?: Record<string, string>; cwd?: string } };
 
 const liveApi = (over: Partial<CloudflareApi> = {}): CloudflareApi => ({
   getWorkerKv: async () => ({ found: true, kv: { ...alphaFile.kv } }),
@@ -77,7 +77,7 @@ function harness(over: Partial<CliDeps> & { apiImpl?: CloudflareApi; onSpawn?: (
       spawns.push(c);
       return over.onSpawn ? over.onSpawn(c) : 0;
     },
-    stdoutIsTTY: true,
+    interactive: true,
     confirm: async (q) => {
       confirms.push(q);
       return true;
@@ -216,32 +216,50 @@ describe("main: dry-run and tail", () => {
 });
 
 describe("main: deploy", () => {
-  it("refuses off a TTY without --non-interactive, before calling the API", async () => {
-    const h = harness({ stdoutIsTTY: false });
+  it("refuses a non-interactive session without --non-interactive, before calling the API", async () => {
+    const h = harness({ interactive: false });
     expect(await main(["deploy", "alpha"], h.deps)).toBe(1);
     expect(h.apiCalls()).toBe(0);
     expect(h.spawns).toEqual([]);
   });
 
-  it("proceeds off a TTY with --non-interactive when nothing changed", async () => {
+  it("proceeds in a non-interactive session with --non-interactive when nothing changed", async () => {
     await seedLastDeployed();
-    const h = harness({ stdoutIsTTY: false });
+    const h = harness({ interactive: false });
     expect(await main(["deploy", "alpha", "--non-interactive"], h.deps)).toBe(0);
     expect(h.spawns).toHaveLength(1);
     expect(h.confirms).toEqual([]);
   });
 
   it("refuses --non-interactive when there are unseen changes, including a first deploy", async () => {
-    const h = harness({ stdoutIsTTY: false });
+    const h = harness({ interactive: false });
     expect(await main(["deploy", "alpha", "--non-interactive"], h.deps)).toBe(1);
     expect(h.spawns).toEqual([]);
     expect(h.logs.join("\n")).toMatch(/first deploy from this machine/);
   });
 
+  it("refuses a conflicting domain changeset in an interactive deploy too", async () => {
+    await seedLastDeployed();
+    const h = harness({
+      apiImpl: liveApi({ domainChangeset: async () => ({ added: [], removed: [], conflicting: ["c.example.test"] }) }),
+    });
+    expect(await main(["deploy", "alpha"], h.deps)).toBe(1);
+    expect(h.spawns).toEqual([]);
+    expect(h.logs.at(-1)).toMatch(/custom_domains: conflicts .*c\.example\.test/);
+  });
+
+  it("deploys without asking when nothing changed", async () => {
+    await seedLastDeployed();
+    const h = harness();
+    expect(await main(["deploy", "alpha"], h.deps)).toBe(0);
+    expect(h.confirms).toEqual([]);
+    expect(h.spawns).toHaveLength(1);
+  });
+
   it("refuses --non-interactive when the domain changeset has a conflict", async () => {
     await seedLastDeployed();
     const h = harness({
-      stdoutIsTTY: false,
+      interactive: false,
       apiImpl: liveApi({ domainChangeset: async () => ({ added: [], removed: [], conflicting: ["c.example.test"] }) }),
     });
     expect(await main(["deploy", "alpha", "--non-interactive"], h.deps)).toBe(1);
@@ -305,6 +323,7 @@ describe("main: secrets", () => {
       expect(p.args, name).toEqual(["wrangler", "secret", "put", name, "-c", paths().rendered]);
       expect(p.opts?.stdin, name).toBe(values[name]);
       expect(p.opts?.env, name).toEqual({ CLOUDFLARE_ACCOUNT_ID: ACCOUNT });
+      expect(p.opts?.cwd, name).toBe(root);
     }
     for (const v of Object.values(values)) {
       expect(h.logs.join("\n"), v).not.toContain(v);
@@ -320,6 +339,13 @@ describe("main: secrets", () => {
     expect(h.runs.filter((r) => r.cmd === "npx")).toEqual([]);
     const out = h.logs.join("\n");
     for (const v of [LITERAL, OWNER, "leaked-op-output", "leaked-op-error"]) expect(out, v).not.toContain(v);
+  });
+
+  it("refuses when no live Worker exists yet, before resolving or pushing anything", async () => {
+    const h = harness({ onRun: opOk, apiImpl: liveApi({ getWorkerKv: async () => ({ found: false }) }) });
+    expect(await main(["secrets", "alpha"], h.deps)).toBe(1);
+    expect(h.runs).toEqual([]);
+    expect(h.logs.at(-1)).toMatch(/no live Worker example-alpha yet; deploy first/);
   });
 
   it("reports a failed put by name and exits non-zero", async () => {

@@ -41,7 +41,9 @@ export type CliDeps = {
   // Runs `npx <args>` with cwd at the repo root, stdio inherited, `env` merged over
   // the process environment; resolves with the child's exit code once it has exited.
   spawnInteractive: (args: string[], env: Record<string, string>) => Promise<number>;
-  stdoutIsTTY: boolean;
+  // Whether wrangler will treat this session as interactive (it needs stdin and
+  // stdout on a terminal and CI unset); off one it accepts takeovers unasked.
+  interactive: boolean;
   confirm: (question: string) => Promise<boolean>;
   api: (accountId: string) => Promise<CloudflareApi>;
   log: (line: string) => void;
@@ -163,16 +165,22 @@ function readLastDeployed(ctx: Ctx): WranglerConfig | null {
 async function deploy(ctx: Ctx): Promise<number> {
   const { dep, deps, args } = ctx;
   const file = ownFile(dep);
-  // Off a TTY wrangler accepts custom-domain takeovers without asking.
-  if (!deps.stdoutIsTTY && !args.nonInteractive) {
-    throw new DeploymentRefusal(file, "(terminal)", "stdout is not a terminal; pass --non-interactive to deploy without prompts");
+  // Off a terminal wrangler accepts custom-domain takeovers without asking.
+  if (!deps.interactive && !args.nonInteractive) {
+    throw new DeploymentRefusal(
+      file,
+      "(terminal)",
+      "not an interactive session (stdin and stdout on a terminal, CI unset); pass --non-interactive to deploy without prompts",
+    );
   }
 
   const api = await deps.api(dep.account_id);
   const { found } = await inspectLiveWorker(api, dep, { adopt: args.adopt });
-  // The changeset endpoint needs an uploaded script; a first deploy is refused
-  // below anyway when non-interactive, because it always shows a change.
-  if (args.nonInteractive && found) {
+  // Checked in every mode: wrangler's own takeover prompt is skipped whenever it
+  // decides the session is not interactive, which this script cannot fully predict.
+  // The changeset endpoint needs an uploaded script; a first deploy always shows
+  // a change, so it is confirmed interactively or refused below.
+  if (found) {
     const cs = await checkDomainChangeset(api, dep);
     if (cs.conflicting.length > 0) {
       throw new DeploymentRefusal(file, "custom_domains", `conflicts with existing DNS or domains: ${cs.conflicting.join(", ")}`);
@@ -222,7 +230,13 @@ async function secrets(ctx: Ctx): Promise<number> {
   // MS_CLIENT_SECRET also derives the key that seals the KV tokens, so a secret
   // pushed to the wrong Worker is the most damaging wrong-target write.
   const api = await deps.api(dep.account_id);
-  await inspectLiveWorker(api, dep, { adopt: false });
+  const { found } = await inspectLiveWorker(api, dep, { adopt: false });
+  // On a missing Worker, `wrangler secret put` creates an empty draft one (its
+  // prompt defaults to yes when stdin is piped), which the next deploy would
+  // then refuse as a stranger.
+  if (!found) {
+    throw new DeploymentRefusal(ownFile(dep), "(live Worker)", `no live Worker ${dep.worker_name} yet; deploy first`);
+  }
 
   const entries = await resolveAll(ctx);
   const present = new Set(entries.map(([n]) => n));
@@ -233,6 +247,7 @@ async function secrets(ctx: Ctx): Promise<number> {
     const r = await deps.run("npx", ["wrangler", "secret", "put", name, "-c", ctx.paths.rendered], {
       stdin: value,
       env: childEnv(dep),
+      cwd: ctx.deps.repoRoot,
     });
     // wrangler's output is not echoed: it is the one stream that saw the value.
     if (r.code === 0) {
@@ -304,9 +319,12 @@ if (import.meta.main) {
     env: process.env,
     run: nodeRunner,
     spawnInteractive: spawnInteractive(repoRoot),
-    stdoutIsTTY: process.stdout.isTTY === true,
+    // Approximates wrangler's isNonInteractiveOrCI (TTY stdin and stdout, not CI);
+    // wrangler's ci-info also spots CI vendors by their own variables, a gap the
+    // deploy command's changeset refusal covers.
+    interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) && !process.env.CI,
     confirm,
-    api: async (accountId) => createCloudflareApi(await wranglerToken(nodeRunner, accountId)),
+    api: async (accountId) => createCloudflareApi(await wranglerToken(nodeRunner, accountId, repoRoot)),
     log: (line) => console.log(line),
   });
   process.exit(code);

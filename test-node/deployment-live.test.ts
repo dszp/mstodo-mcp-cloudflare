@@ -281,9 +281,10 @@ describe("wranglerToken", () => {
 
   it("runs wrangler auth token --json with the account pinned, and reads the token past the noise", async () => {
     const { run, calls } = runner(0, `${NOISE}${JSON.stringify({ type: "oauth", token: TOKEN }, null, 2)}\n`);
-    expect(await wranglerToken(run, ACCOUNT)).toBe(TOKEN);
+    expect(await wranglerToken(run, ACCOUNT, "/repo")).toBe(TOKEN);
     expect(calls).toHaveLength(1);
-    const [cmd, args, opts] = calls[0] as [string, string[], { env: Record<string, string>; stdin?: string }];
+    const [cmd, args, opts] = calls[0] as [string, string[], { env: Record<string, string>; stdin?: string; cwd?: string }];
+    expect(opts.cwd).toBe("/repo");
     expect(cmd).toBe("npx");
     expect(args).toEqual(["wrangler", "auth", "token", "--json"]);
     expect(opts.env).toEqual({ CLOUDFLARE_ACCOUNT_ID: ACCOUNT });
@@ -291,26 +292,26 @@ describe("wranglerToken", () => {
 
   it("accepts an api_token", async () => {
     const { run } = runner(0, JSON.stringify({ type: "api_token", token: TOKEN }));
-    expect(await wranglerToken(run, ACCOUNT)).toBe(TOKEN);
+    expect(await wranglerToken(run, ACCOUNT, "/repo")).toBe(TOKEN);
   });
 
   it("refuses a global API key, which is not a bearer token", async () => {
     const { run } = runner(0, JSON.stringify({ type: "api_key", key: "k-SECRET", email: "x@example.test" }));
-    const r = await refusalOf(wranglerToken(run, ACCOUNT));
+    const r = await refusalOf(wranglerToken(run, ACCOUNT, "/repo"));
     expect(r.message).toContain("CLOUDFLARE_API_TOKEN");
     expect(r.message).not.toContain("k-SECRET");
   });
 
   it("refuses with a login instruction on a non-zero exit, without echoing output", async () => {
     const { run } = runner(1, TOKEN, `Not logged in ${TOKEN}`);
-    const r = await refusalOf(wranglerToken(run, ACCOUNT));
+    const r = await refusalOf(wranglerToken(run, ACCOUNT, "/repo"));
     expect(r.message).toContain("npx wrangler login");
     expect(r.message).not.toContain(TOKEN);
   });
 
   it("refuses when no token can be found in the output", async () => {
     for (const out of ["", "no json here", JSON.stringify({ type: "oauth" }), JSON.stringify({ type: "mystery", token: TOKEN })]) {
-      const r = await refusalOf(wranglerToken(runner(0, out).run, ACCOUNT));
+      const r = await refusalOf(wranglerToken(runner(0, out).run, ACCOUNT, "/repo"));
       expect(r.message).not.toContain(TOKEN);
     }
   });

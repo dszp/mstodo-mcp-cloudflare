@@ -2,17 +2,19 @@ import { spawn } from "node:child_process";
 
 export type RunResult = { code: number; stdout: string; stderr: string };
 
-// Captured output, no shell. `opts.env` is merged over process.env for the child.
+// Captured output, no shell. `opts.env` is merged over process.env for the child;
+// `opts.cwd` is its working directory (default: this process's).
 export type Runner = (
   cmd: string,
   args: string[],
-  opts?: { stdin?: string; env?: Record<string, string> },
+  opts?: { stdin?: string; env?: Record<string, string>; cwd?: string },
 ) => Promise<RunResult>;
 
 export const nodeRunner: Runner = (cmd, args, opts) =>
   new Promise((resolve) => {
     const child = spawn(cmd, args, {
       shell: false,
+      cwd: opts?.cwd,
       env: { ...process.env, ...opts?.env },
       stdio: [opts?.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });

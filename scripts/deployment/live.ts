@@ -265,11 +265,15 @@ export async function checkDomainChangeset(api: CloudflareApi, dep: DeploymentFi
 // warnings and sometimes other noise around it, so the JSON object is located in
 // stdout instead of parsing all of it. The token stays in this process: the
 // only consumer is the Authorization header in createCloudflareApi.
-export async function wranglerToken(run: Runner, accountId: string): Promise<string> {
+// `cwd` is the repo root, where every wrangler child runs.
+export async function wranglerToken(run: Runner, accountId: string, cwd: string): Promise<string> {
   const refuse = (reason: string): never => {
     throw new DeploymentRefusal("wrangler", "auth token", reason);
   };
-  const res = await run("npx", ["wrangler", "auth", "token", "--json"], { env: { CLOUDFLARE_ACCOUNT_ID: accountId } });
+  const res = await run("npx", ["wrangler", "auth", "token", "--json"], {
+    env: { CLOUDFLARE_ACCOUNT_ID: accountId },
+    cwd,
+  });
   if (res.code !== 0) return refuse("could not read wrangler's login; run `npx wrangler login` and retry");
 
   const parsed = findJsonObject(res.stdout);
