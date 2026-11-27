@@ -751,6 +751,45 @@ Once a day the server's cron sweeps the bucket. It deletes each attachment copy 
 attachment is no longer in the mirror, and each theme image that no list or smart list
 has used for 30 days, counted from the first sweep that found it unused.
 
+### 4.10 Client rules: smart lists and local search
+
+The server computes no smart lists. Each client builds them from the mirror it holds,
+and every client follows the rules below so that a smart list holds the same tasks, in
+the same order, in every app. The Apple app's implementation was the source of these
+rules.
+
+Every smart list leaves out tasks in lists with `sync: "reference"`. "Today" is the
+device's local date as a bare `YYYY-MM-DD`. `order` is the task's `order` string from
+the feed (section 4.2), compared as text. "Open" means `status` is not `completed`.
+
+| List | Holds | Order | A task created here gets |
+|---|---|---|---|
+| `my_day` | `my_day.committed_day == today`, any status. With the client's `dueTodayInMyDay` preference (default off), also open tasks with `due == today` | `my_day.committed_order` desc, then `order` desc | `myday.add` after the create |
+| `important` | open, `importance == "high"` | `order` desc, then `created_at` desc | `importance: "high"` |
+| `planned` | open, `due` not null (a reminder alone does not count) | `due` asc, then `order` desc | `due: today` |
+| `all` | open | `order` desc, then `created_at` desc | nothing extra |
+| `completed` | `status == "completed"`; a client may limit it to `completed_at >= since` | `completed_at` desc, then `modified_at` desc | nothing extra |
+
+A task completed today that is in My Day stays in `my_day` and is shown under a
+"Completed" section of that list.
+
+The sidebar count is the number of open tasks in the list. For `completed` it is the
+number of completed tasks.
+
+The Apple app groups `completed` by date: single days for the last two weeks, then
+weeks, then months. Other clients group it the same way.
+
+**Local search.** A client searches its own mirror before it calls the server:
+
+- Every whitespace-separated word of the query must appear, case-insensitively, in the
+  title, the note body, or the title of a step.
+- The scope is every synced list, reference lists included, or only the current list or
+  smart list.
+- Completed tasks are included unless the user turns off "Include Completed".
+- Results put open tasks before completed ones, then title matches before body and step
+  matches, then `order` desc within each group.
+- "Search all history" calls `GET /api/v1/search` for the tasks the mirror does not hold.
+
 ---
 
 ## 5. Sending edits
@@ -1808,6 +1847,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-27: section 4.10 added: the smart-list and local-search rules every client follows,
+  taken from the Apple app, so each app and the web UI show the same lists.
 - 2026-11-27: section 6: completing a task without `completed_at` is stamped with the
   owner's local date, and a completion date Graph ignored is sent once more.
 - 2026-11-27: section 4.6: the Claude connector's attachment reads and uploads use the

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Smart-list and local-search rules for clients** (`docs/SYNC-API.md` section 4.10): which tasks
+  each smart list holds, how it is ordered and counted, and how local search matches, so every
+  client shows the same lists.
+
 ### Changed
 - **Repository layout.** Host-independent code moved from `src/core` to `packages/core`, imported
   as `@potem/core/<path>`, and the server (hosts, tests, `wrangler.example.jsonc`, build scripts)
