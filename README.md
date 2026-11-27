@@ -1,6 +1,6 @@
 # mstodo-mcp
 
-[![CI](https://github.com/dszp/mstodo-mcp-cloudflare/actions/workflows/ci.yml/badge.svg)](https://github.com/dszp/mstodo-mcp-cloudflare/actions/workflows/ci.yml)
+[![CI](https://github.com/dszp/potem-server/actions/workflows/ci.yml/badge.svg)](https://github.com/dszp/potem-server/actions/workflows/ci.yml)
 
 **Use your Microsoft To Do tasks from Claude (or any MCP client), in plain
 language.** This is a personal, self-hosted server that connects Claude.ai to your

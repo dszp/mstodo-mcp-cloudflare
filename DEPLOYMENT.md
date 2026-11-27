@@ -176,8 +176,8 @@ registration and all four values.
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/dszp/mstodo-mcp-cloudflare.git
-cd mstodo-mcp-cloudflare
+git clone https://github.com/dszp/potem-server.git
+cd potem-server
 npm install
 ```
 
