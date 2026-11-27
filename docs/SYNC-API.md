@@ -1298,7 +1298,7 @@ deployment's configuration. Nothing in the repository does them.
    Entra identity provider (remove one-time PIN).
 4. Copy the application's audience (AUD) tag from its overview.
 5. Set `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) and `ACCESS_AUD` on the
-   Worker, as secrets (`npx wrangler secret put <NAME> -c .wrangler/deployments/<name>/rendered.json`; `deployment.jsonc` `vars` takes only vars that `wrangler.example.jsonc` lists, and these are not among them). `OWNER_EMAIL` must be the email
+   Worker, as `vars` in the deployment's `deployment.jsonc`, then deploy it. `OWNER_EMAIL` must be the email
    Access reports for the owner.
 6. Set `ACCESS_HANDOFF_REDIRECT_URIS` to the app's exact callback URI, for example
    `https://todo-app.<your domain>/oauth/callback` (comma-separated if there are

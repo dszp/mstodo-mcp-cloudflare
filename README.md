@@ -260,7 +260,7 @@ requires `SERVICE_BASE_URL` (same as upload); unset/placeholder ⇒ `download_di
 
 ## Reset
 
-Three scopes, smallest to largest. Run from the project root; replace `--remote` with `--local` if you want to operate on the miniflare local KV store used by `wrangler dev`.
+Three scopes, smallest to largest. Run from the project root. First run `npm run render -- <name>`; every command below passes the rendered config with `-c`, because `--binding` needs it to find the namespace. Replace `--remote` with `--local --persist-to .wrangler/state/<name>` to operate on the local KV store that `npm run dev -- <name>` uses.
 
 ### 1. Soft reset between test iterations
 
@@ -269,18 +269,18 @@ Most common: re-trigger the Microsoft OAuth flow without nuking infrastructure. 
 ```bash
 # Wipe the stored Microsoft refresh token. Forces the next /authorize to
 # re-run the full code-exchange flow.
-npx wrangler kv key delete --binding=TODO_CACHE --remote tokens:owner
+npx wrangler kv key delete --binding=TODO_CACHE --remote -c .wrangler/deployments/<name>/rendered.json tokens:owner
 
 # Also wipe the stored identity record if you want to "forget" which
 # account was last seen (this disables the identity-change wipe trigger
 # the next time you sign in — useful when you want to test the wipe).
-npx wrangler kv key delete --binding=TODO_CACHE --remote identity:owner
+npx wrangler kv key delete --binding=TODO_CACHE --remote -c .wrangler/deployments/<name>/rendered.json identity:owner
 
 # Wipe all MCP-side OAuth grants (DCR sessions) — forces every
 # previously-paired MCP client to re-add this server from scratch:
-npx wrangler kv key list --binding=OAUTH_KV --remote \
+npx wrangler kv key list --binding=OAUTH_KV --remote -c .wrangler/deployments/<name>/rendered.json \
   | jq -r '.[].name' \
-  | xargs -I {} npx wrangler kv key delete --binding=OAUTH_KV --remote {}
+  | xargs -I {} npx wrangler kv key delete --binding=OAUTH_KV --remote -c .wrangler/deployments/<name>/rendered.json {}
 ```
 
 To disconnect every MCP client without touching KV, call the `revoke_all_connections` tool from any connected client. It invalidates every grant at once, including the caller's; each client then reconnects and approves access again.

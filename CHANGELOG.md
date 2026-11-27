@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   They refuse a missing or colliding deployment, a live Worker whose KV bindings differ from the
   file, and a shell `CLOUDFLARE_ACCOUNT_ID` that names another account. `deploy` shows the changes
   since the last deploy and needs an interactive terminal, or `--non-interactive` with no pending changes.
+- `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `ACCESS_HANDOFF_REDIRECT_URIS`, `APPLE_TEAM_ID` and `APPLE_BUNDLE_IDS`
+  are vars in `wrangler.example.jsonc`, empty by default (off). A deployment sets them under `vars`.
 
 ### Changed
 - The package name is `potem-server`.

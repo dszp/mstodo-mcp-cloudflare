@@ -339,9 +339,8 @@ hostname. You can keep the `workers.dev` URL enabled as a fallback.
 The sync API (`/api/v1/*`) and the app's sign-in path (`/app/signin`) can sit behind
 Cloudflare Access as a second gate in front of OAuth. MCP clients aren't affected:
 `/mcp` and the OAuth endpoints stay outside Access. The server-side check is off until
-you set both variables. Set them as secrets with
-`npx wrangler secret put <NAME> -c .wrangler/deployments/<name>/rendered.json`: `npm run secrets` pushes only the five
-Microsoft and owner secrets, and `vars` in `deployment.jsonc` takes only vars that `wrangler.example.jsonc` lists.
+you set both variables. Set them under `vars` in `deployment.jsonc`
+and run `npm run deploy -- <name>`; they default to empty, which leaves Access off.
 
 | Variable | Value |
 |---|---|

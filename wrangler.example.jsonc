@@ -113,7 +113,17 @@
     // each, newest-changed first, draining the NULL-marker backlog over cycles.
     //   FREE PLAN: leave at "8" (stays under the 50-subrequest ceiling alongside
     //   delta + the other scans). PAID PLAN: raise it for faster backfill.
-    "CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE": "8"
+    "CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE": "8",
+    // Cloudflare Access team domain, `<team>.cloudflareaccess.com`. Access checks are off when empty; set with ACCESS_AUD.
+    "ACCESS_TEAM_DOMAIN": "",
+    // Audience (AUD) tag of the Access application. Off when empty.
+    "ACCESS_AUD": "",
+    // Comma-separated sign-in callback URIs that may receive the Access token. Empty refuses every /app/signin request.
+    "ACCESS_HANDOFF_REDIRECT_URIS": "",
+    // Apple team ID for /.well-known/apple-app-site-association. Off when empty.
+    "APPLE_TEAM_ID": "",
+    // Comma-separated app bundle IDs for the same file. Off when empty.
+    "APPLE_BUNDLE_IDS": ""
   },
 
   "observability": { "enabled": true }
