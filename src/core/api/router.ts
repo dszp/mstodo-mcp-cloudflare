@@ -13,6 +13,7 @@ import { attachmentBySid } from "./attachments";
 import { currentLinkRules, linkRulesRoute } from "./link-rules";
 import { syncMutations, type BackgroundWork } from "./mutations";
 import { json } from "./respond";
+import { themeImageBytes, uploadAttachment, uploadThemeImage } from "./uploads";
 
 export const API_PATH = "/api/v1";
 
@@ -59,9 +60,16 @@ export async function handleApiRequest(
     if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405, { allow: "POST" });
     return syncMutations(req, env, props, bg);
   }
-  const route = matchRoute(path);
-  if (!route) return error("not_found", 404);
-  if (req.method !== "GET") return json({ error: "method_not_allowed" }, 405, { allow: "GET" });
+  // The two binary uploads (sections 4.8 and 5.6).
+  if (path === "/attachments" || path === "/theme-images") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405, { allow: "POST" });
+    return path === "/attachments" ? uploadAttachment(req, env, props) : uploadThemeImage(req, env);
+  }
+  const image = /^\/theme-images\/([^/]+)$/.exec(path);
+  if (image && req.method === "GET") return themeImageBytes(image[1], req, env);
+  const route = image ? null : matchRoute(path);
+  if (!route && !image) return error("not_found", 404);
+  if (req.method !== "GET" || !route) return json({ error: "method_not_allowed" }, 405, { allow: "GET" });
   return route(url, env);
 }
 

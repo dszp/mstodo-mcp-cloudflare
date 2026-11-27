@@ -8,6 +8,10 @@ import { handleDownload } from "../../core/upload/download-handler";
 import { handleWebhook } from "../../core/subscriptions/webhook-handler";
 import { VERSION } from "../../core/version";
 import { handleAppleAssociation } from "../../core/auth/apple-association";
+import { sweepBlobs } from "../../core/blobs";
+import { log } from "../../core/log";
+
+const BLOB_SWEEP_HOUR_UTC = 8;
 
 export { MSToDoSession, TodoIndex };
 
@@ -56,11 +60,20 @@ export default {
   // only matters when the DO has gone quiet (e.g. after a no-auth alarm bailout
   // or a lost alarm).
   async scheduled(
-    _controller: ScheduledController,
+    controller: ScheduledController,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
     const index = ownerIndex(appEnv(env));
     ctx.waitUntil(index.ensureSyncing());
+    // Once a day, the first cron run after 08:00 UTC: the blob sweep
+    // (docs/SYNC-API.md section 4.9).
+    const at = new Date(controller.scheduledTime);
+    if (env.BLOBS && at.getUTCHours() === BLOB_SWEEP_HOUR_UTC && at.getUTCMinutes() < 15) {
+      const blobs = env.BLOBS;
+      ctx.waitUntil(
+        sweepBlobs(blobs, index).catch((e: unknown) => log.error("blob_sweep_failed", { error: String(e) })),
+      );
+    }
   },
 };

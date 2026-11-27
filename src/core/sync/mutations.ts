@@ -4,6 +4,8 @@
 // to an executor that does the write-through. The executor is the ops layer
 // (src/core/ops/), the same code the MCP tools use.
 
+import { SMART_LISTS } from "../index/change-feed";
+
 export const MAX_BATCH = 25;
 // Mutations still waiting when this runs out come back `skipped`, so a batch
 // finishes well inside client timeouts (section 5.1).
@@ -19,9 +21,12 @@ export const OPS = [
   "myday.add", "myday.remove", "myday.reorder",
   "step.create", "step.update", "step.delete", "step.reorder",
   "link.create", "link.update", "link.delete",
+  "attachment.delete",
+  // App-owned, kept by this server only (section 4.8).
+  "theme_image.delete", "settings.update",
 ] as const;
 export type MutationOp = (typeof OPS)[number];
-export type EntityKind = "list" | "task" | "step" | "link" | "list_group";
+export type EntityKind = "list" | "task" | "step" | "link" | "list_group" | "attachment" | "theme_image" | "app_settings";
 // What a mutation can name.
 export type RefKind = EntityKind;
 
@@ -51,11 +56,15 @@ export const UPDATABLE: Record<string, readonly string[]> = {
   // rather than in Microsoft To Do.
   // `theme` and `group_id` are the list's sidebar appearance (section 10.4),
   // written to Substrate.
-  "list.update": ["name", "sync", "theme", "group_id"],
+  // `image_id` is the app's background image (section 4.8), kept here.
+  // `image_style`: how the app shows it on this list.
+  "list.update": ["name", "sync", "theme", "group_id", "image_id", "image_style"],
   // A sidebar list group (section 10.4), written to Substrate.
   "list_group.update": ["name"],
   "step.update": ["title", "checked"],
   "link.update": ["url", "title"],
+  // One field per smart list, each its whole theme (section 4.8).
+  "settings.update": SMART_LISTS,
 };
 
 // Fields every other op accepts. A create takes the update fields plus the
@@ -85,13 +94,16 @@ export const ALLOWED_FIELDS: Record<MutationOp, readonly string[]> = {
   "step.reorder": [],
   "link.create": ["task_id", "url", "title"],
   "link.delete": [],
+  "attachment.delete": [],
+  "theme_image.delete": [],
+  "settings.update": UPDATABLE["settings.update"],
 };
 // A parent reference, not a field of the entity: it gets no field clock.
 const PARENT_REFS = new Set(["list_id", "task_id"]);
 
 export const kindOf = (op: MutationOp): EntityKind => {
   const k = op.slice(0, op.indexOf("."));
-  return (k === "myday" ? "task" : k) as EntityKind;
+  return (k === "myday" ? "task" : k === "settings" ? "app_settings" : k) as EntityKind;
 };
 const isCreate = (op: MutationOp) => op.endsWith(".create");
 
@@ -222,6 +234,15 @@ export function refsOf(m: MutationIn): SidRef[] {
   if (typeof f.list_id === "string") refs.push({ kind: "list", sid: normalizeSid(f.list_id) });
   if (typeof f.task_id === "string") refs.push({ kind: "task", sid: normalizeSid(f.task_id) });
   if (m.op === "list.update" && typeof f.group_id === "string") refs.push({ kind: "list_group", sid: normalizeSid(f.group_id) });
+  // A theme image named by a list or smart list must exist: an unknown one
+  // is rejected as unknown_theme_image (the app uploads before it names it).
+  if (m.op === "list.update" && typeof f.image_id === "string") refs.push({ kind: "theme_image", sid: normalizeSid(f.image_id) });
+  if (m.op === "settings.update") {
+    for (const v of Object.values(f)) {
+      const id = v && typeof v === "object" ? (v as Record<string, unknown>).image_id : undefined;
+      if (typeof id === "string") refs.push({ kind: "theme_image", sid: normalizeSid(id) });
+    }
+  }
   // A top-level sidebar neighbour (list.reorder, and a group's position) can
   // be a list or a group; the executor resolves it against the sidebar itself.
   if (m.op === "list.reorder" || m.op.startsWith("list_group.")) return refs;

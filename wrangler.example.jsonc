@@ -21,6 +21,15 @@
     { "binding": "TODO_CACHE", "id": "<your-todo-cache-namespace-id>" }
   ],
 
+  // Optional blob store (docs/SYNC-API.md section 4.9): keeps a copy of each
+  // attachment the app downloads or uploads, and holds the app's theme images.
+  // Without it, downloads stream from Graph and theme images are unavailable.
+  //   wrangler r2 bucket create mstodo-blobs   (any name; use it below)
+  // The binding name must stay BLOBS.
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "mstodo-blobs" }
+  ],
+
   "durable_objects": {
     "bindings": [
       // Per-session MCP agent. Deletes itself after a day idle.

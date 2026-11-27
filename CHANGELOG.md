@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Blob store (R2) for the client app** (docs/SYNC-API.md sections 4.6, 4.8, 4.9, 5.2
+  and 5.6), on an optional `BLOBS` R2 binding:
+  - Attachment downloads keep a copy, so each file is fetched from Graph once.
+  - `POST /api/v1/attachments` uploads a file to a task through Graph (inline up to
+    3 MB, upload session above), idempotent on the app's sid; `attachment.delete`
+    removes one.
+  - Theme images: `POST`/`GET /api/v1/theme-images`, the `theme_image` feed kind and
+    `theme_image.delete`. A list's `image_id` and `image_style`, and smart-list themes in
+    the `app_settings` entity (`settings.update`), sync between the app's devices; To Do
+    never sees them.
+  - A daily sweep deletes copies of attachments that left the mirror and theme images
+    unused for 30 days.
+  - New capabilities: `attachment_cache`, `attachment_upload`, `theme_images`.
+  Index schema migration v13 adds `theme_images`, `list_images` and `app_settings`.
+  Self-hosters who want these features create a bucket and add the `r2_buckets` entry
+  from `wrangler.example.jsonc`.
+
 ### Changed
 - **MCP session objects delete themselves after a day without a request.** Each Claude
   conversation opens its own session, and Claude never ends one, so every conversation

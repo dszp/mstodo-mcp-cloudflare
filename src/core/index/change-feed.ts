@@ -79,16 +79,57 @@ export interface FeedList {
   // Theme color and background image, as Substrate sends them (undocumented
   // formats, passed through unchanged).
   theme: { color: string | null; background: string | null };
+  // The app's background image for the list (section 4.8): a theme image's
+  // id, kept by this server rather than To Do. null when none is set.
+  image_id: string | null;
+  // How the app shows that image on this list; null for the app's default.
+  image_style: ImageStyle | null;
 }
 export interface FeedListGroup {
   name: string | null;
   sort_key: string | null;
 }
-export type FeedKind = "task" | "list" | "list_group";
+// An uploaded theme image (section 4.8). width, height and brightness are as
+// the app sent them; the server doesn't decode images.
+export interface FeedThemeImage {
+  content_type: string;
+  size: number;
+  width: number;
+  height: number;
+  brightness: number | null;
+  created_at: string;
+}
+// The smart lists whose themes the app keeps here. Tasks isn't one: it is the
+// default list, whose image is that list's own image_id.
+export const SMART_LISTS = ["my_day", "important", "planned", "all", "completed"] as const;
+export type SmartList = (typeof SMART_LISTS)[number];
+// How a picture is shown where it is used (section 4.8): the point kept in
+// view when cropped to fill, a zoom, a wash (negative: white, positive: dark)
+// and a blur. Per use, so one image can be cropped differently on two lists.
+export interface ImageStyle {
+  focus_x: number;
+  focus_y: number;
+  zoom: number;
+  shade: number;
+  blur: number;
+  // The shade in dark mode; null means use `shade`.
+  shade_dark: number | null;
+  // How opaque task cards are over the background, light mode; null means 1.
+  card_opacity: number | null;
+  // The same in dark mode; null means use `card_opacity`.
+  card_opacity_dark: number | null;
+}
+export type SmartListTheme = { color: string | null; image_id: string | null; image_style: ImageStyle | null };
+export interface FeedAppSettings {
+  smart_lists: Record<SmartList, SmartListTheme | null>;
+}
+export type FeedKind = "task" | "list" | "list_group" | "theme_image" | "app_settings";
 export type FeedChange =
   | { kind: "task"; id: string; seq: number; deleted: false; data: FeedTask; field_clock: Record<string, number> }
   | { kind: "list"; id: string; seq: number; deleted: false; data: FeedList }
   | { kind: "list_group"; id: string; seq: number; deleted: false; data: FeedListGroup }
+  | { kind: "theme_image"; id: string; seq: number; deleted: false; data: FeedThemeImage }
+  | { kind: "app_settings"; id: string; seq: number; deleted: false; data: FeedAppSettings }
   | { kind: FeedKind; id: string; seq: number; deleted: true };
 
 export interface FeedPage {
@@ -317,9 +358,10 @@ function buildLists(sql: SqlDb, listIds: string[]): Map<string, FeedList> {
     // group the last read didn't return goes out ungrouped.
     const rows = sql
       .exec(
-        `SELECT l.*, m.sid AS group_sid FROM lists l
+        `SELECT l.*, m.sid AS group_sid, li.image_id AS app_image_id, li.style_json AS app_image_style FROM lists l
            LEFT JOIN list_groups g ON g.group_id = l.group_id
            LEFT JOIN entity_map m ON m.kind = 'list_group' AND m.graph_id = g.group_id
+           LEFT JOIN list_images li ON li.list_id = l.list_id
           WHERE l.list_id IN (${inPlaceholders(chunk.length)})`,
         ...chunk,
       )
@@ -341,6 +383,8 @@ function buildLists(sql: SqlDb, listIds: string[]): Map<string, FeedList> {
           color: (l.theme_color as string | null) ?? null,
           background: (l.theme_background as string | null) ?? null,
         },
+        image_id: (l.app_image_id as string | null) ?? null,
+        image_style: parseJson<ImageStyle | null>(l.app_image_style as string | null, null),
       });
     }
   }
@@ -362,6 +406,40 @@ function buildGroups(sql: SqlDb, groupIds: string[]): Map<string, FeedListGroup>
     }
   }
   return out;
+}
+
+function buildThemeImages(sql: SqlDb, ids: string[]): Map<string, FeedThemeImage> {
+  const out = new Map<string, FeedThemeImage>();
+  for (let i = 0; i < ids.length; i += IN_CHUNK) {
+    const chunk = ids.slice(i, i + IN_CHUNK);
+    const rows = sql
+      .exec(`SELECT * FROM theme_images WHERE image_id IN (${inPlaceholders(chunk.length)})`, ...chunk)
+      .toArray();
+    for (const r of rows) out.set(r.image_id as string, themeImageData(r));
+  }
+  return out;
+}
+
+export function themeImageData(r: Row): FeedThemeImage {
+  return {
+    content_type: r.content_type as string,
+    size: r.size as number,
+    width: r.width as number,
+    height: r.height as number,
+    brightness: (r.brightness as number | null) ?? null,
+    created_at: new Date(r.created_ms as number).toISOString(),
+  };
+}
+
+// Every smart list, null where the app hasn't set a theme.
+export function appSettingsData(sql: SqlDb): FeedAppSettings {
+  const stored = new Map(
+    sql.exec<{ key: string; value_json: string }>("SELECT key, value_json FROM app_settings").toArray().map((r) => [r.key, r.value_json]),
+  );
+  const smart_lists = Object.fromEntries(
+    SMART_LISTS.map((k) => [k, parseJson<SmartListTheme | null>(stored.get(k) ?? null, null)]),
+  ) as Record<SmartList, SmartListTheme | null>;
+  return { smart_lists };
 }
 
 // Tasks still waiting for the sub-resource scan, counted with the scan's own
@@ -462,6 +540,7 @@ export function changesSince(
   const taskData = buildTasks(sql, pageRows.filter((r) => r.kind === "task" && live(r)).map((r) => r.graph_id!), timeZone);
   const listData = buildLists(sql, pageRows.filter((r) => r.kind === "list" && live(r)).map((r) => r.graph_id!));
   const groupData = buildGroups(sql, pageRows.filter((r) => r.kind === "list_group" && live(r)).map((r) => r.graph_id!));
+  const imageData = buildThemeImages(sql, pageRows.filter((r) => r.kind === "theme_image" && live(r)).map((r) => r.graph_id!));
 
   const changes: FeedChange[] = [];
   let bytes = 0;
@@ -477,6 +556,10 @@ export function changesSince(
       c = { kind, id: r.sid, seq: r.seq, deleted: false, data: listData.get(r.graph_id!)! };
     } else if (live(r) && kind === "list_group" && groupData.has(r.graph_id!)) {
       c = { kind, id: r.sid, seq: r.seq, deleted: false, data: groupData.get(r.graph_id!)! };
+    } else if (live(r) && kind === "theme_image" && imageData.has(r.graph_id!)) {
+      c = { kind, id: r.sid, seq: r.seq, deleted: false, data: imageData.get(r.graph_id!)! };
+    } else if (live(r) && kind === "app_settings") {
+      c = { kind, id: r.sid, seq: r.seq, deleted: false, data: appSettingsData(sql) };
     } else if (!walk || r.seq > walkStart) {
       // Deleted, out of this device's scope, or logged as live with its row
       // gone: the device drops it. A later change logs it again as live.

@@ -108,6 +108,15 @@ export class TodoIndex extends DurableObject<Env> implements IndexCoreMethods {
   createCandidates(...a: Parameters<IndexCore["createCandidates"]>) { return this.#core.createCandidates(...a); }
   forgetSubresources(...a: Parameters<IndexCore["forgetSubresources"]>) { return this.#core.forgetSubresources(...a); }
   setStepOrder(...a: Parameters<IndexCore["setStepOrder"]>) { return this.#core.setStepOrder(...a); }
+  putAttachment(...a: Parameters<IndexCore["putAttachment"]>) { return this.#core.putAttachment(...a); }
+  deleteAttachment(...a: Parameters<IndexCore["deleteAttachment"]>) { return this.#core.deleteAttachment(...a); }
+  themeImage(...a: Parameters<IndexCore["themeImage"]>) { return this.#core.themeImage(...a); }
+  putThemeImage(...a: Parameters<IndexCore["putThemeImage"]>) { return this.#core.putThemeImage(...a); }
+  deleteThemeImage(...a: Parameters<IndexCore["deleteThemeImage"]>) { return this.#core.deleteThemeImage(...a); }
+  setListImage(...a: Parameters<IndexCore["setListImage"]>) { return this.#core.setListImage(...a); }
+  setSmartListThemes(...a: Parameters<IndexCore["setSmartListThemes"]>) { return this.#core.setSmartListThemes(...a); }
+  sweepThemeImages(...a: Parameters<IndexCore["sweepThemeImages"]>) { return this.#core.sweepThemeImages(...a); }
+  liveBlobIds(...a: Parameters<IndexCore["liveBlobIds"]>) { return this.#core.liveBlobIds(...a); }
   storeFolderAppearance(...a: Parameters<IndexCore["storeFolderAppearance"]>) { return this.#core.storeFolderAppearance(...a); }
   sidebar() { return this.#core.sidebar(); }
   storeFolderGroup(...a: Parameters<IndexCore["storeFolderGroup"]>) { return this.#core.storeFolderGroup(...a); }

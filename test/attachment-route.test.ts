@@ -13,7 +13,9 @@ afterEach(() => vi.unstubAllGlobals());
 describe("attachment download route (workers)", () => {
   it("streams an attachment's bytes behind an /api/v1 token and maps every refusal", async () => {
     stubMicrosoft("test-owner@example.com", graphAttachments);
-    const raw = env as unknown as Env;
+    // The streaming path: no blob store, so every download reaches Graph.
+    // test-node/blob-store.test.ts covers the stored copy.
+    const raw = { ...(env as unknown as Env), BLOBS: undefined } as Env;
     const front = oauthFront<Env>({
       origin: ORIGIN,
       toAppEnv: appEnv,

@@ -89,15 +89,27 @@ function busy(raw: unknown): MutationResult {
   return { id, status: "failed", error: "write_busy", retry: true };
 }
 
-const TOO_LARGE = Symbol("too_large");
+export const TOO_LARGE = Symbol("too_large");
 const BAD_JSON = Symbol("bad_json");
 
-// The body as JSON, read at most `max` bytes: a declared length over the cap
-// is refused unread, and an undeclared one stops at the cap.
+// The body as JSON, read at most `max` bytes.
 async function readJson(req: Request, max: number): Promise<unknown> {
+  const bytes = await readBytes(req, max);
+  if (bytes === TOO_LARGE) return TOO_LARGE;
+  if (bytes === null) return BAD_JSON;
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return BAD_JSON;
+  }
+}
+
+// The body's bytes, read at most `max`: a declared length over the cap is
+// refused unread, and an undeclared one stops at the cap. null: no body.
+export async function readBytes(req: Request, max: number): Promise<Uint8Array<ArrayBuffer> | typeof TOO_LARGE | null> {
   const declared = req.headers.get("content-length");
   if (declared !== null && Number(declared) > max) return TOO_LARGE;
-  if (!req.body) return BAD_JSON;
+  if (!req.body) return null;
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -117,9 +129,5 @@ async function readJson(req: Request, max: number): Promise<unknown> {
     bytes.set(c, at);
     at += c.byteLength;
   }
-  try {
-    return JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    return BAD_JSON;
-  }
+  return bytes;
 }
