@@ -1489,8 +1489,8 @@ the same columns and entities, written by the app's mutations.
 ## 11. What stays unchanged
 
 - **MCP tools.** Same names, inputs, outputs and Graph IDs. The `ops/` extraction
-  changes where the code lives, not what it does; the existing tests in `test/` and
-  `test-node/` run unchanged before and after.
+  changes where the code lives, not what it does; the existing tests in `workers/server/test/` and
+  `workers/server/test-node/` run unchanged before and after.
 - **Node/Docker host.** Gets the same features through ports. New dependency: `ws`.
 - **Webhooks and delta sync.** Same triggers and budgets. Changes: hot lists sync
   first (section 7.2), and `resync`/410 use mark and sweep (section 3.3).
@@ -1502,7 +1502,7 @@ the same columns and entities, written by the app's mutations.
 
 ## 12. Build order
 
-Each step is one PR with tests on both hosts (`test/` for the Workers pool, `test-node/`
+Each step is one PR with tests on both hosts (`workers/server/test/` for the Workers pool, `workers/server/test-node/`
 for Node). Nothing ships until this document is approved.
 
 1. **Spike** (done; results at the end of this document).

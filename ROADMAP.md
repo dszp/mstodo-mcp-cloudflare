@@ -346,7 +346,7 @@ lookup, single-use by delete; **no signing key / shared secret** (simplified fro
 originally-planned HMAC design — see below — since single-use already requires KV state).
 Bytes are forwarded synchronously (no R2 / no temp blob). Requires only the
 `SERVICE_BASE_URL` var. Code: `packages/core/upload/{tokens,sniff,graph-upload,handler,page}.ts`;
-tests under `test/upload-*`.
+tests under `workers/server/test/upload-*`.
 
 Original design notes below (retained for context).
 
