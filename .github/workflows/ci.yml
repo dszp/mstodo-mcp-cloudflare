@@ -41,9 +41,17 @@ jobs:
       - name: Typecheck (Node host)
         run: npx tsc -p tsconfig.node.json
 
-      # The web client has its own tsconfig (DOM lib, JSX, no Node/Workers types).
+      # The web client and spike: DOM lib and JSX. The tests in it import vitest,
+      # which brings Node's types along, so this check alone lets process or
+      # Buffer through.
       - name: Typecheck (web)
         run: npx tsc --noEmit -p workers/web
+
+      # The sync engine (workers/web/src/sync, tests excluded): ES2022 only, no
+      # DOM, Node or Workers types, so an engine file that touches window,
+      # localStorage, process or Buffer fails here.
+      - name: Typecheck (web sync engine)
+        run: npx tsc --noEmit -p workers/web/tsconfig.engine.json
 
       - name: Build (Node host)
         run: npm run build:node
