@@ -139,6 +139,21 @@ describe("handleApiRequest", () => {
     expect(JSON.stringify(info)).not.toContain("david@");
   });
 
+  it("names the owner's time zone, UTC when none is set", async () => {
+    const zoned = fakeEnv();
+    (zoned.env as unknown as { TIMEZONE: string }).TIMEZONE = "America/Chicago";
+    const [, info] = await body(await handleApiRequest(req("/sync/info"), zoned.env, PROPS, BG));
+    expect((info as { timezone: unknown }).timezone).toBe("America/Chicago");
+    const [, bare] = await body(await handleApiRequest(req("/sync/info"), fakeEnv().env, PROPS, BG));
+    expect((bare as { timezone: unknown }).timezone).toBe("UTC");
+  });
+
+  it("leaves the time zone out of the anonymous probe", async () => {
+    const zoned = fakeEnv();
+    (zoned.env as unknown as { TIMEZONE: string }).TIMEZONE = "America/Chicago";
+    expect(await body((await handlePublicApiRequest(req("/sync/info"), zoned.env))!)).toEqual([200, { server_id: "srv" }]);
+  });
+
   it("answers 404 for an unknown route and 405 for a write to a read route", async () => {
     const { env } = fakeEnv();
     expect(await body(await handleApiRequest(req("/nope"), env, PROPS, BG))).toEqual([404, { error: "not_found" }]);

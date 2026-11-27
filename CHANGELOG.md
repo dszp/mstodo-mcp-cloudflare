@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Smart-list and local-search rules for clients** (`docs/SYNC-API.md` section 4.10): which tasks
   each smart list holds, how it is ordered and counted, and how local search matches, so every
   client shows the same lists.
+- **`timezone` in `GET /api/v1/sync/info`** (with a token): the owner's `TIMEZONE`, `UTC` when
+  unset, so a client computes "today" in the zone of the feed's bare dates. Section 14.1 also
+  documents the `cursor` the response already carried, and section 4.2 says which dates
+  `my_day.committed_day` holds.
 
 ### Fixed
 - **Task body text for search.** An HTML body's `<script>` and `<style>` contents (Outlook

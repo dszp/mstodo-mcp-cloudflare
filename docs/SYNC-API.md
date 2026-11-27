@@ -424,7 +424,14 @@ Rules:
   To Do shows only the day, and a value Graph stores as exact UTC midnight is read as
   that UTC date, anything else as the local date in `TIMEZONE`. The app sends
   `completed_at` back as a bare date too. Instants (reminders, created, modified) go
-  out as UTC ISO 8601.
+  out as UTC ISO 8601. `GET /api/v1/sync/info` names that zone as `timezone`
+  (section 14.1).
+- `my_day.committed_day` and `my_day.postponed_day` are calendar dates as To Do keeps
+  them: the first ten characters of the `CommittedDay` and `PostponedDay` values
+  Substrate sends, with no time zone conversion. The server writes them as the date
+  in `TIMEZONE` (`myday.add` without a date uses today there); a Microsoft To Do app
+  writes its device's local date. They compare with a client's "today" when the
+  owner's devices run in `TIMEZONE`.
 - `subresources_complete: false` means the server hasn't fetched this task's steps,
   links and attachments yet (the per-task scan, section 1.1). The app shows what it has
   and gets the rest in a later pull. Once fetched, it stays `true`: a later change to
@@ -759,10 +766,11 @@ the same order, in every app. The Apple app's implementation was the source of t
 rules.
 
 Every smart list leaves out tasks in lists with `sync: "reference"`. "Today" is the
-local date as a bare `YYYY-MM-DD`. A client runs with the owner's `TIMEZONE`, so that
-its "today" matches the feed's bare dates; a client whose device zone differs uses the
-date in `TIMEZONE`. `order` is the task's `order` string from the feed (section 4.2),
-compared as text. "Open" means `status` is not `completed`.
+date as a bare `YYYY-MM-DD` in the owner's zone, which `GET /api/v1/sync/info` returns
+as `timezone` (section 14.1), whatever zone the device is in. The feed's bare dates
+and `my_day.committed_day` are in that zone too (section 4.2). `order` is the task's
+`order` string from the feed (section 4.2), compared as text. "Open" means `status` is
+not `completed`.
 
 Sorting follows SQLite's rule for nulls: in a descending sort a null value sorts last,
 in an ascending sort first. Rows still tied after the listed keys sort by `id`
@@ -1643,6 +1651,7 @@ to build now:
   ```json
   {
     "server_id": "c1b0…",
+    "cursor": "k3v9.18452",
     "account": { "name": "David (work)", "email_hint": "d…@…" },
     "version": "0.18.0",
     "capabilities": { "my_day": true, "step_order": true, "sub_resources": true,
@@ -1651,13 +1660,18 @@ to build now:
                       "attachment_cache": true, "theme_images": true,
                       "push": "websocket",
                       "source": "graph" },
-    "link_rules_rev": "9f2c4e01a7b3d5e6"
+    "link_rules_rev": "9f2c4e01a7b3d5e6",
+    "timezone": "America/New_York"
   }
   ```
 
   `server_id` is a random ID created once and stored in DO storage. It never changes,
   unlike the cursor epoch, which changes on an identity reset. The app keys the
   account's local data by it, so re-adding the same server is recognized.
+  `cursor` is the change feed's current position (section 3), the same form a pull
+  returns. `timezone` is the owner's `TIMEZONE`, an IANA name (`UTC` when the server
+  has none set): the zone of the feed's bare dates, and the zone a client uses for
+  "today" (section 4.10). The anonymous `/sync/info` probe carries neither.
   `capabilities` tells the app what this server supports: a deployment without the
   Exchange Online scope has no My Day, no step order and no list appearance
   (`list_appearance`: sidebar groups, order and theme in the feed, section 10.4;
@@ -1879,6 +1893,9 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-27: section 14.1: the authenticated `/sync/info` returns `timezone`, the owner's
+  `TIMEZONE`, which section 4.10's "today" uses; its existing `cursor` field is documented.
+  Section 4.2 states that `my_day.committed_day` is To Do's calendar date, unconverted.
 - 2026-11-27: section 4.10 added: the smart-list and local-search rules every client follows,
   taken from the Apple app, so each app and the web UI show the same lists.
 - 2026-11-27: section 6: completing a task without `completed_at` is stamped with the
