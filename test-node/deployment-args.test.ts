@@ -105,20 +105,20 @@ describe("parseArgs: passthrough", () => {
   });
 
   it("accepts a value as a separate token or after =", () => {
-    expect(parseArgs(["deploy", "alpha", "--outdir", "out"]).passthrough).toEqual(["--outdir", "out"]);
-    expect(parseArgs(["deploy", "alpha", "--outdir=out"]).passthrough).toEqual(["--outdir", "out"]);
+    expect(parseArgs(["deploy", "alpha", "--outdir", "out"]).passthrough).toEqual(["--outdir=out"]);
+    expect(parseArgs(["deploy", "alpha", "--outdir=out"]).passthrough).toEqual(["--outdir=out"]);
   });
 
   it("allows the tail flags", () => {
     const p = parseArgs([
       "tail", "alpha", "--format", "json", "--status=error", "--search", "x", "--method", "GET", "--sampling-rate", "0.5",
     ]).passthrough;
-    expect(p).toEqual(["--format", "json", "--status", "error", "--search", "x", "--method", "GET", "--sampling-rate", "0.5"]);
+    expect(p).toEqual(["--format=json", "--status=error", "--search=x", "--method=GET", "--sampling-rate=0.5"]);
   });
 
   it("allows the dev flags, --local taking no value", () => {
     const p = parseArgs(["dev", "alpha", "--port", "8788", "--ip", "127.0.0.1", "--inspector-port=9230", "--local"]).passthrough;
-    expect(p).toEqual(["--port", "8788", "--ip", "127.0.0.1", "--inspector-port", "9230", "--local"]);
+    expect(p).toEqual(["--port=8788", "--ip=127.0.0.1", "--inspector-port=9230", "--local"]);
   });
 
   it("consumes --adopt and --non-interactive on deploy", () => {
@@ -132,5 +132,33 @@ describe("parseArgs: passthrough", () => {
     expect(refusal(["deploy", "alpha", "--outdir"]).field).toBe("--outdir");
     expect(refusal(["deploy", "alpha", "--outdir", "--minify"]).field).toBe("--outdir");
     expect(refusal(["deploy", "alpha", "--outdir="]).field).toBe("--outdir");
+  });
+
+  it("emits every value flag as one token, so a flag-shaped value stays a value", () => {
+    expect(parseArgs(["tail", "alpha", "--search=--var"]).passthrough).toEqual(["--search=--var"]);
+    expect(parseArgs(["dev", "alpha", "--port", "8787"]).passthrough).toEqual(["--port=8787"]);
+  });
+
+  it("refuses a separate value token that looks like a flag", () => {
+    expect(refusal(["deploy", "alpha", "--outdir", "-c"]).field).toBe("--outdir");
+    expect(refusal(["tail", "alpha", "--search", "-e"]).field).toBe("--search");
+    expect(refusal(["dev", "alpha", "--port", "-1"]).field).toBe("--port");
+  });
+
+  const ACCEPTED: string[][] = [
+    ["deploy", "alpha", "--minify", "--outdir", "out", "--adopt"],
+    ["deploy", "alpha", "--outdir=--env"],
+    ["dry-run", "alpha", "--no-minify", "--outdir=-c"],
+    ["tail", "alpha", "--search=--var", "--format", "json", "--status=-x"],
+    ["tail", "alpha", "--method", "GET", "--sampling-rate=0.5"],
+    ["dev", "alpha", "--port=-c", "--ip", "127.0.0.1", "--inspector-port", "9230", "--local"],
+  ];
+  it.each(ACCEPTED)("every passthrough element is an allowlisted flag name, alone or before =: %s", (...argv) => {
+    const names = ["--minify", "--no-minify", "--outdir", "--format", "--status", "--search", "--method", "--sampling-rate", "--port", "--ip", "--inspector-port", "--local"];
+    for (const el of parseArgs(argv).passthrough) {
+      const name = el.split("=")[0];
+      expect(names, `element ${el}`).toContain(name);
+      expect(el === name || el.startsWith(`${name}=`), `element ${el}`).toBe(true);
+    }
   });
 });

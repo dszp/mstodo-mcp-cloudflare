@@ -75,13 +75,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
     let value = inline;
     if (value === undefined) {
       const next = rest[i + 1];
-      if (next !== undefined && !next.startsWith("--")) {
+      // A value that looks like a flag would be parsed as one by wrangler.
+      if (next !== undefined && !next.startsWith("-")) {
         value = next;
         i++;
       }
     }
     if (value === undefined || value === "") return refuse(flag, "needs a value");
-    passthrough.push(flag, value);
+    // One token, so wrangler cannot read a flag-shaped value as the next flag.
+    passthrough.push(`${flag}=${value}`);
   }
 
   return { command: cmd, name, adopt, nonInteractive, passthrough };
