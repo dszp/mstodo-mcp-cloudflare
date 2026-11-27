@@ -104,6 +104,37 @@ export function checkAccountEnv(dep: DeploymentFile, env: Record<string, string 
   }
 }
 
+// Variables wrangler reads as a different target: CLOUDFLARE_ENV acts as `--env`
+// (with no such section in the config, wrangler deploys <worker_name>-<env>) and
+// WRANGLER_CI_OVERRIDE_NAME replaces the config's Worker name (cli.js 25967,
+// 26737, 184044, 222443 in wrangler 4.158). Refused when set in this shell;
+// wranglerEnv and WRANGLER_NO_ENV keep a root .env from supplying them.
+const REDIRECTING_ENV = ["CLOUDFLARE_ENV", "WRANGLER_CI_OVERRIDE_NAME"] as const;
+
+export function checkTargetEnv(dep: DeploymentFile, env: Record<string, string | undefined>): void {
+  for (const name of REDIRECTING_ENV) {
+    const set = env[name];
+    if (set !== undefined && set !== "") {
+      throw new DeploymentRefusal(ownFile(dep), name, "redirects wrangler to another Worker or environment; unset it");
+    }
+  }
+}
+
+// The environment every wrangler child gets, merged over this process's. Wrangler
+// loads <cwd>/.env and .env.local at startup and a non-empty process value wins
+// over theirs (dotenv-expand, cli.js 193319), so pinning the Worker name to its
+// own value neutralises one there.
+export const wranglerEnv = (dep: DeploymentFile): Record<string, string> => ({
+  CLOUDFLARE_ACCOUNT_ID: dep.account_id,
+  WRANGLER_CI_OVERRIDE_NAME: dep.worker_name,
+});
+
+// Appended to every wrangler command. An empty CLOUDFLARE_ENV in the child's
+// environment would not hold: dotenv-expand treats "" as unset and takes a .env
+// value instead. An explicit empty --env does, because wrangler reads
+// `args.env ?? CLOUDFLARE_ENV` and an empty name selects the top level.
+export const WRANGLER_NO_ENV = "--env=";
+
 export function loadAllDeployments(repoRoot: string): LoadedDeployment[] {
   const root = join(repoRoot, "deployments");
   if (!existsSync(root)) return [];

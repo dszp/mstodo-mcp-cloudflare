@@ -7,7 +7,7 @@
 // wrangler-dist/cli.js, wrangler 4.158), the authority for what the API returns.
 // Every response is { success, errors, result }.
 import { DeploymentRefusal, type DeploymentFile } from "./schema.ts";
-import { normalizeHost, ownFile } from "./checks.ts";
+import { normalizeHost, ownFile, WRANGLER_NO_ENV, wranglerEnv } from "./checks.ts";
 import type { Runner } from "./runner.ts";
 
 export interface CloudflareApi {
@@ -266,14 +266,11 @@ export async function checkDomainChangeset(api: CloudflareApi, dep: DeploymentFi
 // stdout instead of parsing all of it. The token stays in this process: the
 // only consumer is the Authorization header in createCloudflareApi.
 // `cwd` is the repo root, where every wrangler child runs.
-export async function wranglerToken(run: Runner, accountId: string, cwd: string): Promise<string> {
+export async function wranglerToken(run: Runner, dep: DeploymentFile, cwd: string): Promise<string> {
   const refuse = (reason: string): never => {
     throw new DeploymentRefusal("wrangler", "auth token", reason);
   };
-  const res = await run("npx", ["wrangler", "auth", "token", "--json"], {
-    env: { CLOUDFLARE_ACCOUNT_ID: accountId },
-    cwd,
-  });
+  const res = await run("npx", ["wrangler", "auth", "token", "--json", WRANGLER_NO_ENV], { env: wranglerEnv(dep), cwd });
   if (res.code !== 0) return refuse("could not read wrangler's login; run `npx wrangler login` and retry");
 
   const parsed = findJsonObject(res.stdout);

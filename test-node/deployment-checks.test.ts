@@ -7,8 +7,11 @@ import {
   checkAccountEnv,
   checkBaseUrl,
   checkCrossFiles,
+  checkTargetEnv,
   loadAllDeployments,
   normalizeHost,
+  WRANGLER_NO_ENV,
+  wranglerEnv,
 } from "../scripts/deployment/checks.ts";
 
 const ACCOUNT = "0123456789abcdef0123456789abcdef";
@@ -211,6 +214,33 @@ describe("checkAccountEnv", () => {
   it("refuses a different account, naming CLOUDFLARE_ACCOUNT_ID", () => {
     const r = refusal(() => checkAccountEnv(dep(), { CLOUDFLARE_ACCOUNT_ID: OTHER_ACCOUNT }));
     expect(r.field).toBe("CLOUDFLARE_ACCOUNT_ID");
+  });
+});
+
+describe("checkTargetEnv", () => {
+  it("passes when the redirecting variables are unset or empty", () => {
+    expect(() => checkTargetEnv(dep(), {})).not.toThrow();
+    expect(() => checkTargetEnv(dep(), { CLOUDFLARE_ENV: "", WRANGLER_CI_OVERRIDE_NAME: "" })).not.toThrow();
+  });
+
+  // Wrangler reads CLOUDFLARE_ENV as --env (deploying <worker_name>-<env> when the
+  // config has no such section) and WRANGLER_CI_OVERRIDE_NAME as the Worker name.
+  for (const name of ["CLOUDFLARE_ENV", "WRANGLER_CI_OVERRIDE_NAME"]) {
+    it(`refuses ${name} set to anything, naming it`, () => {
+      const r = refusal(() => checkTargetEnv(dep(), { [name]: "example-alpha" }));
+      expect(r.field, name).toBe(name);
+      expect(r.file, name).toBe("deployments/alpha/deployment.jsonc");
+    });
+  }
+});
+
+describe("wranglerEnv", () => {
+  it("pins the account and the Worker name, so a .env file cannot supply either", () => {
+    expect(wranglerEnv(dep())).toEqual({ CLOUDFLARE_ACCOUNT_ID: ACCOUNT, WRANGLER_CI_OVERRIDE_NAME: "example-alpha" });
+  });
+
+  it("selects no environment with an explicit empty --env", () => {
+    expect(WRANGLER_NO_ENV).toBe("--env=");
   });
 });
 

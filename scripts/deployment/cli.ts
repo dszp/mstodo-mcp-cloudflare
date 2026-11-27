@@ -10,7 +10,16 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs, type ParsedArgs } from "./args.ts";
-import { checkAccountEnv, checkBaseUrl, checkCrossFiles, loadAllDeployments, ownFile } from "./checks.ts";
+import {
+  WRANGLER_NO_ENV,
+  checkAccountEnv,
+  checkBaseUrl,
+  checkCrossFiles,
+  checkTargetEnv,
+  loadAllDeployments,
+  ownFile,
+  wranglerEnv,
+} from "./checks.ts";
 import {
   SECRET_NAMES,
   acquireDevLock,
@@ -45,7 +54,7 @@ export type CliDeps = {
   // stdout on a terminal and CI unset); off one it accepts takeovers unasked.
   interactive: boolean;
   confirm: (question: string) => Promise<boolean>;
-  api: (accountId: string) => Promise<CloudflareApi>;
+  api: (dep: DeploymentFile) => Promise<CloudflareApi>;
   log: (line: string) => void;
 };
 
@@ -92,6 +101,7 @@ async function runCommand(argv: string[], deps: CliDeps): Promise<number> {
   checkBaseUrl(dep, relFile);
   checkCrossFiles(dep, loadAllDeployments(deps.repoRoot));
   checkAccountEnv(dep, deps.env);
+  checkTargetEnv(dep, deps.env);
 
   const ctx: Ctx = { args, dep, paths, rendered, deps };
   switch (args.command) {
@@ -110,14 +120,13 @@ async function runCommand(argv: string[], deps: CliDeps): Promise<number> {
   }
 }
 
-const childEnv = (dep: DeploymentFile): Record<string, string> => ({ CLOUDFLARE_ACCOUNT_ID: dep.account_id });
-
 // Order: wrangler subcommand and this script's own flags, then the rendered
-// config, then the allowlisted passthrough (already single `--flag[=value]` tokens).
+// config and the empty environment, then the allowlisted passthrough (already
+// single `--flag[=value]` tokens).
 function wrangler(ctx: Ctx, head: string[], tail: string[] = []): Promise<number> {
   return ctx.deps.spawnInteractive(
-    ["wrangler", ...head, "-c", ctx.paths.rendered, ...tail, ...ctx.args.passthrough],
-    childEnv(ctx.dep),
+    ["wrangler", ...head, "-c", ctx.paths.rendered, WRANGLER_NO_ENV, ...tail, ...ctx.args.passthrough],
+    wranglerEnv(ctx.dep),
   );
 }
 
@@ -126,8 +135,8 @@ const list = (xs: string[]): string => (xs.length === 0 ? "(none)" : xs.join(", 
 async function check(ctx: Ctx): Promise<number> {
   const { dep, deps } = ctx;
   deps.log(`render OK: ${ctx.paths.rendered}`);
-  deps.log("local checks OK: base_url, other deployment files, CLOUDFLARE_ACCOUNT_ID");
-  const api = await deps.api(dep.account_id);
+  deps.log("local checks OK: base_url, other deployment files, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ENV, WRANGLER_CI_OVERRIDE_NAME");
+  const api = await deps.api(dep);
   const { found } = await inspectLiveWorker(api, dep, { adopt: false });
   if (!found) {
     deps.log(`live Worker ${dep.worker_name}: no live Worker yet; the first deploy creates it`);
@@ -146,7 +155,7 @@ async function check(ctx: Ctx): Promise<number> {
 
 async function dryRun(ctx: Ctx): Promise<number> {
   // Wrangler's dry run makes no API calls, so the live check is the only one.
-  const api = await ctx.deps.api(ctx.dep.account_id);
+  const api = await ctx.deps.api(ctx.dep);
   await inspectLiveWorker(api, ctx.dep, { adopt: false });
   return wrangler(ctx, ["deploy", "--dry-run"]);
 }
@@ -174,7 +183,7 @@ async function deploy(ctx: Ctx): Promise<number> {
     );
   }
 
-  const api = await deps.api(dep.account_id);
+  const api = await deps.api(dep);
   const { found } = await inspectLiveWorker(api, dep, { adopt: args.adopt });
   // Checked in every mode: wrangler's own takeover prompt is skipped whenever it
   // decides the session is not interactive, which this script cannot fully predict.
@@ -229,7 +238,7 @@ async function secrets(ctx: Ctx): Promise<number> {
   const { dep, deps } = ctx;
   // MS_CLIENT_SECRET also derives the key that seals the KV tokens, so a secret
   // pushed to the wrong Worker is the most damaging wrong-target write.
-  const api = await deps.api(dep.account_id);
+  const api = await deps.api(dep);
   const { found } = await inspectLiveWorker(api, dep, { adopt: false });
   // On a missing Worker, `wrangler secret put` creates an empty draft one (its
   // prompt defaults to yes when stdin is piped), which the next deploy would
@@ -244,9 +253,9 @@ async function secrets(ctx: Ctx): Promise<number> {
 
   let failed = 0;
   for (const [name, value] of entries) {
-    const r = await deps.run("npx", ["wrangler", "secret", "put", name, "-c", ctx.paths.rendered], {
+    const r = await deps.run("npx", ["wrangler", "secret", "put", name, "-c", ctx.paths.rendered, WRANGLER_NO_ENV], {
       stdin: value,
-      env: childEnv(dep),
+      env: wranglerEnv(dep),
       cwd: ctx.deps.repoRoot,
     });
     // wrangler's output is not echoed: it is the one stream that saw the value.
@@ -324,7 +333,7 @@ if (import.meta.main) {
     // deploy command's changeset refusal covers.
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) && !process.env.CI,
     confirm,
-    api: async (accountId) => createCloudflareApi(await wranglerToken(nodeRunner, accountId, repoRoot)),
+    api: async (dep) => createCloudflareApi(await wranglerToken(nodeRunner, dep, repoRoot)),
     log: (line) => console.log(line),
   });
   process.exit(code);

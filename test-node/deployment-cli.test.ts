@@ -9,6 +9,9 @@ import type { RunResult } from "../scripts/deployment/runner.ts";
 
 // Fake values only.
 const ACCOUNT = "0123456789abcdef0123456789abcdef";
+// Every wrangler child: the file's account, and the Worker name pinned so that a
+// WRANGLER_CI_OVERRIDE_NAME in a root .env cannot rename the target.
+const CHILD_ENV = { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, WRANGLER_CI_OVERRIDE_NAME: "example-alpha" };
 const realRoot = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 
 const alphaFile = {
@@ -127,6 +130,17 @@ describe("main: identity checks", () => {
     expect(h.logs.at(-1)).toMatch(/^refused: deployments\/alpha\/deployment\.jsonc: kv\.OAUTH_KV: same KV namespace id/);
   });
 
+  for (const name of ["CLOUDFLARE_ENV", "WRANGLER_CI_OVERRIDE_NAME"]) {
+    it(`refuses ${name} in the environment before any child or API call`, async () => {
+      const h = harness({ env: { [name]: "staging" } });
+      expect(await main(["deploy", "alpha"], h.deps)).toBe(1);
+      expect(h.spawns).toEqual([]);
+      expect(h.runs).toEqual([]);
+      expect(h.apiCalls()).toBe(0);
+      expect(h.logs.at(-1)).toMatch(new RegExp(`^refused: deployments/alpha/deployment\\.jsonc: ${name}: `));
+    });
+  }
+
   it("refuses a CLOUDFLARE_ACCOUNT_ID that names another account", async () => {
     const h = harness({ env: { CLOUDFLARE_ACCOUNT_ID: "0123456789abcdef0123456789abcdee" } });
     expect(await main(["tail", "alpha"], h.deps)).toBe(1);
@@ -204,14 +218,14 @@ describe("main: dry-run and tail", () => {
     expect(await main(["dry-run", "alpha", "--minify"], h.deps)).toBe(0);
     expect(h.apiCalls()).toBe(1);
     expect(h.spawns).toEqual([
-      { args: ["wrangler", "deploy", "--dry-run", "-c", paths().rendered, "--minify"], env: { CLOUDFLARE_ACCOUNT_ID: ACCOUNT } },
+      { args: ["wrangler", "deploy", "--dry-run", "-c", paths().rendered, "--env=", "--minify"], env: CHILD_ENV },
     ]);
   });
 
   it("tail passes the child's exit code through", async () => {
     const h = harness({ onSpawn: () => 3 });
     expect(await main(["tail", "alpha", "--format", "json"], h.deps)).toBe(3);
-    expect(h.spawns[0].args).toEqual(["wrangler", "tail", "-c", paths().rendered, "--format=json"]);
+    expect(h.spawns[0].args).toEqual(["wrangler", "tail", "-c", paths().rendered, "--env=", "--format=json"]);
   });
 });
 
@@ -278,7 +292,7 @@ describe("main: deploy", () => {
     expect(await main(["deploy", "alpha", "--minify"], h.deps)).toBe(0);
     expect(h.confirms).toEqual([`Deploy these changes to example-alpha in account ${ACCOUNT}?`]);
     expect(h.spawns).toEqual([
-      { args: ["wrangler", "deploy", "--strict", "-c", paths().rendered, "--minify"], env: { CLOUDFLARE_ACCOUNT_ID: ACCOUNT } },
+      { args: ["wrangler", "deploy", "--strict", "-c", paths().rendered, "--env=", "--minify"], env: CHILD_ENV },
     ]);
     expect(JSON.parse(readFileSync(paths().lastDeployed, "utf8"))).toEqual(JSON.parse(readFileSync(paths().rendered, "utf8")));
   });
@@ -320,9 +334,9 @@ describe("main: secrets", () => {
     const values: Record<string, string> = { MS_TENANT_ID: LITERAL, MS_CLIENT_SECRET: RESOLVED, OWNER_EMAIL: OWNER };
     for (const p of puts) {
       const name = p.args[3];
-      expect(p.args, name).toEqual(["wrangler", "secret", "put", name, "-c", paths().rendered]);
+      expect(p.args, name).toEqual(["wrangler", "secret", "put", name, "-c", paths().rendered, "--env="]);
       expect(p.opts?.stdin, name).toBe(values[name]);
-      expect(p.opts?.env, name).toEqual({ CLOUDFLARE_ACCOUNT_ID: ACCOUNT });
+      expect(p.opts?.env, name).toEqual(CHILD_ENV);
       expect(p.opts?.cwd, name).toBe(root);
     }
     for (const v of Object.values(values)) {
@@ -377,12 +391,14 @@ describe("main: dev", () => {
       },
     });
     expect(await main(["dev", "alpha", "--port", "8788"], h.deps)).toBe(0);
+    expect(h.spawns[0].env).toEqual(CHILD_ENV);
     expect(seen).toEqual({ exists: true, mode: 0o600, content: "MS_CLIENT_SECRET='dev-secret-0123'\n", locked: true });
     expect(h.spawns[0].args).toEqual([
       "wrangler",
       "dev",
       "-c",
       paths().rendered,
+      "--env=",
       "--persist-to",
       join(root, ".wrangler", "state", "alpha"),
       "--port=8788",
