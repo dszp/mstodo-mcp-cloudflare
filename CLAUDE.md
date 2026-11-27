@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A single-user, single-tenant **MCP server for Microsoft To Do**. It exposes ~50 MCP tools (list/task CRUD, checklist items, linked resources, attachments, My Day, search, config) backed by a SQLite cache with Graph delta sync. Host-independent code lives in `src/core`; it runs on two hosts: the primary **Cloudflare Worker** (`src/hosts/cloudflare`, SQLite in a Durable Object) and a **Node.js / Docker** host for self-hosting elsewhere (`src/hosts/node`, one SQLite file). `src/hosts/shared` holds the OAuth front both hosts use.
 
+The server is becoming the backend of **Potem**, a task app for macOS and iOS that replaces the Microsoft To Do apps. The apps live in a separate repository and talk to this server only through the client sync API under `/api/v1`; `docs/SYNC-API.md` is that contract. The repository and Worker names still say `mstodo` because the server started as a To Do connector. ROADMAP.md sections 12 to 15 record where the project is headed: the repository layout, adapter workers, Microsoft To Do as an optional backend, and deploying to several Cloudflare accounts.
+
 ## Commands
 
 ```bash
@@ -25,6 +27,20 @@ bash scripts/push-secrets.sh                    # push every secret from .dev.va
 ```
 
 **Tests need no real credentials or live config.** `vitest.config.ts` defines two projects. `workers` (`test/**`) points the Cloudflare pool at the committed `wrangler.example.jsonc` and supplies fake secrets via miniflare bindings; KV and DO bindings are simulated locally. `test/_test-worker.ts` re-exports only `TodoIndex` (the `MSToDoSession` agent DO is deliberately excluded — it pulls in the MCP SDK → ajv, which the pool can't resolve). `node` (`test-node/**`) runs on plain Node 24 with in-memory `node:sqlite` databases and fake `MS_*` values passed to `buildNodeEnv`; Microsoft endpoints are stubbed with `vi.stubGlobal("fetch")`. Node ≥ 24 is required for development (`node:sqlite`).
+
+## Deployments
+
+Each deployment has its own gitignored wrangler config: the production config is `wrangler.jsonc` at the root, and any other deployment keeps its config under `config-live/<name>/`. Deploy a non-default deployment with `npx wrangler deploy -c config-live/<name>/wrangler.jsonc`, with `CLOUDFLARE_ACCOUNT_ID` set to that deployment's account. The committed `wrangler.example.jsonc` is the template, and CI and the tests use it.
+
+- **Production serves the owner's real To Do account.** Don't create or edit test data there. Test against a secondary deployment, and give test lists and tasks a recognizable prefix so they can be found and deleted.
+- **A binding or migration change has to reach every gitignored config by hand.** That includes the root `wrangler.jsonc` and each config under `config-live/`. A deploy from a config that lacks a new Durable Object class or migration fails, or runs without the new binding.
+- **Changing the hostname creates new grants.** Tokens are bound to `<origin>/mcp` and `<origin>/api/v1`, and `buildOAuthFront(origin)` builds the front per request, so a second hostname on the same Worker works alongside the first, but every client must sign in again on the new one. Before moving, add `https://<new host>/auth/microsoft/callback` to the Entra app's redirect URIs. Then update `SERVICE_BASE_URL`: it sets the Graph subscription `notificationUrl` and the upload and download link origin. Retire the old hostname only after the connectors and the apps have moved.
+
+## Worktrees and local types
+
+Do feature work in a git worktree next to the main checkout, with `node_modules` symlinked to the main checkout's copy. When you remove the worktree, delete that symlink first, or `git worktree remove` refuses because of an untracked file.
+
+Generate `worker-configuration.d.ts` (gitignored) from the example config, as CI does: `npx wrangler types -c wrangler.example.jsonc`. A copy generated from a local config, or carried over from an older checkout, can disagree with CI's. For example, a required binding the local file lacks lets a cast pass `tsc` locally and fail it in CI.
 
 ## Test-driven development
 
