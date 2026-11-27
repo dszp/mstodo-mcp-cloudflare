@@ -647,7 +647,8 @@ Content-Type: image/jpeg | image/png | image/heic
 - The body is the image itself, at most 15 MiB. The server checks that the bytes are
   the type the `Content-Type` names and refuses anything else.
 - The server doesn't decode the image. `width` and `height` (whole pixels, 1 to 20,000)
-  and the optional `brightness` (0 for black to 1 for white, the app's measure) are
+  and the optional `brightness` (a decimal number from 0 for black to 1 for white, the
+  app's measure, with any number of digits) are
   stored as the app sends them and returned to every device.
 - The `id` is derived from the bytes (the first 32 hex digits of their SHA-256), so it
   never changes and the same image uploaded twice gets the same `id`. Uploading again
@@ -959,8 +960,11 @@ in the feed with the new entry in its `attachments`, and the push socket announc
 - `sid` is the new attachment's `sid`, chosen by the app (a UUID), as for any create.
   It is also what makes a retry safe: sending the same upload again with the same
   `sid` returns the first result without attaching the file twice. A retry after a
-  failure that may have reached Graph adopts an attachment of the same name and bytes
-  that the first attempt made.
+  failure that may have reached Graph adopts the attachment the first attempt made:
+  one with the same name and the same bytes that no other create claimed and that
+  wasn't on the task before the first attempt began. A file already on the task is
+  never adopted, even an identical one; the retry attaches a new copy instead. When
+  more than one attachment qualifies, the upload is refused with `ambiguous_create`.
 - `name` is the file name To Do shows, 1 to 255 characters after the server removes
   control characters and path separators.
 - `Content-Type` is stored as sent when the server can't tell the type from the
@@ -970,12 +974,17 @@ The response has the shape of a mutation result (section 5.3):
 
 | Status | Body |
 | --- | --- |
-| 200 | `{ "status": "applied", "sid": "…", "cursor": "…" }`, or `"status": "duplicate"` for a repeat |
+| 200 | `{ "status": "applied", "sid": "…", "cursor": "…" }`, or `"status": "duplicate"` for a repeat of an upload that was applied |
 | 400 | `{"error":"bad_request","detail":"…"}`: a missing or malformed parameter |
 | 404 | `{"error":"unknown_task"}` |
 | 409 | `{"error":"list_excluded"}`, `{"error":"sid_in_use"}` or `{"error":"in_progress","retry":true}` |
+| 409 | `{"error":"ambiguous_create"}`: a retry found more than one attachment it could have made (see `sid` above). The app shows it to the owner. |
 | 413 | `{"error":"too_large"}` |
 | 502, 503 | `{"error":"graph_…","retry":…}`, as for a download (section 4.6) |
+| 503 | `{"error":"write_busy","retry":true}`: other writes held the server's write queue too long. Send the same upload again. |
+
+A repeat of an upload that was refused with `sid_in_use` or `ambiguous_create` gets the
+same `409` again, not `duplicate`.
 
 `capabilities.attachment_upload: true` says the server has this route.
 

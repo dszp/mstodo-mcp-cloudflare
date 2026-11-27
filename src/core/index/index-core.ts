@@ -2150,13 +2150,24 @@ export class IndexCore implements TokenProvider {
     });
   }
 
-  // Records the outcome and the clocks of the fields it set, together.
+  // Records the outcome and the clocks of the fields it set, together. An
+  // applied result is final: an attempt that took over an expired lease and
+  // then failed must not replace it with its own rejection.
   mutationFinish(
     id: string,
     result: unknown,
     clocks: Array<{ kind: string; sid: string; field: string; at_ms: number }>,
   ): void {
     this.#transact(() => {
+      const stored = this.#sql
+        .exec<{ state: string; result_json: string | null }>(
+          "SELECT state, result_json FROM applied_mutations WHERE mutation_id = ?",
+          id,
+        )
+        .toArray()[0];
+      if (stored?.state === "done" && (JSON.parse(stored.result_json ?? "null") as { status?: unknown } | null)?.status === "applied") {
+        return;
+      }
       this.#sql.exec(
         "UPDATE applied_mutations SET state = 'done', result_json = ?, lease_until = NULL WHERE mutation_id = ?",
         JSON.stringify(result),
@@ -2300,9 +2311,9 @@ export class IndexCore implements TokenProvider {
   // reserveSid didn't run first (or lost a race with delta), the entity is
   // already mirrored under a minted sid M that a client may have pulled. M is
   // retired the way a deletion is (a tombstone at a new seq, for lists and
-  // tasks) and the entity is logged again under the app's sid; for a step or
-  // link, which are logged on their task, the task is logged again. False when
-  // the app's sid already names another entity.
+  // tasks) and the entity is logged again under the app's sid; for a step,
+  // link or attachment, which are logged on their task, the task is logged
+  // again. False when the app's sid already names another entity.
   adoptSid(kind: string, sid: string, graphId: string): boolean {
     return this.#transact(() => {
       const taken = this.#sql
@@ -2337,11 +2348,15 @@ export class IndexCore implements TokenProvider {
         relog(kind, sid, 0, kind === "list" ? sid : kind === "list_group" ? null : logged.list_sid);
         return true;
       }
-      // A step or link: log its task again, so a client that pulled the task
-      // with the minted sid inside gets it with the app's.
-      const table = kind === "step" ? "checklist_items" : kind === "link" ? "linked_resources" : null;
-      if (!table) return true;
-      const key = kind === "step" ? "item_id" : "link_id";
+      // A step, link or attachment: log its task again, so a client that
+      // pulled the task with the minted sid inside gets it with the app's.
+      const child: Record<string, [string, string]> = {
+        step: ["checklist_items", "item_id"],
+        link: ["linked_resources", "link_id"],
+        attachment: ["attachments", "attachment_id"],
+      };
+      if (!child[kind]) return true;
+      const [table, key] = child[kind];
       const task = this.#sql
         .exec<{ sid: string; list_sid: string | null }>(
           `SELECT m.sid, (SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id = t.list_id) AS list_sid

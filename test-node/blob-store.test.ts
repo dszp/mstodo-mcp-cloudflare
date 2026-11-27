@@ -124,6 +124,20 @@ describe("theme images", () => {
     expect((await upload(t.env, JPEG, "image/jpeg", "width=5&height=5&brightness=1.5")).status).toBe(400);
   });
 
+  it("takes brightness as any decimal from 0 to 1, as Swift formats a Double", async () => {
+    const t = setup();
+    const res = await upload(t.env, JPEG, "image/jpeg", "width=5&height=5&brightness=0.4235294117647059");
+    expect([res.status, ((await res.json()) as { brightness: number }).brightness]).toEqual([201, 0.4235294117647059]);
+    for (const ok of ["0", "1", "1.0", "0.0", "1e-05", ".5"]) {
+      const r = await upload(t.env, PNG, "image/png", `width=5&height=5&brightness=${ok}`);
+      expect([ok, r.ok]).toEqual([ok, true]);
+    }
+    for (const no of ["", "-0.1", "1.0000001", "2e-1x", "NaN", "Infinity", "0x1", " 0.5"]) {
+      const r = await upload(t.env, PNG, "image/png", `width=5&height=5&brightness=${encodeURIComponent(no)}`);
+      expect([no, r.status]).toEqual([no, 400]);
+    }
+  });
+
   it("accepts HEIC by its ftyp brand", async () => {
     const t = setup();
     const heic = new Uint8Array([0, 0, 0, 24, ...new TextEncoder().encode("ftypheic"), 0, 0, 0, 0]);
@@ -408,7 +422,11 @@ describe("the blob sweep", () => {
 });
 
 describe("POST /api/v1/attachments", () => {
-  // The real index with a stand-in Microsoft token; Graph is a fetch stub.
+  // The real index with a stand-in Microsoft token; Graph is a fetch stub
+  // holding the task's attachments. It starts with A1 (receipt.pdf), the
+  // attachment the mirror already has.
+  const A1_BYTES = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  type GraphAttachment = { id: string; name: string; bytes: Uint8Array; modified: string };
   function uploadSetup() {
     const t = setup();
     const index = new Proxy(t.c, {
@@ -419,26 +437,58 @@ describe("POST /api/v1/attachments", () => {
       },
     });
     const env = { ...t.env, TODO_CACHE: { get: async () => null }, ownerIndex: () => index } as unknown as AppEnv;
+    const graph: GraphAttachment[] = [{ id: "A1", name: "receipt.pdf", bytes: A1_BYTES, modified: new Date().toISOString() }];
     const posts: string[] = [];
+    // How the next attach POST fails: the connection drops before Graph
+    // stores the file, or after.
+    const fail: { next: "drop-before" | "drop-after" | null } = { next: null };
+    // Runs while Graph handles an attach POST, before it answers.
+    const hooks: { duringPost?: () => void } = {};
+    // Graph refuses the next attachment listing (a 403, which isn't retried), and how far Graph's
+    // clock runs behind the server's.
+    const graphOpts = { throttleNextList: false, clockBehindMs: 0 };
     let next = 0;
-    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
-      if (init?.method === "POST") {
-        posts.push(url);
-        const body = JSON.parse(String(init.body)) as { name: string; contentType: string };
-        return Response.json({ "@odata.type": "#microsoft.graph.taskFileAttachment", id: `A${++next + 1}`, name: body.name, size: 3, contentType: body.contentType }, { status: 201 });
-      }
-      return Response.json({ value: [] });
+    const meta = (a: GraphAttachment) => ({
+      "@odata.type": "#microsoft.graph.taskFileAttachment", id: a.id, name: a.name, size: a.bytes.byteLength,
+      contentType: "application/octet-stream", lastModifiedDateTime: a.modified,
     });
-    const send = (sid: string, opts: { task?: string; name?: string } = {}) =>
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const path = new URL(url).pathname;
+      if (init?.method === "POST") {
+        const failure = fail.next;
+        fail.next = null;
+        if (failure === "drop-before") throw new TypeError("network connection lost");
+        posts.push(url);
+        const body = JSON.parse(String(init.body)) as { name: string; contentBytes: string };
+        const a = { id: `A${++next + 1}`, name: body.name, bytes: new Uint8Array(Buffer.from(body.contentBytes, "base64")), modified: new Date(Date.now() - graphOpts.clockBehindMs).toISOString() };
+        graph.push(a);
+        hooks.duringPost?.();
+        if (failure === "drop-after") throw new TypeError("network connection lost");
+        return Response.json(meta(a), { status: 201 });
+      }
+      const one = /\/attachments\/([^/]+)$/.exec(path);
+      if (one) {
+        const a = graph.find((x) => x.id === decodeURIComponent(one[1]));
+        if (!a) return Response.json({ error: { code: "NotFound" } }, { status: 404 });
+        return Response.json({ ...meta(a), contentBytes: Buffer.from(a.bytes).toString("base64") });
+      }
+      if (path.endsWith("/attachments") && graphOpts.throttleNextList) {
+        graphOpts.throttleNextList = false;
+        return Response.json({ error: { code: "Forbidden" } }, { status: 403 });
+      }
+      return Response.json({ value: path.endsWith("/attachments") ? graph.map(meta) : [] });
+    });
+    const send = (sid: string, opts: { task?: string; name?: string; bytes?: Uint8Array } = {}) =>
       uploadAttachment(
         new Request(
           `https://x/api/v1/attachments?task_id=${opts.task ?? t.sidOf("task", "T1")}&sid=${sid}&name=${encodeURIComponent(opts.name ?? "note.txt")}`,
-          { method: "POST", headers: { "content-type": "text/plain" }, body: new Uint8Array([104, 105, 10]) },
+          { method: "POST", headers: { "content-type": "text/plain" }, body: opts.bytes ?? new Uint8Array([104, 105, 10]) },
         ),
         env,
         undefined,
       );
-    return { ...t, env, posts, send };
+    const named = (name: string) => graph.filter((a) => a.name === name);
+    return { ...t, env, posts, graph, fail, hooks, graphOpts, named, send };
   }
   const SID = "0190a1b2-c3d4-7e5f-8a9b-00000000aa01";
   afterEach(() => vi.unstubAllGlobals());
@@ -467,6 +517,99 @@ describe("POST /api/v1/attachments", () => {
     expect((await t.send(SID, { task: "0190a1b2-c3d4-7e5f-8a9b-00000000ffff" })).status).toBe(404);
     expect((await t.send(SID, { name: " " })).status).toBe(400);
     expect(t.posts).toHaveLength(0);
+  });
+
+  it("a retry adopts the attachment the dropped attempt made, without attaching again", async () => {
+    const t = uploadSetup();
+    t.fail.next = "drop-after";
+    expect((await t.send(SID)).status).toBe(502);
+    const retry = await t.send(SID);
+    expect(await retry.json()).toMatchObject({ status: "applied", sid: SID });
+    expect(t.named("note.txt").map((a) => a.id)).toEqual(["A2"]);
+    expect(t.sidOf("attachment", "A2")).toBe(SID);
+  });
+
+  it("a retry that Graph refuses keeps the earlier attempt's mark, so the next retry still doesn't attach twice", async () => {
+    const t = uploadSetup();
+    t.fail.next = "drop-after";
+    expect((await t.send(SID)).status).toBe(502);
+    t.graphOpts.throttleNextList = true;
+    expect((await t.send(SID)).status).not.toBe(200);
+    const third = await t.send(SID);
+    expect(await third.json()).toMatchObject({ status: "applied", sid: SID });
+    expect(t.posts).toHaveLength(1);
+    expect(t.named("note.txt")).toHaveLength(1);
+  });
+
+  it("a retry recognises its own upload when Graph's clock runs a minute behind", async () => {
+    const t = uploadSetup();
+    t.graphOpts.clockBehindMs = 60_000;
+    t.fail.next = "drop-after";
+    expect((await t.send(SID)).status).toBe(502);
+    expect(await (await t.send(SID)).json()).toMatchObject({ status: "applied", sid: SID });
+    expect(t.named("note.txt")).toHaveLength(1);
+  });
+
+  it("a retry never adopts a same-name attachment that was on the task before", async () => {
+    const t = uploadSetup();
+    const minted = t.sidOf("attachment", "A1");
+    const bytes = new Uint8Array([9, 9, 9]);
+    t.fail.next = "drop-before";
+    expect((await t.send(SID, { name: "receipt.pdf", bytes })).status).toBe(502);
+    const retry = await t.send(SID, { name: "receipt.pdf", bytes });
+    expect(await retry.json()).toMatchObject({ status: "applied", sid: SID });
+    const fresh = t.named("receipt.pdf").filter((a) => a.id !== "A1");
+    expect(fresh).toHaveLength(1);
+    expect(t.sidOf("attachment", fresh[0].id)).toBe(SID);
+    expect(t.sidOf("attachment", "A1")).toBe(minted);
+    expect(t.blobs.objects.get(`attachments/${SID}`)?.bytes).toEqual(bytes);
+  });
+
+  it("a retry never adopts a same-bytes copy older than the first attempt", async () => {
+    const t = uploadSetup();
+    // A1 has been in the mirror an hour; A9, the same file, is in Graph from an
+    // hour ago but not yet in the mirror.
+    const hourAgo = Date.now() - 3_600_000;
+    t.sql.exec("UPDATE entity_map SET created_ms = ? WHERE kind = 'attachment' AND graph_id = 'A1'", hourAgo);
+    t.graph.push({ id: "A9", name: "receipt.pdf", bytes: A1_BYTES, modified: new Date(hourAgo).toISOString() });
+    t.fail.next = "drop-before";
+    expect((await t.send(SID, { name: "receipt.pdf", bytes: A1_BYTES })).status).toBe(502);
+    const retry = await t.send(SID, { name: "receipt.pdf", bytes: A1_BYTES });
+    expect(await retry.json()).toMatchObject({ status: "applied", sid: SID });
+    expect(t.posts).toHaveLength(1);
+    expect(t.sidOf("attachment", t.graph.at(-1)!.id)).toBe(SID);
+  });
+
+  it("a repeat of a rejected upload returns the stored rejection, not duplicate", async () => {
+    const t = uploadSetup();
+    t.fail.next = "drop-before";
+    expect((await t.send(SID)).status).toBe(502);
+    // Two matching copies appeared since: the retry can't tell which is its own.
+    const now = new Date().toISOString();
+    const bytes = new Uint8Array([104, 105, 10]);
+    t.graph.push({ id: "B1", name: "note.txt", bytes, modified: now }, { id: "B2", name: "note.txt", bytes, modified: now });
+    const retry = await t.send(SID);
+    expect([retry.status, await retry.json()]).toEqual([409, { error: "ambiguous_create" }]);
+    const again = await t.send(SID);
+    expect([again.status, await again.json()]).toEqual([409, { error: "ambiguous_create" }]);
+  });
+
+  it("a retry that takes over an expired lease finishes as applied once the first attempt has attached", async () => {
+    const t = uploadSetup();
+    let second: Promise<Response> | undefined;
+    t.hooks.duringPost = () => {
+      t.hooks.duringPost = undefined;
+      // The first attempt's mutation lease runs out mid-upload and the app retries.
+      t.sql.exec("UPDATE applied_mutations SET lease_until = 0 WHERE mutation_id = ?", `attachment.upload:${SID}`);
+      second = t.send(SID);
+    };
+    const first = await t.send(SID);
+    expect(await first.json()).toMatchObject({ status: "applied", sid: SID });
+    const retry = await second!;
+    expect([retry.status, await retry.json()]).toEqual([200, expect.objectContaining({ status: "applied", sid: SID })]);
+    expect(t.named("note.txt")).toHaveLength(1);
+    const again = await t.send(SID);
+    expect(await again.json()).toMatchObject({ status: "duplicate", sid: SID });
   });
 });
 

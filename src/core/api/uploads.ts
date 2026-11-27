@@ -60,7 +60,7 @@ export async function uploadAttachment(req: Request, env: AppEnv, props: Partial
   const mutationId = `attachment.upload:${sid}`;
   const principal = props?.principal ? `${props.principal.iss}|${props.principal.sub}` : (props?.user ?? "unknown");
   const begun = await index.mutationBegin(mutationId, principal, Date.now(), MUTATION_LEASE_MS);
-  if (begun.state === "done") return json({ status: "duplicate", sid, cursor: await index.syncCursor() });
+  if (begun.state === "done") return repeated(begun.result, sid, index);
   if (begun.state === "leased") return json({ error: "in_progress", retry: true }, 409);
 
   const self = resolved[`attachment:${sid}`];
@@ -78,19 +78,32 @@ export async function uploadAttachment(req: Request, env: AppEnv, props: Partial
     forceRefresh: () => index.refreshToken(),
     reportClaimsChallenge: (claims: string) => index.markReauthRequired("claims_challenge", claims),
   });
-  let attachmentId: string;
+  let outcome: "attached" | "already" | "sid_in_use";
   try {
-    attachmentId = await new WriteLease(index).hold(async () => {
+    // The attach and the sid's reservation share the write lease, so an
+    // attempt that took over this mutation after its lease ran out (a long
+    // upload) waits for the first, then sees the sid it reserved.
+    outcome = await new WriteLease(index).hold(async () => {
+      let attachmentId: string | null = null;
       if (begun.prior_at_ms !== undefined) {
-        const found = await findEarlierUpload(graph, index, listId, task.graph_id!, name, bytes);
+        const now = (await index.resolveSids([{ kind: "attachment", sid }]))[`attachment:${sid}`];
+        if (now?.graph_id) return "already";
+        const found = await findEarlierUpload(graph, index, listId, task.graph_id!, name, bytes, begun.prior_at_ms);
         if (found === "ambiguous") throw new Ambiguous();
-        if (found) return found;
+        attachmentId = found;
       }
-      const maxInlineBytes = (await loadAttachmentConfig(env)).max_inline_bytes;
-      const r = await attachFile(graph, await index.getAccessToken(), {
-        listId, taskId: task.graph_id!, name, bytes, contentType, maxInlineBytes,
-      });
-      return r.attachment_id;
+      if (attachmentId === null) {
+        const maxInlineBytes = (await loadAttachmentConfig(env)).max_inline_bytes;
+        const r = await attachFile(graph, await index.getAccessToken(), {
+          listId, taskId: task.graph_id!, name, bytes, contentType, maxInlineBytes,
+        });
+        attachmentId = r.attachment_id;
+      }
+      if (!(await index.reserveSid("attachment", sid, attachmentId)) && !(await index.adoptSid("attachment", sid, attachmentId))) {
+        return "sid_in_use";
+      }
+      await index.putAttachment(task.graph_id!, listId, { id: attachmentId, name, size: bytes.byteLength, content_type: contentType });
+      return "attached";
     });
   } catch (e) {
     if (e instanceof Ambiguous) {
@@ -98,23 +111,26 @@ export async function uploadAttachment(req: Request, env: AppEnv, props: Partial
       return json({ error: "ambiguous_create" }, 409);
     }
     if (e instanceof WriteBusyError) {
-      await index.mutationAbandon(mutationId);
+      // Nothing was written by this attempt; an earlier one's mark that it
+      // may have written is kept for the next retry.
+      if (begun.prior_at_ms !== undefined) await index.mutationRelease(mutationId);
+      else await index.mutationAbandon(mutationId);
       return json({ error: "write_busy", retry: true }, 503);
     }
     // A 5xx or a dropped connection may have attached the file: the retry
-    // looks for it before attaching again.
+    // looks for it before attaching again. A retry that fails any other way
+    // keeps the earlier attempt's mark, which may still have attached it.
     const maybeWritten = (e instanceof GraphError && e.status >= 500) || e instanceof TypeError;
-    if (maybeWritten) await index.mutationRelease(mutationId);
+    if (maybeWritten || begun.prior_at_ms !== undefined) await index.mutationRelease(mutationId);
     else await index.mutationAbandon(mutationId);
     return graphFailure(e, sid, "attachment_upload");
   }
 
-  if (!(await index.reserveSid("attachment", sid, attachmentId)) && !(await index.adoptSid("attachment", sid, attachmentId))) {
+  if (outcome === "sid_in_use") {
     await index.mutationFinish(mutationId, { status: "rejected", error: "sid_in_use" }, []);
     return json({ error: "sid_in_use" }, 409);
   }
-  await index.putAttachment(task.graph_id, listId, { id: attachmentId, name, size: bytes.byteLength, content_type: contentType });
-  if (env.BLOBS) {
+  if (outcome === "attached" && env.BLOBS) {
     await env.BLOBS.put(attachmentBlobKey(sid), bytes, { httpMetadata: { contentType } }).catch((e: unknown) =>
       log.warn("blob_put_failed", { attachment: sid, error: String(e) }),
     );
@@ -123,11 +139,28 @@ export async function uploadAttachment(req: Request, env: AppEnv, props: Partial
   return json({ status: "applied", sid, cursor: await index.syncCursor() });
 }
 
+// A repeat of an upload that already finished: its stored result, with the
+// status the first answer had.
+async function repeated(result: unknown, sid: string, index: IndexBackend): Promise<Response> {
+  const r = (result ?? {}) as { status?: string; error?: string };
+  if (r.status === "rejected" && r.error) return json({ error: r.error }, 409);
+  return json({ status: "duplicate", sid, cursor: await index.syncCursor() });
+}
+
 class Ambiguous extends Error {}
 
-// A retry after a failure that may have reached Graph: an attachment of this
-// name that no other create has claimed, with the same bytes when there is
-// more than one. null: none, so attach.
+// Graph's clock against this server's, for an attachment's lastModifiedDateTime.
+// Generous: too small and a retry misses its own upload and attaches twice;
+// too large only admits identical bytes under the same name, which are still
+// byte-compared and must be unknown to the mirror before the first attempt.
+const CLOCK_SKEW_MS = 10 * 60_000;
+
+// A retry after a failure that may have reached Graph: the attachment the
+// earlier attempt made, if Graph stored it. A candidate has this name and
+// these exact bytes, no other create's sid, and is no older than the earlier
+// attempt: the mirror hadn't seen it before that attempt began, and Graph
+// doesn't date it before then. A file already on the task is never adopted,
+// even an identical one. null: none, so attach.
 async function findEarlierUpload(
   graph: GraphClient,
   index: IndexBackend,
@@ -135,15 +168,21 @@ async function findEarlierUpload(
   taskId: string,
   name: string,
   bytes: Uint8Array<ArrayBuffer>,
+  priorAtMs: number,
 ): Promise<string | null | "ambiguous"> {
   const named = (await listExistingFileAttachments(graph, listId, taskId)).filter((a) => a.name === name);
   if (named.length === 0) return null;
   const known = await index.createCandidates("attachment", named.map((a) => a.id));
-  const free = named.filter((a) => !known[a.id]?.app_owned);
-  if (free.length <= 1) return free[0]?.id ?? null;
+  const fresh = named.filter((a) => {
+    const k = known[a.id];
+    if (k && (k.app_owned || k.first_seen_ms < priorAtMs)) return false;
+    const modified = a.modified ? Date.parse(a.modified) : NaN;
+    return Number.isNaN(modified) || modified >= priorAtMs - CLOCK_SKEW_MS;
+  });
+  if (fresh.length === 0) return null;
   const want = await sha256Hex(bytes);
   const same: string[] = [];
-  for (const a of free) {
+  for (const a of fresh) {
     const b = await getAttachmentBytes(graph, listId, taskId, a.id);
     if (b && (await sha256Hex(b)) === want) same.push(a.id);
   }
@@ -184,8 +223,10 @@ export async function uploadThemeImage(req: Request, env: AppEnv): Promise<Respo
   const rawBrightness = q.get("brightness");
   let brightness: number | null = null;
   if (rawBrightness !== null) {
-    brightness = /^(0(\.\d{1,6})?|1(\.0{1,6})?)$/.test(rawBrightness) ? Number(rawBrightness) : NaN;
-    if (Number.isNaN(brightness)) return json({ error: "bad_brightness" }, 400);
+    // Any plain decimal, in exponent form too: Swift writes a Double with
+    // all its digits (0.4235294117647059), and a small one as 1e-05.
+    brightness = /^(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(rawBrightness) ? Number(rawBrightness) : NaN;
+    if (!(brightness >= 0 && brightness <= 1)) return json({ error: "bad_brightness" }, 400);
   }
   const type = (req.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
   if (!THEME_IMAGE_TYPES.has(type)) return json({ error: "unsupported_type" }, 415);
