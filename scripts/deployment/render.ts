@@ -17,6 +17,7 @@ export function renderConfig(example: WranglerConfig, dep: DeploymentFile, opts:
   const refuse = (field: string, reason: string): never => {
     throw new DeploymentRefusal(opts.file, field, reason);
   };
+  if (typeof example.main !== "string") refuse("main", "wrangler.example.jsonc must set main to a string");
   const out = structuredClone(example);
 
   out.name = dep.worker_name;
@@ -30,8 +31,12 @@ export function renderConfig(example: WranglerConfig, dep: DeploymentFile, opts:
     out.$schema = relative(opts.renderDir, join(opts.repoRoot, example.$schema));
   }
 
+  // The deployment file is the only source of routes; one the example carries
+  // would attach this Worker to somebody else's hostname.
   if (dep.custom_domains.length > 0) {
     out.routes = dep.custom_domains.map((pattern) => ({ pattern, custom_domain: true }));
+  } else {
+    delete out.routes;
   }
 
   const kv = (out.kv_namespaces ?? []) as Binding[];
@@ -53,7 +58,7 @@ export function renderConfig(example: WranglerConfig, dep: DeploymentFile, opts:
   const keptR2: Binding[] = [];
   for (const b of r2) {
     const name = String(b.binding);
-    if (!(name in dep.r2)) refuse(`r2.${name}`, "required: a bucket name, or null to leave this binding out");
+    if (!Object.hasOwn(dep.r2, name)) refuse(`r2.${name}`, "required: a bucket name, or null to leave this binding out");
     const bucket = dep.r2[name];
     if (bucket === null) continue;
     keptR2.push({ ...b, bucket_name: bucket });
@@ -63,7 +68,7 @@ export function renderConfig(example: WranglerConfig, dep: DeploymentFile, opts:
 
   const vars = (out.vars ?? {}) as Record<string, unknown>;
   for (const [key, value] of Object.entries(dep.vars)) {
-    if (!(key in vars)) refuse(`vars.${key}`, "the example declares no var with this name");
+    if (!Object.hasOwn(vars, key)) refuse(`vars.${key}`, "the example declares no var with this name");
     vars[key] = value;
   }
   vars.SERVICE_BASE_URL = dep.base_url;

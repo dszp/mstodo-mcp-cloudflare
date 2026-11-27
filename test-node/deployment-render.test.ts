@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { readFileSync, writeFileSync, mkdtempSync, existsSync } from "node:fs";
+import { afterEach, describe, it, expect } from "vitest";
+import { readFileSync, writeFileSync, mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -55,6 +55,24 @@ describe("renderConfig", () => {
     expect("routes" in render(fixture({ custom_domains: [] }))).toBe(false);
   });
 
+  it("deletes routes the example carries when the deployment has no custom domains", () => {
+    const ex = { ...example(), routes: [{ pattern: "example-other.test", custom_domain: true }] };
+    expect("routes" in renderConfig(ex, fixture({ custom_domains: [] }), opts)).toBe(false);
+  });
+
+  it("refuses an example without a string main", () => {
+    const ex = example();
+    delete ex.main;
+    const r = refusal(() => renderConfig(ex, fixture(), opts));
+    expect(r.field).toBe("main");
+    expect(r.file).toBe(opts.file);
+  });
+
+  it("refuses an r2 override named after an inherited property", () => {
+    const r = refusal(() => render(fixture({ r2: { BLOBS: "example-blobs", toString: "x" } })));
+    expect(r.field).toBe("r2.toString");
+  });
+
   it("maps each KV binding to the deployment's namespace id", () => {
     const kv = render().kv_namespaces as Array<{ binding: string; id: string }>;
     const dep = fixture();
@@ -105,6 +123,11 @@ describe("renderConfig", () => {
     expect(r.file).toBe(opts.file);
   });
 
+  it("refuses a var override named after an inherited property", () => {
+    const r = refusal(() => render(fixture({ vars: { toString: "x" } })));
+    expect(r.field).toBe("vars.toString");
+  });
+
   it("rewrites main and $schema so they resolve from the render directory", () => {
     const out = render();
     expect(resolve(opts.renderDir, out.main as string)).toBe(join(repoRoot, "src/hosts/cloudflare/worker.ts"));
@@ -136,8 +159,18 @@ describe("findPlaceholders", () => {
 });
 
 describe("loadAndRender", () => {
-  it("writes rendered.json under the repo's render directory and returns the config", () => {
+  const scratch: string[] = [];
+  const scratchRoot = (): string => {
     const root = mkdtempSync(join(tmpdir(), "potem-render-"));
+    scratch.push(root);
+    return root;
+  };
+  afterEach(() => {
+    for (const d of scratch.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it("writes rendered.json under the repo's render directory and returns the config", () => {
+    const root = scratchRoot();
     // A scratch repo root: only the example is needed.
     writeFileSync(join(root, "wrangler.example.jsonc"), exampleText);
     const out = loadAndRender(root, fixture({ name: "scratch" }));
@@ -147,7 +180,7 @@ describe("loadAndRender", () => {
   });
 
   it("refuses with the first placeholder path when one survives", () => {
-    const root = mkdtempSync(join(tmpdir(), "potem-render-"));
+    const root = scratchRoot();
     writeFileSync(join(root, "wrangler.example.jsonc"), exampleText.replace(/"vars": \{/, '"vars": { "NOTE": "<your-thing>",'));
     const r = refusal(() => loadAndRender(root, fixture({ name: "scratch" })));
     expect(r.field).toBe("vars.NOTE");
