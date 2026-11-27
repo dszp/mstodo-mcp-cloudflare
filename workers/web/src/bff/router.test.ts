@@ -33,8 +33,10 @@ beforeEach(() => {
 const csrf = { "x-potem": "1", origin: WEB };
 const req = (path: string, init: RequestInit = {}) => new Request(new URL(path, WEB), init);
 
-function expectSecurityHeaders(res: Response, label: string, noStore: boolean) {
-  expect(res.headers.get("content-security-policy"), label).toBe(CSP);
+const API_CSP = "sandbox; default-src 'none'";
+
+function expectSecurityHeaders(res: Response, label: string, noStore: boolean, csp = CSP) {
+  expect(res.headers.get("content-security-policy"), label).toBe(csp);
   expect(res.headers.get("x-content-type-options"), label).toBe("nosniff");
   expect(res.headers.get("referrer-policy"), label).toBe("no-referrer");
   expect(res.headers.get("x-robots-tag"), label).toBe("noindex, nofollow");
@@ -68,7 +70,9 @@ describe("route", () => {
       const res = await route(req(path, init), cfg);
       const label = `${init.method ?? "GET"} ${path}`;
       expect(res?.status, label).toBe(status);
-      expectSecurityHeaders(res!, label, true);
+      const api = new URL(path, WEB).pathname.startsWith("/bff/api/");
+      expectSecurityHeaders(res!, label, true, api ? API_CSP : CSP);
+      expect(res!.headers.get("cross-origin-resource-policy"), label).toBe(api ? "same-origin" : null);
     }
     expect(server.apiRequests).toHaveLength(0);
   });
@@ -100,6 +104,15 @@ describe("route", () => {
 });
 
 describe("withSecurityHeaders", () => {
+  it("gives every /bff/api response the sandbox CSP and CORP, replacing any it had", () => {
+    for (const status of [200, 401, 404, 410, 502]) {
+      const upstream = new Response("{}", { status, headers: { "content-security-policy": "default-src *" } });
+      const res = withSecurityHeaders(upstream, cfg, "/bff/api/attachments/A_1");
+      expectSecurityHeaders(res, String(status), true, API_CSP);
+      expect(res.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    }
+  });
+
   it("adds every header to an asset response, without no-store, and keeps its own headers", async () => {
     const asset = new Response("<html></html>", { status: 200, headers: { "content-type": "text/html", etag: '"a"' } });
     const res = withSecurityHeaders(asset, cfg, "/index.html");

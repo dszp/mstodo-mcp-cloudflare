@@ -23,14 +23,24 @@ const csp = (serverOrigin: string) =>
     `form-action 'self' ${serverOrigin}`,
   ].join("; ");
 
+const API_CSP = "sandbox; default-src 'none'";
+
 /**
  * A copy of `res` with the security headers set, plus `Cache-Control: no-store`
- * on /auth/* and /bff/*. Copied because responses from fetch() and the ASSETS
+ * on /auth/* and /bff/*. /bff/api/* gets a sandbox CSP instead of the page's,
+ * and Cross-Origin-Resource-Policy: same-origin. Copied because responses from fetch() and the ASSETS
  * binding have immutable headers.
  */
 export function withSecurityHeaders(res: Response, cfg: BffConfig, pathname: string): Response {
   const headers = new Headers(res.headers);
-  headers.set("content-security-policy", csp(cfg.serverOrigin));
+  if (pathname.startsWith("/bff/api/")) {
+    // API responses are data, never a page: a proxied attachment opened
+    // directly runs nothing, and no other origin may embed them.
+    headers.set("content-security-policy", API_CSP);
+    headers.set("cross-origin-resource-policy", "same-origin");
+  } else {
+    headers.set("content-security-policy", csp(cfg.serverOrigin));
+  }
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-robots-tag", "noindex, nofollow");

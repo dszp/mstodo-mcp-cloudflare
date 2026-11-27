@@ -9,7 +9,10 @@
 // timer's last_seen is touched only by GET /bff/session, at most once a
 // minute, and the page calls it on user activity. Likewise the proxy never
 // refreshes: near expiry it answers 401 session_refresh_needed, and the page
-// sends one POST /bff/session/refresh for all of them.
+// sends one POST /bff/session/refresh for all of them. That refresh rotates
+// only a session that is due: two tabs refreshing at once would otherwise
+// rotate twice from the same token, and if the first response's cookie landed
+// last it would hold a token that is neither current nor previous.
 //
 // "oauth-provider.js" below is node_modules/@cloudflare/workers-oauth-provider/
 // dist/oauth-provider.js (1.2.3).
@@ -46,7 +49,13 @@ export function jsonResponse(body: unknown, status: number, cookies: string[] = 
   return new Response(JSON.stringify(body), { status, headers });
 }
 
-const signedOut = () => jsonResponse({ error: "signed_out" }, 401, [clearCookie(SESSION_COOKIE)]);
+/**
+ * 401 signed_out, clearing the session cookie only when the request sent one.
+ * A clear can still delete a newer session, when a stale request lands after
+ * a fresh sign-in in another tab, so it is never sent unprompted.
+ */
+const signedOut = (req: Request) =>
+  jsonResponse({ error: "signed_out" }, 401, readCookie(req, SESSION_COOKIE) === null ? [] : [clearCookie(SESSION_COOKIE)]);
 const refreshNeeded = () => jsonResponse({ error: "session_refresh_needed" }, 401);
 const unavailable = () => jsonResponse({ error: "upstream_unavailable" }, 502);
 
@@ -137,9 +146,12 @@ export async function handleRefresh(req: Request, cfg: BffConfig): Promise<Respo
   if (!csrfOk(req, cfg)) return new Response(null, { status: 403 });
   const s = await sealer(cfg.secret);
   const session = await readSession(req, s);
-  if (!session || sessionState(session, cfg.now(), limits(cfg)) === "expired") return signedOut();
+  const state = session ? sessionState(session, cfg.now(), limits(cfg)) : "expired";
+  if (!session || state === "expired") return signedOut(req);
+  // Not due yet, most likely another tab's refresh already landed: nothing to do.
+  if (state === "valid") return new Response(null, { status: 204 });
   const device = await readDevice(req, s, cfg);
-  if (!device) return signedOut();
+  if (!device) return signedOut(req);
 
   let result = await refreshGrant(cfg, device, session.refresh_token);
   if (result.kind === "invalid_grant") {
@@ -151,7 +163,7 @@ export async function handleRefresh(req: Request, cfg: BffConfig): Promise<Respo
     result = await refreshGrant(cfg, device, session.refresh_token);
   }
   if (result.kind === "unavailable") return unavailable();
-  if (result.kind !== "ok") return signedOut();
+  if (result.kind !== "ok") return signedOut(req);
 
   // The refresh response carries no cf_access_token (the OAuth front adds one
   // only at code redemption: workers/server/src/hosts/shared/oauth.ts, lines
@@ -178,9 +190,7 @@ export async function handleApi(req: Request, cfg: BffConfig): Promise<Response>
   const s = await sealer(cfg.secret);
   const session = await readSession(req, s);
   const state = session ? sessionState(session, cfg.now(), limits(cfg)) : "expired";
-  // Clearing an expired session can't undo a refresh: a session past its
-  // limits stays past them whatever its tokens.
-  if (!session || state === "expired") return signedOut();
+  if (!session || state === "expired") return signedOut(req);
   if (state === "refresh") return refreshNeeded();
 
   const headers = new Headers({ authorization: `Bearer ${session.access_token}` });
@@ -206,5 +216,31 @@ export async function handleApi(req: Request, cfg: BffConfig): Promise<Response>
     const value = res.headers.get(name);
     if (value !== null) out.set(name, value);
   }
+  const bytes = target.startsWith("/api/v1/attachments/") || target.startsWith("/api/v1/theme-images/");
+  if (bytes && !res.ok) keepType(out, ["application/json"]); // the server's contract errors
+  else if (target.startsWith("/api/v1/attachments/")) asDownload(out, ATTACHMENT_TYPES);
+  else if (target.startsWith("/api/v1/theme-images/")) keepType(out, RASTER_TYPES);
   return new Response(res.body, { status: res.status, headers: out });
+}
+
+// Attachment and theme-image bytes are anyone's content, served from the app's
+// origin, where script-src 'self' applies. Kept as script, HTML or SVG they'd
+// be a same-origin script source or an inline page, so only inert types keep
+// their Content-Type, and attachments always download. (headers.ts also gives
+// every /bff/api response a sandbox CSP.)
+const RASTER_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"];
+const ATTACHMENT_TYPES = [...RASTER_TYPES, "application/pdf"];
+
+function keepType(headers: Headers, allowed: string[]): void {
+  const media = headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "";
+  if (!allowed.includes(media)) headers.set("content-type", "application/octet-stream");
+}
+
+function asDownload(headers: Headers, allowed: string[]): void {
+  keepType(headers, allowed);
+  // Keep the parameters (the filename) and replace the disposition type.
+  const upstream = headers.get("content-disposition");
+  const semi = upstream?.indexOf(";") ?? -1;
+  const params = upstream && semi >= 0 ? upstream.slice(semi + 1).trim() : "";
+  headers.set("content-disposition", /filename/i.test(params) ? `attachment; ${params}` : "attachment");
 }

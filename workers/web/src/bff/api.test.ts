@@ -167,7 +167,24 @@ async function reseal(jar: Jar, fields: Partial<Session>): Promise<string> {
   return (await sealer(SECRET)).seal(SESSION_COOKIE, { ...session, ...fields });
 }
 
+/** Signed in, with the access token inside the refresh window. */
+async function dueSignedIn(): Promise<Jar> {
+  const jar = await signedIn();
+  now += 3600 - 30;
+  return jar;
+}
+
 describe("POST /bff/session/refresh", () => {
+  it("is a no-op on a session that isn't due: no token call, no cookie", async () => {
+    const jar = await signedIn();
+    const before = server.tokenRequests.length;
+    now += 60;
+    const res = await jar.refresh();
+    expect(res.status).toBe(204);
+    expect(res.headers.getSetCookie()).toEqual([]);
+    expect(server.tokenRequests.length).toBe(before);
+  });
+
   it("refuses a request without X-Potem and the web Origin", async () => {
     const jar = await signedIn();
     const before = server.tokenRequests.length;
@@ -204,7 +221,7 @@ describe("POST /bff/session/refresh", () => {
 
   it("keeps cf_access_token and cf_access_exp, which the refresh response doesn't carry", async () => {
     server.access = "forbidden";
-    const jar = await signedIn();
+    const jar = await dueSignedIn();
     expect((await jar.refresh()).status).toBe(204);
     const fresh = (await jar.unseal<Session>(SESSION_COOKIE))!;
     expect(fresh.cf_access_token).toBe(CF_ACCESS_TOKEN);
@@ -212,7 +229,7 @@ describe("POST /bff/session/refresh", () => {
   });
 
   it("keeps the old refresh token when the response doesn't rotate it", async () => {
-    const jar = await signedIn();
+    const jar = await dueSignedIn();
     const old = (await jar.unseal<Session>(SESSION_COOKIE))!;
     const plain = cfg.upstream;
     cfg.upstream = async (path, init) => {
@@ -226,7 +243,7 @@ describe("POST /bff/session/refresh", () => {
   });
 
   it("retries once after 1 s on invalid_grant and succeeds when the retry does", async () => {
-    const jar = await signedIn();
+    const jar = await dueSignedIn();
     const before = server.tokenRequests.length;
     server.refreshRefusals = 1;
     const res = await jar.refresh();
@@ -237,7 +254,7 @@ describe("POST /bff/session/refresh", () => {
   });
 
   it("signs out after invalid_grant twice: clears the cookie and answers signed_out", async () => {
-    const jar = await signedIn();
+    const jar = await dueSignedIn();
     const before = server.tokenRequests.length;
     server.refreshRefusals = 2;
     const res = await jar.refresh();
@@ -252,7 +269,7 @@ describe("POST /bff/session/refresh", () => {
   });
 
   it("signs out without calling the server when the session has expired", async () => {
-    const jar = await signedIn();
+    const jar = await dueSignedIn();
     const before = server.tokenRequests.length;
     now += 60 * 60;
     const res = await jar.refresh();
@@ -263,7 +280,7 @@ describe("POST /bff/session/refresh", () => {
   });
 
   it("signs out without calling the server when there is no device", async () => {
-    const jar = await signedIn();
+    const jar = await dueSignedIn();
     jar.values.delete(DEVICE_COOKIE);
     const before = server.tokenRequests.length;
     const res = await jar.refresh();
@@ -273,7 +290,7 @@ describe("POST /bff/session/refresh", () => {
   });
 
   it("signs out without a retry when the client registration is gone", async () => {
-    const jar = await signedIn();
+    const jar = await dueSignedIn();
     server.deleteClient(server.grants[0].client_id);
     const before = server.tokenRequests.length;
     const res = await jar.refresh();
@@ -284,7 +301,7 @@ describe("POST /bff/session/refresh", () => {
   });
 
   it("answers 502 upstream_unavailable and leaves the cookie alone when the server fails", async () => {
-    const jar = await signedIn();
+    const jar = await dueSignedIn();
     server.tokenFailure = 503;
     const res = await jar.refresh();
     expect(res.status).toBe(502);
@@ -294,7 +311,7 @@ describe("POST /bff/session/refresh", () => {
   });
 
   it("answers 502 upstream_unavailable when the server can't be reached", async () => {
-    const jar = await signedIn();
+    const jar = await dueSignedIn();
     cfg.upstream = async () => {
       throw new TypeError("network down");
     };
@@ -435,11 +452,75 @@ describe("GET /bff/api/*", () => {
     expect(await res.json()).toEqual({ error: "signed_out" });
   });
 
-  it("answers signed_out without a session", async () => {
+  it("answers signed_out without a session, and sets no cookie when none was sent", async () => {
     const res = await new Jar().api("sync/info");
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: "signed_out" });
+    expect(res.headers.getSetCookie()).toEqual([]);
+  });
+
+  it("clears an unreadable session cookie", async () => {
+    const jar = new Jar();
+    jar.values.set(SESSION_COOKIE, "garbage");
+    const res = await jar.api("sync/info");
+    expect(res.status).toBe(401);
+    expect(sessionCookies(res)).toHaveLength(1);
     expect(sessionCookies(res).every(isClear)).toBe(true);
+  });
+
+  const served = (contentType: string, disposition?: string) => () =>
+    new Response("bytes", {
+      headers: { "content-type": contentType, ...(disposition ? { "content-disposition": disposition } : {}) },
+    });
+
+  for (const type of ["text/html", "text/javascript; charset=utf-8", "image/svg+xml", "application/xml", "text/plain"]) {
+    it(`serves an attachment sent as ${type} as a download of application/octet-stream`, async () => {
+      const jar = await signedIn();
+      server.apiReply = served(type, "inline");
+      const res = await jar.api("attachments/A_1");
+      expect(res.headers.get("content-type")).toBe("application/octet-stream");
+      expect(res.headers.get("content-disposition")).toBe("attachment");
+    });
+  }
+
+  for (const type of ["IMAGE/PNG", "image/jpeg", "image/gif", "image/webp", "image/avif", "application/pdf; name=x"]) {
+    it(`keeps an attachment's ${type}, still as a download`, async () => {
+      const jar = await signedIn();
+      server.apiReply = served(type);
+      const res = await jar.api("attachments/A_1");
+      expect(res.headers.get("content-type")).toBe(type);
+      expect(res.headers.get("content-disposition")).toBe("attachment");
+    });
+  }
+
+  it("keeps the upstream filename on an attachment but forces attachment", async () => {
+    const jar = await signedIn();
+    server.apiReply = served("text/html", "inline; filename=\"x.html\"; filename*=UTF-8''x.html");
+    const res = await jar.api("attachments/A_1");
+    expect(res.headers.get("content-disposition")).toBe("attachment; filename=\"x.html\"; filename*=UTF-8''x.html");
+  });
+
+  it("keeps a JSON error from the attachment route readable, and nothing else", async () => {
+    const jar = await signedIn();
+    server.apiReply = () => new Response('{"error":"not_found"}', { status: 404, headers: { "content-type": "application/json" } });
+    let res = await jar.api("attachments/A_1");
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    server.apiReply = () => new Response("<script>", { status: 404, headers: { "content-type": "text/html" } });
+    res = await jar.api("theme-images/abc");
+    expect(res.headers.get("content-type")).toBe("application/octet-stream");
+  });
+
+  it("serves a theme image only as a raster image type", async () => {
+    const jar = await signedIn();
+    server.apiReply = served("text/html");
+    expect((await jar.api("theme-images/abc")).headers.get("content-type")).toBe("application/octet-stream");
+    server.apiReply = served("image/svg+xml");
+    expect((await jar.api("theme-images/abc")).headers.get("content-type")).toBe("application/octet-stream");
+    server.apiReply = served("application/pdf");
+    expect((await jar.api("theme-images/abc")).headers.get("content-type")).toBe("application/octet-stream");
+    server.apiReply = served("image/webp");
+    expect((await jar.api("theme-images/abc")).headers.get("content-type")).toBe("image/webp");
   });
 
   it("turns an upstream 401 into session_refresh_needed", async () => {
