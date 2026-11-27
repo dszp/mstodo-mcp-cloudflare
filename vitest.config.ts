@@ -60,6 +60,14 @@ export default defineConfig({
           },
         },
       },
+      {
+        test: {
+          name: "web",
+          include: ["workers/web/**/*.test.ts"],
+          environment: "node",
+        },
+        resolve: { alias: coreAlias },
+      },
     ],
   },
 });

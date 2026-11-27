@@ -41,6 +41,10 @@ jobs:
       - name: Typecheck (Node host)
         run: npx tsc -p tsconfig.node.json
 
+      # The web client has its own tsconfig (DOM lib, JSX, no Node/Workers types).
+      - name: Typecheck (web)
+        run: npx tsc --noEmit -p workers/web
+
       - name: Build (Node host)
         run: npm run build:node
 
