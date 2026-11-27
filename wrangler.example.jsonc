@@ -21,10 +21,19 @@
     { "binding": "TODO_CACHE", "id": "<your-todo-cache-namespace-id>" }
   ],
 
+  // Optional blob store (docs/SYNC-API.md section 4.9): keeps a copy of each
+  // attachment the app downloads or uploads, and holds the app's theme images.
+  // Without it, downloads stream from Graph and theme images are unavailable.
+  //   wrangler r2 bucket create mstodo-blobs   (any name; use it below)
+  // The binding name must stay BLOBS.
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "mstodo-blobs" }
+  ],
+
   "durable_objects": {
     "bindings": [
-      // Per-session MCP agent (legacy binding name TODO_INDEX).
-      { "name": "TODO_INDEX", "class_name": "MSToDoMCP" },
+      // Per-session MCP agent. Deletes itself after a day idle.
+      { "name": "MCP_SESSION", "class_name": "MSToDoSession" },
       // Singleton cross-list index DO (idFromName("owner")) — the single source
       // of truth for tasks/roster/delta state.
       { "name": "TODO_INDEX_DO", "class_name": "TodoIndex" }
@@ -32,7 +41,10 @@
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["MSToDoMCP"] },
-    { "tag": "v2", "new_sqlite_classes": ["TodoIndex"] }
+    { "tag": "v2", "new_sqlite_classes": ["TodoIndex"] },
+    // Deletes every session object the old class left behind (sessions now
+    // expire after a day idle; see src/core/mcp/session-expiry.ts).
+    { "tag": "v3", "deleted_classes": ["MSToDoMCP"], "new_sqlite_classes": ["MSToDoSession"] }
   ],
 
   // Heartbeat cron — Worker scheduled() re-arms the TodoIndex DO alarm if idle.

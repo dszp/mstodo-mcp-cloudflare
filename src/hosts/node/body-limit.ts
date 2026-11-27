@@ -1,4 +1,5 @@
 import { UPLOAD_BODY_MAX_BYTES } from "../../core/upload/handler";
+import { PER_FILE_MAX_BYTES } from "../../core/upload/graph-upload";
 
 // Request body caps for the Node host. On Cloudflare the platform bounds every
 // request body; a Node process has no such limit, and several routes buffer the
@@ -16,6 +17,8 @@ const DEFAULT_MAX_BYTES = 1 * MiB;
 export function bodyCapFor(pathname: string): number {
   if (pathname === "/mcp") return MCP_MAX_BYTES;
   if (pathname === "/upload") return UPLOAD_BODY_MAX_BYTES;
+  // An app's attachment upload is the file itself (docs/SYNC-API.md 5.6).
+  if (pathname === "/api/v1/attachments") return PER_FILE_MAX_BYTES;
   if (pathname === "/webhook") return WEBHOOK_MAX_BYTES;
   if (
     pathname === "/register" ||

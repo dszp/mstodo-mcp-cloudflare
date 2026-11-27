@@ -11,10 +11,13 @@ export const REDIRECT_URI = "http://localhost:9/cb";
 
 // Microsoft's token endpoint and Graph /me, scripted. `extra` answers any other
 // URL first (return undefined to fall through to the 404).
-export function stubMicrosoft(mail: string, extra?: (url: string) => Response | undefined) {
-  const fn = vi.fn(async (input: RequestInfo | URL) => {
+export function stubMicrosoft(
+  mail: string,
+  extra?: (url: string, init?: RequestInit) => Response | undefined | Promise<Response | undefined>,
+) {
+  const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : String(input);
-    const scripted = extra?.(url);
+    const scripted = await extra?.(url, init);
     if (scripted) return scripted;
     if (url.endsWith("/oauth2/v2.0/token")) {
       return new Response(
@@ -37,7 +40,9 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
   const jar = new Map<string, string>();
   async function send(path: string, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
-    if (jar.size) headers.set("cookie", [...jar].map(([k, v]) => `${k}=${v}`).join("; "));
+    // The jar's cookies go after any the caller sent.
+    const cookies = [headers.get("cookie"), ...[...jar].map(([k, v]) => `${k}=${v}`)].filter(Boolean);
+    if (cookies.length) headers.set("cookie", cookies.join("; "));
     const res = await fetchFn(new Request(`${origin}${path}`, { ...init, headers }));
     for (const c of res.headers.getSetCookie()) {
       const [pair, ...attrs] = c.split(";");
@@ -55,7 +60,8 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
   });
 
   // DCR → GET /authorize (consent) → POST approve → Microsoft callback.
-  async function authorizeThroughCallback() {
+  // `resource` is the RFC 8707 resource the client asks for; null omits it.
+  async function authorizeThroughCallback(resource: string | null = `${origin}/mcp`) {
     const reg = await send("/register", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -73,7 +79,7 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
       state: "client-state",
       code_challenge: challenge,
       code_challenge_method: "S256",
-      resource: `${origin}/mcp`,
+      ...(resource === null ? {} : { resource }),
     });
     const consent = await send(`/authorize?${q}`);
     expect(consent.status).toBe(200);
@@ -94,8 +100,8 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
   }
 
   // The whole flow, ending with the MCP client's tokens.
-  async function connect() {
-    const { callback, clientId, verifier } = await authorizeThroughCallback();
+  async function connect(resource?: string | null) {
+    const { callback, clientId, verifier } = await authorizeThroughCallback(resource);
     expect(callback.status).toBe(302);
     const code = new URL(callback.headers.get("location")!).searchParams.get("code")!;
     const tok = await send(
@@ -103,7 +109,7 @@ export function oauthClient(fetchFn: (req: Request) => Promise<Response>, origin
       form({ grant_type: "authorization_code", code, redirect_uri: REDIRECT_URI, client_id: clientId, code_verifier: verifier }),
     );
     expect(tok.status).toBe(200);
-    const t = (await tok.json()) as { access_token: string; refresh_token: string };
+    const t = (await tok.json()) as { access_token: string; refresh_token: string; resource?: string };
     return { ...t, clientId };
   }
 

@@ -298,7 +298,7 @@ covers user-touched tasks).
 > **Status: shipped in 0.12.0.** Checklist items have a user-controllable drag order, backed by
 > the Substrate-only subtask `OrderDateTime` — the same manual-order mechanism `reorder_task` uses
 > for tasks (Graph exposes no checklist order at all). `reorder_checklist_item` moves a step by
-> `top`/`bottom`/`before`/`after`/`index`/`set` (reusing the `src/core/mcp/reorder.ts` math) and returns
+> `top`/`bottom`/`before`/`after`/`index`/`set` (reusing the `src/core/ops/reorder.ts` math) and returns
 > `ordered_items`; `list_checklist_items` enriches order best-effort (adds `ordered` + per-item
 > `orderDateTime`); `get_task` gains opt-in `include_checklist_order`. Opt-in (`ENABLE_MY_DAY` + EXO).
 >
@@ -518,3 +518,113 @@ with per-user, KV-scoped tokens and per-user DO keying (the `OWNER_DO_NAME` seam
 in `src/core/index/sql.ts` is the deliberate extension point). Significant rework —
 identity wipe, token storage, and the owner gate all become per-user. Only worth
 doing if sharing a single running instance across people becomes a real need.
+
+## 12. Potem: repository layout, hostname and versioning
+
+The server is becoming the backend of Potem, a task app for macOS and iOS (decided
+2026-11-26). This repository moves into a `Potem/` parent folder as `potem-server`,
+next to the app's repository. It is a move, not a copy: the deployed Worker is named by
+the `name` in its wrangler config, not by the repository, so moving and renaming the
+repository leaves every deployment as it is. A copy would leave two codebases that can
+both deploy to production.
+
+**One server repository, one folder per Worker.** The web UI and the adapter Workers
+(section 13) share the server's core code and the sync API types. In separate
+repositories that code would have to be published as a package and its version kept in
+step across them; in one repository a contract change and its consumers land in one
+commit. Each Worker keeps its own wrangler config and deploys on its own. Split a
+Worker into its own repository only when it needs different visibility or its own
+release cycle. The layout follows the second Worker when it exists, not before:
+
+```
+potem-server/
+  packages/core/        today's src/core
+  workers/server/       today's Worker and Node host
+  workers/web/          web UI and its backend
+  workers/<adapter>/    section 13
+```
+
+The web UI lives here, not with the apps, because it is TypeScript and imports the sync
+API types directly. The app repository is named for its platform (`potem-apple`); an
+Android or Windows app would share no code with it, only `docs/SYNC-API.md`.
+
+**Hostname.** The sign-in pages show the hostname, so it moves to a Potem name. A second
+hostname can run beside the first; see "Changing the hostname" in CLAUDE.md for what a
+move involves.
+
+**Versioning.** One version and one CHANGELOG per deployable Worker, since each deploys
+on its own; tags carry the Worker's name (`server-v0.19.0`) once there is more than one.
+The sync API is versioned by its contract, not by a package: the Revisions list in
+`docs/SYNC-API.md` records each change, and clients read `capabilities` from
+`/api/v1/sync/info` instead of comparing versions. Cut one release of this repository
+as it stands before the move, so the last `mstodo-mcp` version is tagged and the sync
+API work is no longer all under Unreleased.
+
+## 13. Adapter Workers, including across tenants
+
+Sources other than the owner's own task store, such as Flagged Emails, Planner, or
+another Microsoft 365 tenant, run as separate Workers that feed the server. The target
+case: a Worker that signs in to the Servant Voice tenant and syncs that tenant's
+Flagged Emails into the server for the personal tenant.
+
+The design that case implies:
+
+- **An adapter is a client of the server, not part of it.** It holds its own upstream
+  credentials (its own Entra app and owner gate for its tenant) and calls the server's
+  API with its own grant. A service binding works only inside one Cloudflare account,
+  so the HTTP API is the interface; a binding can be an optimization later.
+- **An adapter owns what it creates.** Each item an adapter writes carries the
+  adapter's ID, and its grant is scoped to the lists it owns. The server refuses an
+  adapter's write outside them, so a compromised adapter can damage only its own
+  lists.
+- **One interface for every source.** A Flagged Emails adapter for another tenant is
+  the To Do sync (section 14) pointed at a different tenant and limited to one list.
+  Designing the To Do sync and the adapters as one interface covers both.
+
+Open questions: whether adapter writes go through `POST /api/v1/sync/mutations` or a
+separate ingest route, and how a change the owner makes in the app reaches the source
+(two-way, or read-only into the server).
+
+## 14. Microsoft To Do as an optional, removable backend
+
+Microsoft To Do is being retired. A new user should be able to deploy the server
+without configuring Microsoft at all, connect To Do only to migrate from it, and the
+To Do code should come out cleanly once To Do is gone.
+
+Today Microsoft is built in at three layers, which set the order of the work:
+
+1. **Sign-in.** The OAuth front's upstream identity is Microsoft: `/authorize` ends at
+   `/auth/microsoft/callback`, and the `OWNER_EMAIL` gate reads `/me`. A deployment
+   without Microsoft needs another owner identity first, such as a generic OIDC issuer
+   (generalizing `src/core/auth/access.ts`, which already verifies Cloudflare Access).
+2. **Source of truth.** The index is a mirror of Graph, and the write ops call Graph and
+   Substrate directly through `OpsContext`. The index has to become authoritative, with
+   writes applied locally first, which is the "local mode" in `docs/SYNC-API.md`.
+   `capabilities.source` (currently `"graph"`) is where a client learns which one it is
+   talking to.
+3. **Sync.** Delta sync, subscriptions, the Substrate client and the token refresh chain
+   then move behind the adapter interface of section 13, as the To Do adapter. Leaving
+   it unconfigured turns it off; removing it later deletes one folder and its
+   configuration.
+
+Deployment and setup change with it: the Microsoft secrets (`MS_*`) become the To Do
+adapter's configuration, not the server's, and `DEPLOYMENT.md` gains a setup path
+without them.
+
+## 15. One repository, several Cloudflare accounts
+
+Each account the app shows is its own deployment (`docs/SYNC-API.md` section 14), and
+the owner wants to deploy them to different Cloudflare accounts from this one
+repository. Today that works by hand: one gitignored config per deployment
+(`wrangler.jsonc`, `config-live/<name>/wrangler.jsonc`) and `CLOUDFLARE_ACCOUNT_ID`
+set at deploy time. The step to build is a named deployment: a gitignored file per
+deployment holding its account ID, Worker name, hostname, bindings and vars, and one
+command, such as `npm run deploy -- <name>`, that renders the wrangler config from the
+example and deploys it. A new binding is then added once, in the example, not by hand
+in every config (see CLAUDE.md, "Deployments"). Adapter Workers (section 13) use the
+same mechanism.
+
+The deploy command refuses to run without a named deployment, and refuses a name with
+no file or a file without an account ID. A bare `wrangler deploy` must not pick a
+default: with several accounts, a default is how one account's Worker gets deployed
+over another's. The root `wrangler.jsonc` goes away for the same reason.

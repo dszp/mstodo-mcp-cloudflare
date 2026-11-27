@@ -7,6 +7,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] – 2026-11-27
+
+### Added
+- **The Claude connector uses the attachment blob store.** `get_attachment` and download
+  links serve the R2 copy when there is one and keep a copy when there isn't; files
+  attached through upload links are stored at once.
+  `sync_status` reports `attachments`: file count, total bytes as Graph reports them,
+  and how many tasks' attachments the scan hasn't read yet.
+- **Blob store (R2) for the client app** (docs/SYNC-API.md sections 4.6, 4.8, 4.9, 5.2
+  and 5.6), on an optional `BLOBS` R2 binding:
+  - Attachment downloads keep a copy, so each file is fetched from Graph once.
+  - `POST /api/v1/attachments` uploads a file to a task through Graph (inline up to
+    3 MB, upload session above), idempotent on the app's sid; `attachment.delete`
+    removes one.
+  - Theme images: `POST`/`GET /api/v1/theme-images`, the `theme_image` feed kind and
+    `theme_image.delete`. A list's `image_id` and `image_style`, and smart-list themes in
+    the `app_settings` entity (`settings.update`), sync between the app's devices; To Do
+    never sees them.
+  - A daily sweep deletes copies of attachments that left the mirror and theme images
+    unused for 30 days.
+  - New capabilities: `attachment_cache`, `attachment_upload`, `theme_images`.
+  Index schema migration v13 adds `theme_images`, `list_images` and `app_settings`.
+  Self-hosters who want these features create a bucket and add the `r2_buckets` entry
+  from `wrangler.example.jsonc`.
+- **The sync API writes a list's sidebar appearance** (docs/SYNC-API.md sections 5.2 and
+  10.4). `list.update` takes `theme` (`{ color, background }`, To Do's preset names) and
+  `group_id` (a group's sid, or `null` to ungroup), and the new `list.reorder` op moves a
+  list among its siblings: the lists in its group, or the top-level lists and groups. Each
+  writes the folder through Substrate and stores what Substrate returns, so the feed has
+  the change at once. The `list_group.create`, `list_group.update`, `list_group.reorder` and
+  `list_group.delete` ops create, rename, move and delete sidebar groups; deleting a group
+  moves its lists out first and keeps them.
+- **`GET /api/v1/link-rules`** (docs/SYNC-API.md section 4.7): the owner's enabled link rules
+  whose URL template is `http` or `https`, without `external_id_template`, so the app can mark
+  matches in titles and notes before the server makes the link. `/sync/info` carries
+  `link_rules_rev`, a digest of that response, so the app refetches only when it changes.
+- **List groups, sidebar order and theme in the sync feed** (docs/SYNC-API.md section 10.4),
+  read-only from Substrate. Feed lists carry `group_id`, `sort_key` and `theme`; groups
+  arrive as a new `list_group` kind; `/sync/info` reports `capabilities.list_appearance`.
+  The server reads the sidebar (two Substrate GETs) on a calm cycle once per
+  `DELTA_SYNC_INTERVAL_MIN`, and when a new list appears. Needs `ENABLE_MY_DAY`; without
+  it the fields stay `null`. Migration v12 adds the columns and the `list_groups` table.
+- **Cloudflare Access for the sync app** (docs/SYNC-API.md section 8.1), off unless
+  `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are both set. When on, every `/api/v1` request,
+  including the anonymous `sync/info` probe and the WebSocket upgrade on both hosts, needs
+  an Access JWT that the server verifies itself: RS256 signature against the team's keys
+  (cached, refetched on an unknown key at most once a minute), audience, issuer, expiry,
+  and `email` equal to `OWNER_EMAIL`. One variable without the other answers `503`.
+  `/mcp`, the OAuth endpoints, `/webhook`, `/upload` and `/download` are unchanged.
+- `GET /app/signin` (with Access on): verifies Access, then continues into the usual
+  `/authorize` flow (consent, Microsoft sign-in, owner gate). The `authorization_code`
+  token response then carries `cf_access_token` and `cf_access_expires_at`, so the app can
+  send `cf-access-token`; the token never travels in a redirect URL. Only redirect URIs
+  listed in `ACCESS_HANDOFF_REDIRECT_URIS` receive it. When Access's keys can't be fetched,
+  `/api/v1` answers `503 access_unavailable` with `Retry-After`, not `403`.
+- `/.well-known/apple-app-site-association` (`webcredentials`) when `APPLE_TEAM_ID` and
+  `APPLE_BUNDLE_IDS` are set, for the app's `https` sign-in callback.
+- Sync API: lists in the change feed carry `sync` (`todo` | `reference`); `list.update` accepts
+  `sync`; `GET /api/v1/lists/excluded` lists the excluded lists by sid. Task, My Day, step and
+  link mutations that touch an excluded list are rejected with `list_excluded`.
+- Sync API: `GET /api/v1/attachments/{sid}` streams an attachment's bytes from Graph to the
+  app, with an `/api/v1` token (docs/SYNC-API.md section 4.6). `GET /api/v1/sync/info`
+  reports `capabilities.attachment_download`.
+
+### Changed
+- **MCP session objects delete themselves after a day without a request.** Each Claude
+  conversation opens its own session, and Claude never ends one, so every conversation
+  left a Durable Object behind for good (6,561 objects, 821 MB on one server). The agent
+  class is renamed `MSToDoMCP` → `MSToDoSession`, and **migration v3 deletes every object
+  of the old class**: open Claude conversations get a 404 on their next tool call and start
+  a new session. Its binding is renamed `TODO_INDEX` → `MCP_SESSION`, because Cloudflare won't delete a
+  class while a binding of the same name remains. Self-hosters need the new binding and
+  the v3 migration in their own wrangler config (see `wrangler.example.jsonc`).
+- **The push socket coalesces `changed` messages** (docs/SYNC-API.md section 7.1). The
+  first change after a quiet spell is sent at once; changes in the next 3 seconds are sent
+  as one message with the newest cursor. A `task.create` through the sync API now sends
+  two messages instead of three, and a baseline sends one every 3 seconds instead of one
+  per page.
+- **A list's class is now its sync setting** (docs/SYNC-API.md section 1.2). `todo` and
+  unclassified lists sync as before, with a Graph subscription. `reference` lists sync after
+  every todo list in each cycle, get no subscription, and have steps, links and attachments
+  fetched for open tasks only. `excluded` lists are no longer mirrored (they stay in
+  `list_lists` and readable live). A pin in `overrides` decides a list ahead of the legacy
+  `no_sync`/`archive` arrays, the flaggedEmails default and name patterns. **Deploying this
+  stops mirroring any list currently classified `excluded`**, including a Flagged Emails list
+  pinned `excluded` even when `sync_flagged_emails` is on; pin it `reference` first to keep it.
+- `list_lists` reports `type` on every list, not only when patterns or pins exist.
+- **`set_list_config` merges `overrides` per key** instead of replacing the map: the lists it
+  names change, `null` removes a pin, and other pins stay. A caller holding an old copy of the
+  map can no longer revert pins set since.
+- A list made with `create_list` or the sync API's `list.create` is pinned `todo`, so a name
+  matching an `excluded` pattern can't drop it from the mirror.
+- Reads filtered to an excluded list (`query_tasks`, `search_tasks`, `search_checklist_items`,
+  `get_pending_across_lists`, `get_recently_completed`) return `not_mirrored` with a note
+  instead of an unexplained empty result. `list_tasks` on an excluded list pages through
+  `next_cursor` instead of returning one page. `list_my_day_tasks` names every excluded list,
+  since My Day tasks in them (flagged emails, for one) are missing from it.
+
+### Fixed
+- **Completion dates follow the owner's day.** Completing a task through the sync API or
+  `update_task` without a date stamps today in `TIMEZONE` instead of Graph's UTC day,
+  which put evening completions in New York on tomorrow. An already-completed task keeps
+  its date; recurring tasks are unchanged. When Graph ignores the completion date (a
+  re-check moments after an uncheck), the server resets the task and sends it once more.
+- `create_upload_link` returns `task_not_found` for a task that isn't in the named list,
+  instead of minting a link whose upload fails after the person has picked files. A task the
+  index already holds in that list is not checked again; any other task costs one Graph read.
+- **Moving a step relative to one that was never dragged works.** Steps get no order value
+  until someone drags one, so `reorder_checklist_item` and the sync API's `step.reorder`
+  failed with `reference_has_no_order` on most tasks (the app's "Add Step Below", and drag to
+  reorder), and `bottom` landed above the unordered steps. The server now first gives the
+  task's other unordered steps order values in their shown order (oldest first, below any
+  ordered ones), one Substrate write each, then makes the move.
+- Manual-order sorts compare `OrderDateTime` as instants: Substrate sends some values without
+  milliseconds, and string order put `…45Z` above `…45.623Z`.
+- The `/download` link's `Content-Disposition` now percent-encodes `'`, `(`, `)`, `*` and `!`
+  in `filename*`, as RFC 5987 requires; a `'` in a filename could end the charset prefix early.
+- A `/download` filename longer than 255 characters that ended in an emoji, or that held a lone
+  surrogate, made the response fail; the name is now cut by character and made well-formed.
+- **Uploads over the inline limit no longer report a failure for a file that attached.**
+  Graph can answer the last chunk of an upload session with a 500 after it has stored the
+  attachment (seen with a 6 MB PDF). The upload page then said the file failed, and a retry
+  said "duplicate". The server now looks for a new attachment of that name before reporting
+  an error.
+- **Uploads at or under the inline limit (3 MiB by default) attach again.** Graph has been
+  answering every inline attachment POST with 500 `generalException` and storing nothing, so
+  every small file on the upload page, and every small attachment `move_task` copies, failed
+  with `graph_500`. After an inline 5xx the server now checks whether the file landed and, if
+  not, sends it through an upload session instead.
+- `set_list_config` no longer clears the `archive` list, and `set_list_alias` no longer clears
+  every pin and the `archive` list.
+- A list excluded while the sync cycle was fetching it is no longer filled back in and
+  re-baselined, and the cycle no longer flips a just-changed setting back from a stale KV read
+  of `config:lists`.
+- `list_lists` auto-pinning no longer replaces a newer pin (such as `create_list`'s `todo`)
+  with a pattern's class from a stale read of `config:lists`.
+- A list excluded and switched back on while its pages were being fetched no longer ends up
+  empty but marked synced; the next cycle baselines it.
+- A task created or moved into an excluded list by an MCP tool no longer appears in the mirror
+  and the feed.
+- The sync feed's `backfill.remaining` reaches zero: it no longer counts a reference list's
+  completed tasks, which the sub-resource scan skips.
+- A queued app edit of a list's `sync` older than a change made through `set_list_config` no
+  longer overrides it.
+
+### Security
+- **Dependencies updated past open advisories.** The Node host bundles `hono` 4.13.21 and
+  `@hono/node-server` 2.1.11 (path-separator and mount bypasses, an `ECONNRESET` crash during
+  a WebSocket upgrade), and the MCP SDK's `express` stack now resolves `body-parser` 2.4.0
+  and `qs` 6.17.1 (both denial of service). The Worker bundle's only affected package was
+  `fast-uri` 3.1.9, pulled in by `ajv` for tool input schemas. `vitest` 4.1.12 fixes
+  `@vitest/mocker` (test runs only). `undici` and `sharp` were already patched through
+  `wrangler`'s `miniflare`.
+
 ## [0.17.1] – 2026-10-17
 
 ### Security

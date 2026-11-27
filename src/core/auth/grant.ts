@@ -16,8 +16,9 @@ export type GrantRefusal = "grant_revoked" | "grant_expired" | "reauth_required"
 // Callers must pass the props of the token on THIS request. McpAgent's
 // this.props is the props of the token that first started the session and is
 // never refreshed afterwards, so it can't be used here — each host's /mcp
-// wrapper (the apiHandler in src/hosts/shared/oauth.ts)
-// runs this check with that request's props instead.
+// resource server (oauthFront in src/hosts/shared/oauth.ts, and
+// handleApiRequest in core/api/router.ts for /api/v1) runs this check with
+// that request's props instead.
 export async function grantRefusal(env: AppEnv, props: Partial<Props> | undefined): Promise<GrantRefusal | null> {
   const { epoch, reauth } = await ownerIndex(env).authState();
   if (!props?.epoch || props.epoch !== epoch) return "grant_revoked";
@@ -29,16 +30,27 @@ export async function grantRefusal(env: AppEnv, props: Partial<Props> | undefine
 }
 
 // The HTTP-layer gate for /mcp: null to let the request through, or the 401
-// invalid_token response for a refused grant (see the apiHandler in oauth.ts).
-export async function refuseMcpRequest(env: AppEnv, props: Partial<Props> | undefined): Promise<Response | null> {
+// invalid_token response for a refused grant (see oauthFront in
+// src/hosts/shared/oauth.ts).
+export function refuseMcpRequest(env: AppEnv, props: Partial<Props> | undefined): Promise<Response | null> {
+  return refuseRequest(env, props, "mcp_request_refused");
+}
+
+// The same gate for the client sync API (/api/v1, core/api/router.ts).
+export function refuseApiRequest(env: AppEnv, props: Partial<Props> | undefined): Promise<Response | null> {
+  return refuseRequest(env, props, "api_request_refused");
+}
+
+async function refuseRequest(env: AppEnv, props: Partial<Props> | undefined, event: string): Promise<Response | null> {
   const refusal = await grantRefusal(env, props);
   if (!refusal) return null;
-  log.warn("mcp_request_refused", { reason: refusal });
+  log.warn(event, { reason: refusal });
   const description = refusalDescription(refusal);
   return new Response(JSON.stringify({ error: "invalid_token", error_description: description }), {
     status: 401,
     headers: {
       "content-type": "application/json",
+      "cache-control": "no-store",
       "www-authenticate": `Bearer error="invalid_token", error_description="${description}"`,
     },
   });

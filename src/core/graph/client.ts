@@ -55,6 +55,17 @@ const MAX_429_RETRIES = 1;
 // honor; longer Retry-After values get clamped down.
 const RETRY_AFTER_CAP_MS = 30_000;
 
+export const IMMUTABLE_ID_PREFER = 'IdType="ImmutableId"';
+
+// A default REST ID from Exchange starts with "AAMk"; an immutable entry ID
+// with "AAkAL". Used only to skip a translate call for an ID that is already
+// immutable; a wrong guess costs one extra call, never a wrong ID.
+export const looksImmutable = (id: string) => !id.startsWith("AAMk");
+
+const TranslateResultSchema = z.object({
+  value: z.array(z.object({ sourceId: z.string().optional(), targetId: z.string().optional() }).passthrough()),
+}).passthrough();
+
 export class GraphClient {
   constructor(private readonly tokens: TokenProvider) {}
 
@@ -133,6 +144,23 @@ export class GraphClient {
     return { status: 200, etag: first.etag, items };
   }
 
+  // Translate default REST task IDs (what Substrate returns, and what older
+  // MCP conversations hold) to immutable ones. Unknown or untranslatable IDs
+  // are left out of the map. Graph caps a call at 1,000 IDs.
+  async translateToImmutable(ids: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const unique = [...new Set(ids.filter(Boolean))];
+    for (let i = 0; i < unique.length; i += 1000) {
+      const res = await this.postJson(
+        "https://graph.microsoft.com/v1.0/me/translateExchangeIds",
+        { inputIds: unique.slice(i, i + 1000), sourceIdType: "restId", targetIdType: "restImmutableEntryId" },
+        TranslateResultSchema,
+      );
+      for (const r of res.value) if (r.sourceId && r.targetId) out.set(r.sourceId, r.targetId);
+    }
+    return out;
+  }
+
   // POST a JSON body and validate the 201 Created response with a Zod schema.
   async postJson<T>(url: string, body: unknown, schema: z.ZodType<T>): Promise<T> {
     const res = await this.fetchWithRetry(url, {}, "POST", JSON.stringify(body));
@@ -153,6 +181,18 @@ export class GraphClient {
     const res = await this.fetchWithRetry(url, extraHeaders, "PATCH", JSON.stringify(body));
     const json = (await res.json()) as unknown;
     return schema.parse(json);
+  }
+
+  // GET a non-JSON resource (a `$value` media stream) and hand back the
+  // response unread, so the caller can stream its body. Same host pin, token,
+  // 401-refresh and 429 handling as every other call; a non-2xx throws
+  // GraphError. It asks for the bytes uncompressed: fetch() decompresses a
+  // compressed body, which leaves Graph's Content-Length describing bytes the
+  // caller never sees.
+  async getStream(url: string): Promise<Response> {
+    const res = await this.fetchWithRetry(url, { "accept-encoding": "identity" });
+    if (res.status === 304) throw new GraphError(304, "unexpected_304_for_unconditional_get");
+    return res;
   }
 
   // DELETE a resource. Expects 204 No Content; throws GraphError on any other status.
@@ -180,6 +220,11 @@ export class GraphClient {
     let token = await this.tokens.getAccessToken();
     while (true) {
       const headers: Record<string, string> = {
+        // Every task ID this server reads or receives is Graph's immutable
+        // form: it survives a move between lists, where the default REST ID
+        // changes. List and checklist-item IDs are unaffected by the header.
+        // See docs/SYNC-API.md section 18.2.
+        prefer: IMMUTABLE_ID_PREFER,
         ...extraHeaders,
         authorization: `Bearer ${token}`,
       };

@@ -25,6 +25,7 @@ see [README.md](./README.md).
     - [7. Connect from Claude.ai or your own AI MCP consumer](#7-connect-from-claudeai-or-your-own-ai-mcp-consumer)
     - [8. Verify](#8-verify)
   - [Optional: custom domain](#optional-custom-domain)
+  - [Optional: Cloudflare Access for the sync app](#optional-cloudflare-access-for-the-sync-app)
   - [Keeping sync cost down](#keeping-sync-cost-down)
   - [My Day support (optional)](#my-day-support-optional)
     - [What enabling My Day unlocks (and what it costs)](#what-enabling-my-day-unlocks-and-what-it-costs)
@@ -296,6 +297,30 @@ Map a custom hostname to the Worker (Cloudflare dashboard → your Worker → Se
 Domains & Routes, or `routes`/`custom_domain` in `wrangler.jsonc`). Then **update the
 Entra redirect URI** (step 6) and the Claude.ai connector URL (step 7) to the custom
 hostname. You can keep the `workers.dev` URL enabled as a fallback.
+
+## Optional: Cloudflare Access for the sync app
+
+The sync API (`/api/v1/*`) and the app's sign-in path (`/app/signin`) can sit behind
+Cloudflare Access as a second gate in front of OAuth. MCP clients aren't affected:
+`/mcp` and the OAuth endpoints stay outside Access. The server-side check is off until
+you set both variables:
+
+| Variable | Value |
+|---|---|
+| `ACCESS_TEAM_DOMAIN` | Your Zero Trust team domain, `<team>.cloudflareaccess.com`. |
+| `ACCESS_AUD` | The Access application's audience (AUD) tag. |
+| `ACCESS_HANDOFF_REDIRECT_URIS` | The app's exact sign-in callback URIs, comma-separated. Only these receive the Access token at sign-in; empty, `/app/signin` refuses every request. |
+
+With both set, the Worker verifies the Access JWT on every `/api/v1` request (signature
+against the team's keys, audience, issuer, expiry, and `email` equal to `OWNER_EMAIL`),
+so a gap in the Access application's paths fails closed. With only one set, those paths
+answer `503`. The Access application, its policy and the identity provider are set up
+in the Cloudflare dashboard; [docs/SYNC-API.md section 8.1](./docs/SYNC-API.md#81-cloudflare-access-in-front-of-the-app)
+lists the steps under **Turning it on**.
+
+For the app's `https` sign-in callback, the Worker can also serve
+`/.well-known/apple-app-site-association`. Set `APPLE_TEAM_ID` (the 10-character Apple
+team ID) and `APPLE_BUNDLE_IDS` (comma-separated bundle IDs). Unset, the path is a 404.
 
 ## Keeping sync cost down
 

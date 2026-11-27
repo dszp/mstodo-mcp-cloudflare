@@ -26,13 +26,15 @@ import {
   TokenExchangeError,
 } from "../../core/auth/microsoft";
 import type { AppEnv } from "../../core/ports";
+import { attachAccessHandoff, HANDOFF_PROP } from "./app-signin";
 
-// OAUTH_PROVIDER is injected into the host env by the OAuthProvider runtime;
-// core ports do not carry it, so the handler adds it beside the core env.
+// OAUTH_PROVIDER is the authorization server's helper API, which the OAuth
+// front (oauth.ts) adds to the host env for this route; core ports do not
+// carry it, so the handler adds it beside the core env.
 type HandlerEnv = AppEnv & { OAUTH_PROVIDER: OAuthHelpers };
 
-// What the handler needs from the env the library hands it: the helpers the
-// library injected. Everything else comes through the host's toAppEnv.
+// What the handler needs from the env it is handed: the helpers. Everything
+// else comes through the host's toAppEnv.
 export type ProviderEnv = { OAUTH_PROVIDER: OAuthHelpers };
 
 // The authorization flow, in three requests:
@@ -57,6 +59,11 @@ const AUTHORIZE_PATH = "/authorize";
 const CALLBACK_PATH = "/auth/microsoft/callback";
 // The consent form is a handle, a decision and a checkbox.
 const MAX_CONSENT_FORM_BYTES = 8 * 1024;
+
+// The paths this handler serves; the OAuth front routes them here.
+export function isAuthUiPath(path: string): boolean {
+  return path === AUTHORIZE_PATH || path === CALLBACK_PATH;
+}
 
 interface UpstreamData {
   verifier: string;
@@ -114,12 +121,21 @@ async function handleAuthRequest(req: Request, env: HandlerEnv): Promise<Respons
   return new Response("not found", { status: 404 });
 }
 
+// The path of the resource a client asked for ("/mcp" or "/api/v1").
+function resourcePath(resource: string | undefined): string {
+  try {
+    return resource ? new URL(resource).pathname : "";
+  } catch {
+    return "";
+  }
+}
+
 async function handleAuthorize(req: Request, env: HandlerEnv): Promise<Response> {
   const oauth = env.OAUTH_PROVIDER;
   const authRequest = await oauth.parseAuthRequest(req);
 
   if (await oauth.isConsentRemembered(req, authRequest, await rememberOptions(env))) {
-    log.info("consent_remembered", { client_id: authRequest.clientId });
+    log.info("consent_remembered", { client_id: authRequest.clientId, resource: resourcePath(authRequest.resource) });
     return startMicrosoftSignIn(req, env, authRequest, new Headers());
   }
 
@@ -127,7 +143,9 @@ async function handleAuthorize(req: Request, env: HandlerEnv): Promise<Response>
   const details = await oauth.describeConsent(authRequest);
   const consent = await oauth.beginConsent(authRequest);
   consent.headers.set("content-type", "text/html; charset=utf-8");
-  return new Response(consentPage(details, consent.handle), { headers: consent.headers });
+  return new Response(consentPage(details, consent.handle, resourcePath(authRequest.resource)), {
+    headers: consent.headers,
+  });
 }
 
 async function handleConsentDecision(req: Request, env: HandlerEnv): Promise<Response> {
@@ -150,7 +168,7 @@ async function handleConsentDecision(req: Request, env: HandlerEnv): Promise<Res
     handle,
     form.get("remember") === "1" ? { remember: await rememberOptions(env) } : {},
   );
-  log.info("consent_approved", { client_id: approved.request.clientId });
+  log.info("consent_approved", { client_id: approved.request.clientId, resource: resourcePath(approved.request.resource) });
   return startMicrosoftSignIn(req, env, approved.request, approved.headers);
 }
 
@@ -278,12 +296,23 @@ async function handleCallback(req: Request, env: HandlerEnv, url: URL): Promise<
   const { epoch } = await index.authState();
   log.info("owner_authenticated", { id: me.id, identity_changed: identityChanged });
 
+  // Started at /app/signin behind Cloudflare Access: carry the handle of the
+  // stored Access token to code redemption (app-signin.ts). Null otherwise.
+  const accessHandoff = await attachAccessHandoff(req, env, authRequest, headers);
+
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
     request: authRequest,
     userId: "owner",
     metadata: { label: "owner" },
     scope: authRequest.scope,
-    props: { user: "owner", epoch, authorized_at: now },
+    props: {
+      user: "owner",
+      epoch,
+      authorized_at: now,
+      // Issuer + subject (section 15.2): the subject is the Graph object ID.
+      principal: { iss: `https://login.microsoftonline.com/${tid ?? "unknown"}/v2.0`, sub: me.id },
+      ...(accessHandoff ? { [HANDOFF_PROP]: accessHandoff } : {}),
+    },
   });
   headers.set("location", redirectTo);
   return new Response(null, { status: 302, headers });

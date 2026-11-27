@@ -10,7 +10,7 @@ const cfg = (
   aliases: {},
   overrides,
   no_sync: [],
-  sync_flagged_emails: false,
+  archive: [], sync_flagged_emails: false,
 });
 
 describe("stripEmoji", () => {

@@ -411,6 +411,26 @@ describe("TodoIndex delta sync", () => {
     expect(rows[0].title).toBe("A-updated");
   });
 
+  it("incremental: @removed for a task that moved to another list keeps it there", async () => {
+    await seedFreshTokens();
+    stubGraph({
+      [LISTS_DELTA]: { body: { value: [listA], "@odata.deltaLink": LISTS_DL } },
+      [TASKS_DELTA_A]: { body: { value: [syncTask("a"), syncTask("b")], "@odata.deltaLink": TASKS_DL_A } },
+    });
+    const stub = indexStub("sync-moved-removed");
+    await stub.runSyncCycle();
+    // "b" moves to list-B (a move_task write-through, or list-B's delta).
+    await stub.moveTask("b", "list-B");
+    // list-A's delta then reports "b" as removed from list-A.
+    stubGraph({
+      [LISTS_DL]: { body: { value: [], "@odata.deltaLink": LISTS_DL } },
+      [TASKS_DL_A]: { body: { value: [syncRemoved("b")], "@odata.deltaLink": TASKS_DL_A2 } },
+    });
+    await stub.runSyncCycle();
+    expect((await stub.query({ lists: ["list-A"] })).rows.map((r) => r.task_id)).toEqual(["a"]);
+    expect((await stub.query({ lists: ["list-B"] })).rows.map((r) => r.task_id)).toEqual(["b"]);
+  });
+
   it("resumable: a task budget of 1 stops mid-baseline, then completes", async () => {
     await seedFreshTokens();
     stubGraph({
@@ -481,7 +501,7 @@ describe("TodoIndex delta sync", () => {
     expect(midCycle).toBe(false);
   });
 
-  it("410: purges the list's rows and re-baselines on the next cycle", async () => {
+  it("410: keeps serving the list's rows, then sweeps what the re-baseline didn't return", async () => {
     await seedFreshTokens();
     stubGraph({
       [LISTS_DELTA]: { body: { value: [listA], "@odata.deltaLink": LISTS_DL } },
@@ -504,11 +524,15 @@ describe("TodoIndex delta sync", () => {
       },
     });
 
-    const mid1 = await stub.runSyncCycle(); // 410 → purge + reset to baseline
+    const mid1 = await stub.runSyncCycle(); // 410 → start a mark-and-sweep baseline
     expect(mid1).toBe(true);
-    expect((await stub.query({ lists: ["list-A"] })).rows).toHaveLength(0);
+    // Nothing is dropped up front: the old rows stay served during the baseline.
+    expect((await stub.query({ lists: ["list-A"] })).rows.map((r) => r.task_id).sort()).toEqual([
+      "a",
+      "b",
+    ]);
 
-    await stub.runSyncCycle(); // re-baseline → c
+    await stub.runSyncCycle(); // re-baseline → c; a and b weren't returned, so swept
     expect((await stub.query({ lists: ["list-A"] })).rows.map((r) => r.task_id)).toEqual([
       "c",
     ]);
@@ -644,6 +668,35 @@ describe("TodoIndex delta sync fairness (rotation + error retry)", () => {
     // (A), already fresh, must NOT have consumed the single slot.
     expect(await lastSynced(stub, "list-C")).toBeGreaterThan(1000);
     expect(await lastSynced(stub, "list-A")).toBe(3000);
+  });
+
+  it("syncs todo lists before reference lists, however stale (section 1.2)", async () => {
+    await seedFreshTokens();
+    await env.TODO_CACHE.put("config:lists", JSON.stringify({ overrides: { "list-R": "reference" } }));
+    try {
+      stubGraph({
+        [LISTS_DELTA]: {
+          body: { value: [{ id: "list-T", displayName: "T" }, { id: "list-R", displayName: "R" }], "@odata.deltaLink": LISTS_DL },
+        },
+        [tasksDelta("list-T")]: { body: { value: [syncTask("t")], "@odata.deltaLink": tasksDL("list-T") } },
+        [tasksDelta("list-R")]: { body: { value: [syncTask("r")], "@odata.deltaLink": tasksDL("list-R") } },
+      });
+      const stub = indexStub("sync-reference-last");
+      await stub.runSyncCycle();
+      // The reference list is the stalest, and still waits for the todo list.
+      await setLastSynced(stub, "list-T", 3000);
+      await setLastSynced(stub, "list-R", 1000);
+      stubGraph({
+        [LISTS_DL]: { body: { value: [], "@odata.deltaLink": LISTS_DL } },
+        [tasksDL("list-T")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-T", 2) } },
+        [tasksDL("list-R")]: { body: { value: [], "@odata.deltaLink": tasksDL("list-R", 2) } },
+      });
+      await stub.runSyncCycle(1);
+      expect(await lastSynced(stub, "list-T")).toBeGreaterThan(3000);
+      expect(await lastSynced(stub, "list-R")).toBe(1000);
+    } finally {
+      await env.TODO_CACHE.delete("config:lists");
+    }
   });
 
   it("retries an errored list ahead of a fresher idle one, recovering it", async () => {
@@ -914,7 +967,7 @@ describe("wipeIdentityScopedState — Feature A alias clearing", () => {
         patterns: [{ pattern: "work", flags: "i", type: "todo" }],
         aliases: { inbox: "old-account-list-id", finance: "another-old-id" },
         no_sync: ["flaggedEmails"],
-        sync_flagged_emails: false,
+        archive: [], sync_flagged_emails: false,
       }),
     );
     await env.TODO_CACHE.put("config:link_rules", JSON.stringify({ rules: [] }));

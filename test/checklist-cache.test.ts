@@ -12,8 +12,8 @@ const stub = () => env.TODO_INDEX_DO.get(env.TODO_INDEX_DO.idFromName("owner"));
 const named = (name: string) => env.TODO_INDEX_DO.getByName(name);
 
 describe("schema migration v3 — checklist-item cache", () => {
-  it("bumps LATEST_SCHEMA_VERSION to 3", () => {
-    expect(LATEST_SCHEMA_VERSION).toBe(3);
+  it("bumps LATEST_SCHEMA_VERSION to at least 3", () => {
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(3);
   });
 
   it("creates the checklist_items table with the expected columns", async () => {
@@ -173,13 +173,21 @@ describe("checklist store methods", () => {
     expect(meta.checklist_synced_at).not.toBeNull();
   });
 
-  it("markChecklistDirty nulls checklist_synced_at", async () => {
+  it("markChecklistDirty marks a fetched task due again, and leaves a never-fetched one alone", async () => {
     await seedTask("t4");
+    await seedTask("t4n");
+    let due: string[] = [];
     await runInDurableObject(stub(), async (instance: TodoIndex) => {
       await instance.replaceChecklistItems("t4", "L", [{ id: "x", displayName: "x", isChecked: false }]);
       await instance.markChecklistDirty("t4");
+      await instance.markChecklistDirty("t4n");
+      due = (await instance.selectDueChecklistTasks(10, [], [])).map((t: { task_id: string }) => t.task_id);
     });
-    expect((await taskMeta("t4")).checklist_synced_at).toBeNull();
+    const marker = (await taskMeta("t4")).checklist_synced_at as number;
+    // Negative: fetched before (so still complete in the feed), and due again.
+    expect(["fetched task's marker", marker < 0]).toEqual(["fetched task's marker", true]);
+    expect(["never-fetched task's marker", (await taskMeta("t4n")).checklist_synced_at]).toEqual(["never-fetched task's marker", null]);
+    expect(["both due for the scan", due.sort()]).toEqual(["both due for the scan", ["t4", "t4n"]]);
   });
 
   it("clearChecklistItems removes a task's items", async () => {
@@ -227,7 +235,7 @@ describe("checklist store methods", () => {
 });
 
 describe("selectDueChecklistTasks", () => {
-  it("picks NULL-marker OPEN tasks, excludes skipped lists, newest-changed first, capped", async () => {
+  it("picks NULL-marker tasks, open before completed, excludes skipped lists, newest-changed first, capped", async () => {
     await runInDurableObject(stub(), async (instance: TodoIndex, ctx) => {
       ctx.storage.sql.exec("DELETE FROM tasks");
       const ins = (
@@ -249,11 +257,13 @@ describe("selectDueChecklistTasks", () => {
       ins("due-new", "L", "notStarted", 3000, null); // due, newest
       ins("due-old", "L", "inProgress", 1000, null); // due, older
       ins("already", "L", "notStarted", 5000, 9999); // marker set → not due
-      ins("done", "L", "completed", 4000, null); // completed → excluded
+      ins("done", "L", "completed", 4000, null); // completed → after the open ones
+      ins("arch-open", "ARCH", "notStarted", 500, null); // archive list, open → due
+      ins("arch-done", "ARCH", "completed", 7000, null); // archive list, completed → excluded
       ins("skipped", "SKIP", "notStarted", 6000, null); // skipped list → excluded
 
-      const due = await instance.selectDueChecklistTasks(10, ["SKIP"]);
-      expect(due.map((d) => d.task_id)).toEqual(["due-new", "due-old"]);
+      const due = await instance.selectDueChecklistTasks(10, ["SKIP"], ["ARCH"]);
+      expect(due.map((d) => d.task_id)).toEqual(["due-new", "due-old", "arch-open", "done"]);
 
       const capped = await instance.selectDueChecklistTasks(1, ["SKIP"]);
       expect(capped.map((d) => d.task_id)).toEqual(["due-new"]);
@@ -467,9 +477,14 @@ describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tes
           { status: 200 },
         );
       }
-      if (u.includes("/tasks/TK1/checklistItems") && m === "GET") {
+      // The sub-resource scan: one task GET with steps and links expanded.
+      if (u.includes("/tasks/TK1?$expand=checklistItems,linkedResources") && m === "GET") {
         return Response.json(
-          { value: [{ id: "CI1", displayName: "waiting on acme reply", isChecked: false, createdDateTime: "2026-05-02T00:00:00Z" }] },
+          {
+            id: "TK1", title: "Reply", status: "notStarted", hasAttachments: false,
+            checklistItems: [{ id: "CI1", displayName: "waiting on acme reply", isChecked: false, createdDateTime: "2026-05-02T00:00:00Z" }],
+            linkedResources: [],
+          },
           { status: 200 },
         );
       }
@@ -487,7 +502,7 @@ describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tes
     expect(items[0].display_name).toBe("waiting on acme reply");
   });
 
-  it("a 410 re-baseline purges the list's cached checklist rows (no orphans)", async () => {
+  it("a 410 re-baseline sweeps the checklist rows of tasks it no longer returns (no orphans)", async () => {
     await signIn();
     const stub = named("checklist-410");
     const TK_DELTA = "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/delta";
@@ -500,8 +515,8 @@ describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tes
         return Response.json({ value: [{ id: "L1", displayName: "Work" }], "@odata.deltaLink": `${LISTS_DELTA}?$deltatoken=z` }, { status: 200 });
       if (u === TK_DELTA)
         return Response.json({ value: [{ id: "TKA", title: "Reply", status: "notStarted", lastModifiedDateTime: "2026-05-02T00:00:00Z" }], "@odata.deltaLink": TK_DL }, { status: 200 });
-      if (u.includes("/tasks/TKA/checklistItems") && m === "GET")
-        return Response.json({ value: [{ id: "CIA", displayName: "waiting", isChecked: false, createdDateTime: "2026-05-02T00:00:00Z" }] }, { status: 200 });
+      if (u.includes("/tasks/TKA?$expand=checklistItems,linkedResources") && m === "GET")
+        return Response.json({ id: "TKA", title: "Reply", status: "notStarted", hasAttachments: false, checklistItems: [{ id: "CIA", displayName: "waiting", isChecked: false, createdDateTime: "2026-05-02T00:00:00Z" }], linkedResources: [] }, { status: 200 });
       if (u.endsWith("/subscriptions")) return Response.json({ value: [] }, { status: 200 });
       if (u.includes("substrate.office.com")) return Response.json({ value: [] }, { status: 200 });
       if (u.includes("login.microsoftonline.com")) return Response.json({ access_token: "EXO", expires_in: 3600 }, { status: 200 });
@@ -510,20 +525,67 @@ describe("runSyncCycle checklist backfill scan (ENABLE_CHECKLIST_CACHE on in tes
     await stub.runSyncCycle();
     expect((await stub.getChecklistItems("TKA")).map((i) => i.item_id)).toEqual(["CIA"]);
 
-    // Cycle 2: the stored tasks deltaLink now 410s → purge L1 (tasks + checklist).
+    // Cycle 2: the stored tasks deltaLink now 410s → a mark-and-sweep baseline
+    // starts. Cycle 3: the new baseline no longer contains TKA → swept with its
+    // checklist rows.
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const u = String(input);
       const m = init?.method ?? "GET";
       if (u.includes("/me/todo/lists/delta"))
         return Response.json({ value: [], "@odata.deltaLink": `${LISTS_DELTA}?$deltatoken=z` }, { status: 200 });
       if (u === TK_DL) return Response.json({ error: { code: "syncStateNotFound" } }, { status: 410 });
+      if (u === TK_DELTA) return Response.json({ value: [], "@odata.deltaLink": `${TK_DL}2` }, { status: 200 });
       if (u.endsWith("/subscriptions")) return Response.json({ value: [] }, { status: 200 });
       if (u.includes("substrate.office.com")) return Response.json({ value: [] }, { status: 200 });
       if (u.includes("login.microsoftonline.com")) return Response.json({ access_token: "EXO", expires_in: 3600 }, { status: 200 });
       return new Response(`unscripted ${m} ${u}`, { status: 404 });
     }) as unknown as typeof fetch;
     await stub.runSyncCycle();
+    // Still served while the baseline runs.
+    expect((await stub.getChecklistItems("TKA")).map((i) => i.item_id)).toEqual(["CIA"]);
+    await stub.runSyncCycle();
 
     expect(await stub.getChecklistItems("TKA")).toEqual([]);
+  });
+  it("backfill mode: a backlog takes a bigger batch and re-arms soon; flagged email is never scanned", async () => {
+    await signIn();
+    const stub = named("checklist-backfill");
+    const LDL = `${LISTS_DELTA}?$deltatoken=z`;
+    const FL_DELTA = "https://graph.microsoft.com/v1.0/me/todo/lists/FL/tasks/delta";
+    const L1_DELTA = "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/delta";
+    const tasks = Array.from({ length: 12 }, (_, i) => ({ id: `T${i}`, title: `t${i}`, status: "notStarted", lastModifiedDateTime: "2026-05-02T00:00:00Z" }));
+    const scanned: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const u = String(input);
+      const m = init?.method ?? "GET";
+      if (u.includes("/me/todo/lists/delta"))
+        return Response.json({ value: [{ id: "L1", displayName: "Work" }, { id: "FL", displayName: "Flagged", wellknownListName: "flaggedEmails" }], "@odata.deltaLink": LDL }, { status: 200 });
+      if (u === L1_DELTA) return Response.json({ value: tasks, "@odata.deltaLink": `${L1_DELTA}?$deltatoken=a` }, { status: 200 });
+      if (u === FL_DELTA) return Response.json({ value: [{ id: "F1", title: "mail", status: "notStarted", lastModifiedDateTime: "2026-05-02T00:00:00Z" }], "@odata.deltaLink": `${FL_DELTA}?$deltatoken=b` }, { status: 200 });
+      const hit = u.match(/\/tasks\/([^/?]+)\?\$expand=checklistItems,linkedResources/);
+      if (hit && m === "GET") {
+        scanned.push(hit[1]);
+        return Response.json({ id: hit[1], title: "t", status: "notStarted", hasAttachments: false, checklistItems: [], linkedResources: [] }, { status: 200 });
+      }
+      if (u.endsWith("/subscriptions")) return Response.json({ value: [] }, { status: 200 });
+      if (new URL(u).hostname === "substrate.office.com") return Response.json({ value: [] }, { status: 200 });
+      if (new URL(u).hostname === "login.microsoftonline.com") return Response.json({ access_token: "EXO", expires_in: 3600 }, { status: 200 });
+      return new Response(`unscripted ${m} ${u}`, { status: 404 });
+    }) as unknown as typeof fetch;
+    await env.TODO_CACHE.put("config:lists", JSON.stringify({ sync_flagged_emails: true }));
+
+    await runInDurableObject(stub, async (instance: TodoIndex, ctx) => {
+      const before = Date.now();
+      await instance.alarm();
+      // 12 tasks wait and the normal batch is 8: backfill mode takes them all
+      // in one bigger batch, never touches flagged email, and re-arms within
+      // the backfill interval instead of DELTA_SYNC_INTERVAL_MIN.
+      expect(scanned.sort()).toEqual(tasks.map((t) => t.id).sort());
+      expect(scanned).not.toContain("F1");
+      const at = await ctx.storage.getAlarm();
+      expect(at).not.toBeNull();
+      expect((at as number) - before).toBeLessThanOrEqual(25_000);
+    });
+    await env.TODO_CACHE.delete("config:lists");
   });
 });

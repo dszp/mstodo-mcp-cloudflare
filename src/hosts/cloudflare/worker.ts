@@ -1,14 +1,19 @@
-import { MSToDoMCP } from "./mcp-agent";
+import { MSToDoSession } from "./mcp-agent";
 import { TodoIndex } from "./todo-index-do";
 import { ownerIndex } from "../../core/owner-index";
 import { appEnv } from "./env";
-import { buildOAuthProvider } from "./oauth";
+import { buildOAuthFront } from "./oauth";
 import { handleUpload } from "../../core/upload/handler";
 import { handleDownload } from "../../core/upload/download-handler";
 import { handleWebhook } from "../../core/subscriptions/webhook-handler";
 import { VERSION } from "../../core/version";
+import { handleAppleAssociation } from "../../core/auth/apple-association";
+import { sweepBlobs } from "../../core/blobs";
+import { log } from "../../core/log";
 
-export { MSToDoMCP, TodoIndex };
+const BLOB_SWEEP_HOUR_UTC = 8;
+
+export { MSToDoSession, TodoIndex };
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -22,8 +27,13 @@ export default {
       );
     }
 
+    // The app's Associated Domains file (docs/SYNC-API.md section 8); null
+    // unless APPLE_TEAM_ID and APPLE_BUNDLE_IDS are set.
+    const association = handleAppleAssociation(req, app);
+    if (association) return association;
+
     // Public (non-OAuth) web upload endpoint. Returns null for any other path so
-    // OAuth/MCP routing below is unaffected. Lives before oauthProvider.fetch so
+    // OAuth/MCP routing below is unaffected. Lives before the OAuth front so
     // /upload is reachable without an OAuth access token (it authenticates with a
     // single-use signed link minted by create_upload_link).
     const uploadRes = await handleUpload(req, app);
@@ -41,7 +51,7 @@ export default {
     const webhookRes = await handleWebhook(req, app, ctx);
     if (webhookRes) return webhookRes;
 
-    return buildOAuthProvider(url.origin).fetch(req, env, ctx);
+    return buildOAuthFront(url.origin).fetch(req, env, ctx);
   },
 
   // Phase 5: cron heartbeat. Pokes the singleton TodoIndex DO to (re-)arm its
@@ -50,11 +60,20 @@ export default {
   // only matters when the DO has gone quiet (e.g. after a no-auth alarm bailout
   // or a lost alarm).
   async scheduled(
-    _controller: ScheduledController,
+    controller: ScheduledController,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
     const index = ownerIndex(appEnv(env));
     ctx.waitUntil(index.ensureSyncing());
+    // Once a day, the first cron run after 08:00 UTC: the blob sweep
+    // (docs/SYNC-API.md section 4.9).
+    const at = new Date(controller.scheduledTime);
+    if (env.BLOBS && at.getUTCHours() === BLOB_SWEEP_HOUR_UTC && at.getUTCMinutes() < 15) {
+      const blobs = env.BLOBS;
+      ctx.waitUntil(
+        sweepBlobs(blobs, index).catch((e: unknown) => log.error("blob_sweep_failed", { error: String(e) })),
+      );
+    }
   },
 };

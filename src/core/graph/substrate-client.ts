@@ -157,10 +157,16 @@ export interface SubstrateTaskDetails {
 // Shared by every surface that mirrors the app's manual order (the My Day
 // aggregation, list_tasks_by_manual_order). String compare is sound because the
 // app's OrderDateTime values are same-zone ISO 8601 (lexicographic == chrono).
+// Substrate sends these instants with and without milliseconds
+// ("…45.623Z", "…47Z"), so compare them as instants: as strings the second
+// sorts first. Unparseable values fall back to string order.
 export function compareOrderDateTimeDesc(a: string | null, b: string | null): number {
   if (a === b) return 0;
   if (a === null) return 1;
   if (b === null) return -1;
+  const am = Date.parse(a);
+  const bm = Date.parse(b);
+  if (!Number.isNaN(am) && !Number.isNaN(bm) && am !== bm) return am < bm ? 1 : -1;
   return a < b ? 1 : -1;
 }
 
@@ -247,6 +253,70 @@ export function extractSubtasks(json: unknown): SubstrateSubtask[] {
     if (parsed.success) out.push(parsed.data);
   }
   return out;
+}
+
+// Sidebar appearance of a list ("task folder"), read-only (docs/SYNC-API.md
+// section 10.4). Id is the same ID Graph uses for the list. OrderDateTime is
+// the sidebar position (null for the default list), ParentFolderGroupId the
+// Id of the list group holding it. ThemeColor and ThemeBackground have no
+// documented format, so they are kept as whatever Substrate sends.
+// A sidebar position: an ISO string, or a { DateTime, TimeZone } object like
+// the task dates above, normalized to one string. "UTC" without a designator
+// gets a Z, so the value still parses as the same instant.
+const SidebarOrder = DateTimeTimeZoneLike.transform((v): string | null => {
+  if (v == null) return null;
+  if (typeof v === "string") return v;
+  const dt = typeof v.DateTime === "string" ? v.DateTime : null;
+  if (dt === null) return null;
+  const utc = (v.TimeZone ?? "UTC").toUpperCase() === "UTC";
+  return utc && !/(Z|[+-]\d\d:?\d\d)$/.test(dt) ? `${dt}Z` : dt;
+}).optional();
+
+export const SubstrateFolderSchema = z
+  .object({
+    Id: z.string(),
+    OrderDateTime: SidebarOrder,
+    ParentFolderGroupId: z.string().nullable().optional(),
+    ThemeColor: z.unknown().optional(),
+    ThemeBackground: z.unknown().optional(),
+  })
+  .passthrough();
+export type SubstrateFolder = z.infer<typeof SubstrateFolderSchema>;
+
+// A sidebar list group. Observed live with exactly these three fields.
+export const SubstrateFolderGroupSchema = z
+  .object({
+    Id: z.string(),
+    Name: z.string().nullable().optional(),
+    OrderDateTime: SidebarOrder,
+  })
+  .passthrough();
+export type SubstrateFolderGroup = z.infer<typeof SubstrateFolderGroupSchema>;
+
+// The fields the appearance mirror reads from each folder.
+const FOLDER_SELECT = "Id,OrderDateTime,ParentFolderGroupId,ThemeColor,ThemeBackground";
+// A roster or group list longer than this many pages is cut off rather than
+// spending the sync cycle's subrequests on it.
+const MAX_COLLECTION_PAGES = 10;
+
+// Items of one collection page (value / Value / bare array). Strict, unlike
+// extractTasks: the caller replaces its whole copy with the result (and
+// deletes what is missing), so an envelope it doesn't recognize, or an item
+// that doesn't parse, fails the read instead of shrinking it.
+function extractItems<T>(json: unknown, schema: z.ZodType<T, unknown>): T[] {
+  const raw: unknown = Array.isArray(json) ? json : isRecord(json) ? (json.value ?? json.Value) : undefined;
+  if (!Array.isArray(raw)) throw new SubstrateError(0, "substrate_unexpected_shape");
+  return raw.map((item) => {
+    const parsed = schema.safeParse(item);
+    if (!parsed.success) throw new SubstrateError(0, "substrate_unexpected_item", parsed.error.issues[0]?.path.join("."));
+    return parsed.data;
+  });
+}
+
+function nextLinkOf(json: unknown): string | null {
+  if (!isRecord(json)) return null;
+  const link = json["@odata.nextLink"] ?? json["odata.nextLink"];
+  return typeof link === "string" && link ? link : null;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -347,6 +417,79 @@ export class SubstrateClient {
     });
     const json = (await res.json()) as unknown;
     return extractSubtasks(isRecord(json) ? json.Subtasks : undefined);
+  }
+
+  // Every task folder (list) with its sidebar appearance. Asks for only the
+  // fields the mirror needs; if Substrate refuses the $select (a 400, as Graph
+  // does for lists), asks again without it.
+  // `fast` skips 429 retries, so a background read never sleeps on a
+  // throttled mailbox.
+  async listFolders(opts?: { fast?: boolean }): Promise<SubstrateFolder[]> {
+    try {
+      return await this.#collect(`${SUBSTRATE_BASE}/taskfolders?$select=${FOLDER_SELECT}`, SubstrateFolderSchema, opts);
+    } catch (e) {
+      if (!(e instanceof SubstrateError) || e.status !== 400) throw e;
+      log.warn("substrate_select_refused", { resource: "taskfolders" });
+      return this.#collect(`${SUBSTRATE_BASE}/taskfolders`, SubstrateFolderSchema, opts);
+    }
+  }
+
+  // Every sidebar list group.
+  async listFolderGroups(opts?: { fast?: boolean }): Promise<SubstrateFolderGroup[]> {
+    return this.#collect(`${SUBSTRATE_BASE}/foldergroups`, SubstrateFolderGroupSchema, opts);
+  }
+
+  // GETs a collection and follows @odata.nextLink (host-pinned by
+  // #fetchWithRetry) up to MAX_COLLECTION_PAGES. A delta link at the end is
+  // ignored: the mirror re-reads the whole collection each time.
+  async #collect<T>(
+    url: string,
+    schema: z.ZodType<T, unknown>,
+    opts?: { fast?: boolean },
+  ): Promise<T[]> {
+    const out: T[] = [];
+    let next: string | null = url;
+    for (let page = 0; next && page < MAX_COLLECTION_PAGES; page++) {
+      const res = await this.#fetchWithRetry(next, "GET", undefined, { retry429: !opts?.fast });
+      const json = (await res.json()) as unknown;
+      out.push(...extractItems(json, schema));
+      next = nextLinkOf(json);
+    }
+    if (next) throw new SubstrateError(0, "substrate_too_many_pages", redactSubstrateUrl(url));
+    return out;
+  }
+
+  // PATCH a task folder (list): its theme, sidebar position or group. Returns
+  // the folder as Substrate stores it after the write, so the mirror records
+  // what Microsoft kept rather than what was asked for.
+  async patchFolder(folderId: string, body: Record<string, unknown>): Promise<SubstrateFolder> {
+    const res = await this.#fetchWithRetry(
+      `${SUBSTRATE_BASE}/taskfolders/${encodeURIComponent(folderId)}`,
+      "PATCH",
+      JSON.stringify(body),
+    );
+    return SubstrateFolderSchema.parse((await res.json()) as unknown);
+  }
+
+  // Create, change or delete a sidebar list group (docs/SYNC-API.md section
+  // 10.4). Graph has no groups; To Do keeps them as Substrate folder groups.
+  // Create and PATCH return the group as Substrate stores it.
+  async createFolderGroup(body: Record<string, unknown>): Promise<SubstrateFolderGroup> {
+    const res = await this.#fetchWithRetry(`${SUBSTRATE_BASE}/foldergroups`, "POST", JSON.stringify(body));
+    return SubstrateFolderGroupSchema.parse((await res.json()) as unknown);
+  }
+
+  async patchFolderGroup(groupId: string, body: Record<string, unknown>): Promise<SubstrateFolderGroup> {
+    const res = await this.#fetchWithRetry(
+      `${SUBSTRATE_BASE}/foldergroups/${encodeURIComponent(groupId)}`,
+      "PATCH",
+      JSON.stringify(body),
+    );
+    return SubstrateFolderGroupSchema.parse((await res.json()) as unknown);
+  }
+
+  async deleteFolderGroup(groupId: string): Promise<void> {
+    await this.#fetchWithRetry(`${SUBSTRATE_BASE}/foldergroups/${encodeURIComponent(groupId)}`, "DELETE");
   }
 
   // PATCH a subtask. Used by reorder_checklist_item to set OrderDateTime

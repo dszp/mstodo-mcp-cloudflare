@@ -1,0 +1,1227 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`My Day and manual-order write tools > adds to and removes from My Day with the cache write-through 1`] = `
+{
+  "isError": false,
+  "result": {
+    "body_preview": null,
+    "categories": [],
+    "committed_day": "2026-11-24",
+    "committed_day_raw": "2026-11-24T00:00:00Z",
+    "committed_order": "2026-11-24T15:00:00.000Z",
+    "completed_date": null,
+    "created_date": null,
+    "due_date": null,
+    "has_attachments": null,
+    "importance": null,
+    "in_my_day": true,
+    "is_reminder_on": null,
+    "last_modified_date": null,
+    "list_id": "L1",
+    "ok": true,
+    "order_datetime": null,
+    "postponed_day_raw": null,
+    "reminder_date": null,
+    "start_date": null,
+    "status": null,
+    "task_id": "T1",
+    "title": "t",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > adds to and removes from My Day with the cache write-through 2`] = `
+{
+  "committed_day": "2026-11-24",
+  "committed_order": "2026-11-24T15:00:00.000Z",
+}
+`;
+
+exports[`My Day and manual-order write tools > adds to and removes from My Day with the cache write-through 3`] = `
+{
+  "isError": true,
+  "result": {
+    "date": "24-11-2026",
+    "hint": "Use YYYY-MM-DD.",
+    "ok": false,
+    "reason": "invalid_date",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > adds to and removes from My Day with the cache write-through 4`] = `
+{
+  "isError": false,
+  "result": {
+    "body_preview": null,
+    "categories": [],
+    "committed_day": null,
+    "committed_day_raw": null,
+    "committed_order": null,
+    "completed_date": null,
+    "created_date": null,
+    "due_date": null,
+    "has_attachments": null,
+    "importance": null,
+    "in_my_day": false,
+    "is_reminder_on": null,
+    "last_modified_date": null,
+    "list_id": "L1",
+    "ok": true,
+    "order_datetime": null,
+    "reminder_date": null,
+    "start_date": null,
+    "status": null,
+    "task_id": "T1",
+    "title": "t",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > adds to and removes from My Day with the cache write-through 5`] = `
+{
+  "committed_day": null,
+  "committed_order": null,
+}
+`;
+
+exports[`My Day and manual-order write tools > adds to and removes from My Day with the cache write-through 6`] = `
+[
+  {
+    "body": {
+      "CommittedDay": "2026-11-24",
+      "CommittedOrder": "2026-11-24T15:00:00.000Z",
+      "PostponedDay": null,
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T1",
+  },
+  {
+    "body": {
+      "CommittedDay": null,
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T1",
+  },
+]
+`;
+
+exports[`My Day and manual-order write tools > refuses My Day writes when the feature is off 1`] = `
+{
+  "isError": true,
+  "result": {
+    "hint": "Set ENABLE_MY_DAY=true on the Worker and re-run /authorize to consent the Exchange Online Tasks scope.",
+    "ok": false,
+    "reason": "my_day_disabled",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > refuses My Day writes when the feature is off 2`] = `
+{
+  "isError": true,
+  "result": {
+    "hint": "Set ENABLE_MY_DAY=true on the Worker and re-run /authorize to consent the Exchange Online Tasks scope.",
+    "ok": false,
+    "reason": "my_day_disabled",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_checklist_item returns the steps in their new order 1`] = `
+{
+  "isError": false,
+  "result": {
+    "item_id": "s3",
+    "list_id": "L1",
+    "ok": true,
+    "order_datetime": "2026-11-02T12:00:00.000Z",
+    "ordered_items": [
+      {
+        "display_name": "one",
+        "is_checked": false,
+        "item_id": "s1",
+        "order_datetime": "2026-11-03T00:00:00.000Z",
+      },
+      {
+        "display_name": "three",
+        "is_checked": null,
+        "item_id": "s3",
+        "order_datetime": "2026-11-02T12:00:00.000Z",
+      },
+      {
+        "display_name": "two",
+        "is_checked": true,
+        "item_id": "s2",
+        "order_datetime": "2026-11-02T00:00:00.000Z",
+      },
+    ],
+    "position": "before",
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_checklist_item returns the steps in their new order 2`] = `
+{
+  "isError": true,
+  "result": {
+    "ok": false,
+    "reason": "reference_not_found",
+    "reference_item_id": "zz",
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_checklist_item returns the steps in their new order 3`] = `
+[
+  {
+    "method": "GET",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T1?$select=*",
+  },
+  {
+    "body": {
+      "OrderDateTime": "2026-11-02T12:00:00.000Z",
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/tasks/T1/subtasks/s3",
+  },
+  {
+    "method": "GET",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T1?$select=*",
+  },
+]
+`;
+
+exports[`My Day and manual-order write tools > reorder_my_day_task orders against the cached day 1`] = `
+{
+  "isError": false,
+  "result": {
+    "body_preview": null,
+    "categories": [],
+    "committed_day": "2026-11-24",
+    "committed_order": "2026-11-24T11:30:00.000Z",
+    "completed_date": null,
+    "created_date": null,
+    "date": "2026-11-24",
+    "due_date": null,
+    "has_attachments": null,
+    "importance": null,
+    "is_reminder_on": null,
+    "last_modified_date": null,
+    "list_id": "L1",
+    "ok": true,
+    "order_datetime": null,
+    "position": "before",
+    "reminder_date": null,
+    "start_date": null,
+    "status": null,
+    "task_id": "T1",
+    "title": "t",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_my_day_task orders against the cached day 2`] = `
+{
+  "committed_day": "2026-11-24",
+  "committed_order": "2026-11-24T11:30:00.000Z",
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_my_day_task orders against the cached day 3`] = `
+{
+  "isError": true,
+  "result": {
+    "date": "2026-11-24",
+    "hint": "Add the task to My Day for this date first (add_to_my_day), pass the correct \`date\`, or wait for the My Day cache to warm.",
+    "ok": false,
+    "reason": "task_not_on_my_day",
+    "task_id": "T9",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_my_day_task orders against the cached day 4`] = `
+{
+  "isError": false,
+  "result": {
+    "body_preview": null,
+    "categories": [],
+    "committed_day": "2026-11-24",
+    "committed_order": "2026-11-30T00:00:00.000Z",
+    "completed_date": null,
+    "created_date": null,
+    "date": "2026-11-24",
+    "due_date": null,
+    "has_attachments": null,
+    "importance": null,
+    "is_reminder_on": null,
+    "last_modified_date": null,
+    "list_id": "L1",
+    "ok": true,
+    "order_datetime": null,
+    "position": "set",
+    "reminder_date": null,
+    "start_date": null,
+    "status": null,
+    "task_id": "T1",
+    "title": "t",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_my_day_task orders against the cached day 5`] = `
+[
+  {
+    "body": {
+      "CommittedOrder": "2026-11-24T11:30:00.000Z",
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T1",
+  },
+  {
+    "body": {
+      "CommittedOrder": "2026-11-30T00:00:00.000Z",
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T1",
+  },
+]
+`;
+
+exports[`My Day and manual-order write tools > reorder_task computes positions from the folder's other tasks 1`] = `
+{
+  "isError": false,
+  "result": {
+    "body_preview": null,
+    "categories": [],
+    "committed_order": null,
+    "completed_date": null,
+    "created_date": null,
+    "due_date": null,
+    "has_attachments": null,
+    "importance": null,
+    "is_reminder_on": null,
+    "last_modified_date": null,
+    "list_id": "L1",
+    "ok": true,
+    "order_datetime": "2026-11-10T00:01:00.000Z",
+    "position": "top",
+    "reminder_date": null,
+    "start_date": null,
+    "status": null,
+    "task_id": "T1",
+    "title": "t",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_task computes positions from the folder's other tasks 2`] = `
+{
+  "isError": false,
+  "result": {
+    "body_preview": null,
+    "categories": [],
+    "committed_order": null,
+    "completed_date": null,
+    "created_date": null,
+    "due_date": null,
+    "has_attachments": null,
+    "importance": null,
+    "is_reminder_on": null,
+    "last_modified_date": null,
+    "list_id": "L1",
+    "ok": true,
+    "order_datetime": "2026-11-04T23:59:00.000Z",
+    "position": "after",
+    "reminder_date": null,
+    "start_date": null,
+    "status": null,
+    "task_id": "T1",
+    "title": "t",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_task computes positions from the folder's other tasks 3`] = `
+{
+  "isError": true,
+  "result": {
+    "list_id": "L1",
+    "ok": false,
+    "reason": "reference_not_in_list",
+    "reference_task_id": "T9",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_task computes positions from the folder's other tasks 4`] = `
+{
+  "isError": true,
+  "result": {
+    "hint": "Pass index (1-based) for position 'index'.",
+    "ok": false,
+    "reason": "index_required",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_task computes positions from the folder's other tasks 5`] = `
+{
+  "isError": true,
+  "result": {
+    "hint": "Use an ISO 8601 timestamp.",
+    "ok": false,
+    "order_datetime": "nope",
+    "reason": "invalid_order_datetime",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_task computes positions from the folder's other tasks 6`] = `
+{
+  "isError": false,
+  "result": {
+    "body_preview": null,
+    "categories": [],
+    "committed_order": null,
+    "completed_date": null,
+    "created_date": null,
+    "due_date": null,
+    "has_attachments": null,
+    "importance": null,
+    "is_reminder_on": null,
+    "last_modified_date": null,
+    "list_id": "L1",
+    "ok": true,
+    "order_datetime": "2026-12-01T00:00:00.000Z",
+    "position": "set",
+    "reminder_date": null,
+    "start_date": null,
+    "status": null,
+    "task_id": "T1",
+    "title": "t",
+  },
+}
+`;
+
+exports[`My Day and manual-order write tools > reorder_task computes positions from the folder's other tasks 7`] = `
+[
+  {
+    "method": "GET",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks",
+  },
+  {
+    "body": {
+      "inputIds": [
+        "T1",
+        "T2",
+        "T3",
+      ],
+      "sourceIdType": "restId",
+      "targetIdType": "restImmutableEntryId",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/translateExchangeIds",
+  },
+  {
+    "body": {
+      "OrderDateTime": "2026-11-10T00:01:00.000Z",
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T1",
+  },
+  {
+    "method": "GET",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks",
+  },
+  {
+    "body": {
+      "inputIds": [
+        "T1",
+        "T2",
+        "T3",
+      ],
+      "sourceIdType": "restId",
+      "targetIdType": "restImmutableEntryId",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/translateExchangeIds",
+  },
+  {
+    "method": "GET",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T3",
+  },
+  {
+    "body": {
+      "OrderDateTime": "2026-11-04T23:59:00.000Z",
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T1",
+  },
+  {
+    "method": "GET",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks",
+  },
+  {
+    "body": {
+      "inputIds": [
+        "T1",
+        "T2",
+        "T3",
+      ],
+      "sourceIdType": "restId",
+      "targetIdType": "restImmutableEntryId",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/translateExchangeIds",
+  },
+  {
+    "method": "GET",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T9",
+  },
+  {
+    "body": {
+      "OrderDateTime": "2026-12-01T00:00:00.000Z",
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L1/tasks/T1",
+  },
+]
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a linked resource 1`] = `
+{
+  "isError": false,
+  "result": {
+    "linked_resource": {
+      "applicationName": "App",
+      "id": "k1",
+      "webUrl": "https://example.com",
+    },
+    "list_id": "L1",
+    "ok": true,
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a linked resource 2`] = `
+{
+  "isError": false,
+  "result": {
+    "linked_resource": {
+      "applicationName": "App",
+      "displayName": "D",
+      "id": "k1",
+      "webUrl": null,
+    },
+    "list_id": "L1",
+    "ok": true,
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a linked resource 3`] = `
+{
+  "isError": false,
+  "result": {
+    "list_id": "L1",
+    "ok": true,
+    "resource_id": "k1",
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a linked resource 4`] = `
+{
+  "isError": true,
+  "result": {
+    "list_id": "L1",
+    "ok": false,
+    "reason": "linked_resource_not_found",
+    "resource_id": "gone",
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a linked resource 5`] = `
+[
+  {
+    "body": {
+      "applicationName": "App",
+      "webUrl": "https://example.com",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/linkedResources",
+  },
+  {
+    "body": {
+      "displayName": "D",
+      "webUrl": null,
+    },
+    "method": "PATCH",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/linkedResources/k1",
+  },
+  {
+    "method": "DELETE",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/linkedResources/k1",
+  },
+  {
+    "method": "DELETE",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/linkedResources/gone",
+  },
+]
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a step with the index write-through 1`] = `
+{
+  "isError": false,
+  "result": {
+    "item": {
+      "createdDateTime": "2026-11-24T15:00:00Z",
+      "displayName": "step",
+      "id": "c1",
+    },
+    "list_id": "L1",
+    "ok": true,
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a step with the index write-through 2`] = `
+{
+  "isError": false,
+  "result": {
+    "item": {
+      "displayName": "step",
+      "id": "c1",
+      "isChecked": true,
+    },
+    "list_id": "L1",
+    "ok": true,
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a step with the index write-through 3`] = `
+{
+  "isError": true,
+  "result": {
+    "item_id": "gone",
+    "list_id": "L1",
+    "ok": false,
+    "reason": "checklist_item_not_found",
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a step with the index write-through 4`] = `
+{
+  "isError": false,
+  "result": {
+    "item_id": "c1",
+    "list_id": "L1",
+    "ok": true,
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a step with the index write-through 5`] = `
+{
+  "isError": true,
+  "result": {
+    "hint": "Task not found in the index; pass \`list\` explicitly.",
+    "ok": false,
+    "reason": "list_required",
+    "task_id": "UNKNOWN",
+  },
+}
+`;
+
+exports[`checklist and linked-resource write tools > creates, updates and deletes a step with the index write-through 6`] = `
+[
+  {
+    "body": {
+      "displayName": "step",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/checklistItems",
+  },
+  {
+    "body": {
+      "isChecked": true,
+    },
+    "method": "PATCH",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/checklistItems/c1",
+  },
+  {
+    "body": {
+      "displayName": "x",
+    },
+    "method": "PATCH",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/checklistItems/gone",
+  },
+  {
+    "method": "DELETE",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1/checklistItems/c1",
+  },
+]
+`;
+
+exports[`list write tools > create, rename and delete a list, mapping 404 and 405 1`] = `
+{
+  "isError": false,
+  "result": {
+    "list": {
+      "displayName": "Errands",
+      "id": "L9",
+    },
+    "ok": true,
+  },
+}
+`;
+
+exports[`list write tools > create, rename and delete a list, mapping 404 and 405 2`] = `
+{
+  "isError": false,
+  "result": {
+    "list": {
+      "displayName": "Chores",
+      "id": "L9",
+    },
+    "ok": true,
+  },
+}
+`;
+
+exports[`list write tools > create, rename and delete a list, mapping 404 and 405 3`] = `
+{
+  "isError": true,
+  "result": {
+    "list_id": "NOPE",
+    "ok": false,
+    "reason": "list_not_found",
+  },
+}
+`;
+
+exports[`list write tools > create, rename and delete a list, mapping 404 and 405 4`] = `
+{
+  "isError": true,
+  "result": {
+    "hint": "The default list (wellknownListName: 'defaultList') cannot be deleted.",
+    "list_id": "DEF",
+    "ok": false,
+    "reason": "method_not_allowed",
+  },
+}
+`;
+
+exports[`list write tools > create, rename and delete a list, mapping 404 and 405 5`] = `
+{
+  "isError": false,
+  "result": {
+    "list_id": "L9",
+    "ok": true,
+  },
+}
+`;
+
+exports[`list write tools > create, rename and delete a list, mapping 404 and 405 6`] = `
+[
+  {
+    "body": {
+      "displayName": "Errands",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists",
+  },
+  {
+    "body": {
+      "displayName": "Chores",
+    },
+    "method": "PATCH",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L9",
+  },
+  {
+    "body": {
+      "displayName": "x",
+    },
+    "method": "PATCH",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/NOPE",
+  },
+  {
+    "method": "DELETE",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/DEF",
+  },
+  {
+    "method": "DELETE",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L9",
+  },
+]
+`;
+
+exports[`move_task > aborts the copy and cleans up the destination when a step copy fails 1`] = `
+{
+  "isError": false,
+  "result": {
+    "checklist_copied": 0,
+    "cleanup_succeeded": true,
+    "detail": "GraphError: graph_400",
+    "error": "checklist_copy_failed",
+    "from_list_id": "L1",
+    "method": "copy_delete",
+    "ok": false,
+    "task_id": "T1",
+    "to_list_id": "L2",
+    "transient": false,
+  },
+}
+`;
+
+exports[`move_task > aborts the copy and cleans up the destination when a step copy fails 2`] = `
+[
+  {
+    "method": "GET",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1?%24expand=checklistItems%2ClinkedResources%2Cattachments",
+  },
+  {
+    "body": {
+      "importance": "normal",
+      "status": "notStarted",
+      "title": "title T1",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L2/tasks",
+  },
+  {
+    "body": {
+      "displayName": "first",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L2/tasks/T2/checklistItems",
+  },
+  {
+    "method": "DELETE",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L2/tasks/T2",
+  },
+]
+`;
+
+exports[`move_task > copies then deletes when My Day is off 1`] = `
+{
+  "isError": false,
+  "result": {
+    "attachments_copied": 0,
+    "checklist_copied": 2,
+    "from_list_id": "L1",
+    "linked_resources_copied": 1,
+    "method": "copy_delete",
+    "my_day_carried": false,
+    "my_day_skipped_reason": "my_day_disabled",
+    "ok": true,
+    "previous_task_id": "T1",
+    "task_id": "T2",
+    "to_list_id": "L2",
+  },
+}
+`;
+
+exports[`move_task > copies then deletes when My Day is off 2`] = `
+[
+  {
+    "method": "GET",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1?%24expand=checklistItems%2ClinkedResources%2Cattachments",
+  },
+  {
+    "body": {
+      "importance": "normal",
+      "status": "notStarted",
+      "title": "title T1",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L2/tasks",
+  },
+  {
+    "body": {
+      "displayName": "first",
+      "isChecked": false,
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L2/tasks/T2/checklistItems",
+  },
+  {
+    "body": {
+      "displayName": "second",
+      "isChecked": true,
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L2/tasks/T2/checklistItems",
+  },
+  {
+    "body": {
+      "applicationName": "App",
+      "displayName": "Link",
+      "webUrl": "https://example.com",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L2/tasks/T2/linkedResources",
+  },
+  {
+    "method": "DELETE",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1",
+  },
+]
+`;
+
+exports[`move_task > maps a missing source task and a missing destination list 1`] = `
+{
+  "isError": true,
+  "result": {
+    "list_id": "L1",
+    "ok": false,
+    "reason": "task_not_found",
+    "task_id": "GONE",
+  },
+}
+`;
+
+exports[`move_task > maps a missing source task and a missing destination list 2`] = `
+{
+  "isError": true,
+  "result": {
+    "list_id": "NOPE",
+    "ok": false,
+    "reason": "list_not_found",
+  },
+}
+`;
+
+exports[`move_task > re-parents through Substrate and re-keys the index 1`] = `
+{
+  "isError": false,
+  "result": {
+    "from_list_id": "L1",
+    "method": "substrate_reparent",
+    "ok": true,
+    "previous_task_id": "T1",
+    "task_id": "T1",
+    "to_list_id": "L2",
+  },
+}
+`;
+
+exports[`move_task > re-parents through Substrate and re-keys the index 2`] = `
+[
+  {
+    "method": "GET",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1?%24expand=checklistItems%2ClinkedResources%2Cattachments",
+  },
+  {
+    "body": {
+      "ParentFolderId": "L2",
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L2/tasks/T1",
+  },
+]
+`;
+
+exports[`move_task > treats an ambiguous re-parent as moved when the source is gone 1`] = `
+{
+  "isError": false,
+  "result": {
+    "from_list_id": "L1",
+    "method": "substrate_reparent",
+    "note": "Source no longer present after an ambiguous re-parent; treated as moved. The task id may have changed — delta sync will reconcile.",
+    "ok": true,
+    "previous_task_id": "T1",
+    "task_id": "T1",
+    "to_list_id": "L2",
+  },
+}
+`;
+
+exports[`move_task > treats an ambiguous re-parent as moved when the source is gone 2`] = `
+[
+  {
+    "method": "GET",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1?%24expand=checklistItems%2ClinkedResources%2Cattachments",
+  },
+  {
+    "body": {
+      "ParentFolderId": "L2",
+    },
+    "method": "PATCH",
+    "url": "https://substrate.office.com/todob2/api/v1/taskfolders/L2/tasks/T1",
+  },
+  {
+    "method": "GET",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1",
+  },
+]
+`;
+
+exports[`task write tools > create_task maps a missing list and a bad date 1`] = `
+{
+  "isError": true,
+  "result": {
+    "list_id": "NOPE",
+    "ok": false,
+    "reason": "list_not_found",
+  },
+}
+`;
+
+exports[`task write tools > create_task maps a missing list and a bad date 2`] = `
+{
+  "isError": true,
+  "result": {
+    "field": "due",
+    "hint": "Use ISO 8601: a date (2026-10-20), a local date/time (2026-10-20T09:00), or one with an offset (2026-10-20T09:00:00-04:00).",
+    "ok": false,
+    "reason": "invalid_date",
+    "value": "not a date",
+  },
+}
+`;
+
+exports[`task write tools > create_task posts only supplied fields and indexes the task 1`] = `
+{
+  "isError": false,
+  "result": {
+    "link_rules": {
+      "created": [],
+      "failed": [],
+      "skipped": [],
+    },
+    "list_id": "L1",
+    "ok": true,
+    "task": {
+      "body": {
+        "content": "notes",
+        "contentType": "text",
+      },
+      "categories": [
+        "x",
+      ],
+      "createdDateTime": "2026-11-20T10:00:00Z",
+      "dueDateTime": {
+        "dateTime": "2026-11-30T00:00:00",
+        "timeZone": "UTC",
+      },
+      "id": "T1",
+      "importance": "high",
+      "lastModifiedDateTime": "2026-11-24T10:00:00Z",
+      "status": "notStarted",
+      "title": "Call Acme",
+    },
+  },
+}
+`;
+
+exports[`task write tools > create_task posts only supplied fields and indexes the task 2`] = `
+[
+  {
+    "body": {
+      "body": {
+        "content": "notes",
+        "contentType": "text",
+      },
+      "categories": [
+        "x",
+      ],
+      "dueDateTime": {
+        "dateTime": "2026-11-30T00:00:00",
+        "timeZone": "UTC",
+      },
+      "importance": "high",
+      "title": "Call Acme",
+    },
+    "method": "POST",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks",
+  },
+]
+`;
+
+exports[`task write tools > delete_task deletes and drops the index row; maps a missing task 1`] = `
+{
+  "isError": false,
+  "result": {
+    "list_id": "L1",
+    "ok": true,
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`task write tools > delete_task deletes and drops the index row; maps a missing task 2`] = `
+{
+  "isError": true,
+  "result": {
+    "list_id": "L1",
+    "ok": false,
+    "reason": "task_not_found",
+    "task_id": "GONE",
+  },
+}
+`;
+
+exports[`task write tools > update_task backdates a completed task by resetting it first 1`] = `
+{
+  "isError": false,
+  "result": {
+    "list_id": "L1",
+    "ok": true,
+    "task": {
+      "completedDateTime": {
+        "dateTime": "2026-11-01",
+        "timeZone": "UTC",
+      },
+      "createdDateTime": "2026-11-20T10:00:00Z",
+      "id": "T1",
+      "importance": "normal",
+      "lastModifiedDateTime": "2026-11-24T10:00:00Z",
+      "status": "completed",
+      "title": "title T1",
+    },
+  },
+}
+`;
+
+exports[`task write tools > update_task backdates a completed task by resetting it first 2`] = `
+[
+  {
+    "method": "GET",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1",
+  },
+  {
+    "body": {
+      "status": "notStarted",
+    },
+    "ifMatch": "e1",
+    "method": "PATCH",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1",
+  },
+  {
+    "body": {
+      "completedDateTime": {
+        "dateTime": "2026-11-01",
+        "timeZone": "UTC",
+      },
+      "status": "completed",
+    },
+    "method": "PATCH",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1",
+  },
+]
+`;
+
+exports[`task write tools > update_task patches, re-fetches for link rules on a title change, and maps 412 1`] = `
+{
+  "isError": false,
+  "result": {
+    "link_rules": {
+      "created": [],
+      "failed": [],
+      "skipped": [],
+    },
+    "list_id": "L1",
+    "ok": true,
+    "task": {
+      "createdDateTime": "2026-11-20T10:00:00Z",
+      "dueDateTime": null,
+      "id": "T1",
+      "importance": "normal",
+      "lastModifiedDateTime": "2026-11-24T10:00:00Z",
+      "status": "notStarted",
+      "title": "renamed",
+    },
+  },
+}
+`;
+
+exports[`task write tools > update_task patches, re-fetches for link rules on a title change, and maps 412 2`] = `
+{
+  "isError": true,
+  "result": {
+    "hint": "ETag mismatch — task was modified since last read. Re-fetch and retry.",
+    "list_id": "L1",
+    "ok": false,
+    "reason": "precondition_failed",
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`task write tools > update_task patches, re-fetches for link rules on a title change, and maps 412 3`] = `
+[
+  {
+    "body": {
+      "dueDateTime": null,
+      "title": "renamed",
+    },
+    "ifMatch": "W/"1"",
+    "method": "PATCH",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1",
+  },
+  {
+    "method": "GET",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1?%24expand=linkedResources",
+  },
+  {
+    "body": {
+      "importance": "low",
+    },
+    "method": "PATCH",
+    "url": "https://graph.microsoft.com/v1.0/me/todo/lists/L1/tasks/T1",
+  },
+]
+`;
+
+exports[`task write tools > update_task refuses to backdate a recurring task and maps a missing task 1`] = `
+{
+  "isError": true,
+  "result": {
+    "hint": "Completing a recurring task advances it to the next occurrence, so To Do can't keep a fixed completion date. Remove the recurrence first, or complete it without completed_date.",
+    "list_id": "L1",
+    "ok": false,
+    "reason": "recurring_completion_unsupported",
+    "task_id": "T1",
+  },
+}
+`;
+
+exports[`task write tools > update_task refuses to backdate a recurring task and maps a missing task 2`] = `
+{
+  "isError": true,
+  "result": {
+    "list_id": "L1",
+    "ok": false,
+    "reason": "task_not_found",
+    "task_id": "GONE",
+  },
+}
+`;
+
+exports[`task write tools > update_task refuses to backdate a recurring task and maps a missing task 3`] = `
+{
+  "isError": true,
+  "result": {
+    "list_id": "L1",
+    "ok": false,
+    "reason": "task_not_found",
+    "task_id": "GONE",
+  },
+}
+`;

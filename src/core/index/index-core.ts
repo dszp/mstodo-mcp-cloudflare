@@ -1,9 +1,12 @@
 import {
   TodoTaskListSchema,
+  type Attachment,
   type ChecklistItem,
+  type LinkedResource,
   type TodoTask,
   type TodoTaskList,
 } from "../graph/types";
+import { coalescing } from "../sync/coalesce";
 import {
   loadTokens,
   refreshTokensForScope,
@@ -19,12 +22,12 @@ import {
   type StoredTokens,
 } from "../auth/microsoft";
 import { ReauthRequiredError, type ReauthState } from "../auth/reauth";
-import { SubstrateClient, SubstrateError } from "../graph/substrate-client";
-import { GraphClient, GraphError, type TokenProvider } from "../graph/client";
+import { SubstrateClient, SubstrateError, type SubstrateFolder, type SubstrateFolderGroup } from "../graph/substrate-client";
+import { GraphClient, looksImmutable, GraphError, type TokenProvider } from "../graph/client";
 import { followToTerminal, type DeltaRow } from "../graph/delta";
 import { encodeCursor, decodeCursor } from "../util/cursor";
 import { log } from "../log";
-import type { AlarmScheduler, AppEnv, SqlDb, SqlValue, StateStore } from "../ports";
+import type { AlarmScheduler, AppEnv, ChangeNotifier, SqlDb, SqlValue, StateStore, Transact } from "../ports";
 import {
   SCHEMA_DDL,
   TASK_COLUMNS,
@@ -40,9 +43,20 @@ import {
   type QueryFilter,
   type SyncStatusReport,
 } from "./sql";
-import { applyMigrations } from "./migrations";
-import { loadListsConfig } from "../config/loader";
-import { shouldSkipSync } from "../config/sync-policy";
+import { applyMigrations, seedAppSettings } from "./migrations";
+import {
+  appSettingsData, changesSince, currentCursor, taskBySid, taskSids, themeImageData,
+  type FeedResult, type FeedThemeImage, type ImageStyle, type SmartList, type SmartListTheme,
+} from "./change-feed";
+import { loadListsConfig, storeListsConfig } from "../config/loader";
+import { ListsConfigSchema, type ListsConfig } from "../config/schemas";
+import {
+  applyListsConfigChange,
+  listSync,
+  shouldSkipSync,
+  type ListsConfigChange,
+  type ListSync,
+} from "../config/sync-policy";
 import {
   taskSubscriptionsEnabled,
   webhookUrl,
@@ -51,7 +65,7 @@ import {
   maxSubscriptionOpsPerCycle,
 } from "../subscriptions/gate";
 import { checklistCacheEnabled, checklistScanMaxTasksPerCycle } from "../checklist/gate";
-import { listChecklistItems } from "../graph/todo-resources";
+import { getTaskWithSubresources, listAttachments } from "../graph/todo-resources";
 import {
   createSubscription,
   renewSubscription,
@@ -109,14 +123,32 @@ export function selectDueScanLists(
 
 // Precomputed UPSERT statement (all columns; update every non-key column on
 // task_id conflict). The AFTER INSERT/UPDATE triggers keep tasks_fts in sync.
+// A list-id set bound as one JSON array parameter. Durable Object SQLite
+// allows 100 bound parameters per statement, and a roster can pass that.
+const IN_JSON = "(SELECT value FROM json_each(?))";
+
 const UPSERT_TASK_SQL = (() => {
   const cols = TASK_COLUMNS.join(", ");
   const placeholders = TASK_COLUMNS.map(() => "?").join(", ");
+  // has_checklist comes from an expanded checklistItems; a delta row or a bare
+  // write response has none, and must not erase what the scan found.
   const updates = TASK_COLUMNS.filter((c) => c !== "task_id")
-    .map((c) => `${c}=excluded.${c}`)
+    .map((c) => (c === "has_checklist" ? `${c}=COALESCE(excluded.${c}, tasks.${c})` : `${c}=excluded.${c}`))
     .join(", ");
-  return `INSERT INTO tasks (${cols}) VALUES (${placeholders}) ON CONFLICT(task_id) DO UPDATE SET ${updates}`;
+  // The WHERE keeps an older copy from overwriting a newer one: a delta page
+  // fetched before an MCP write-through landed must not revert it (the write's
+  // own Graph response carries the newer lastModifiedDateTime). Rows without a
+  // timestamp on either side update as before.
+  return `INSERT INTO tasks (${cols}) VALUES (${placeholders}) ON CONFLICT(task_id) DO UPDATE SET ${updates}
+    WHERE excluded.modified_at IS NULL OR tasks.modified_at IS NULL OR excluded.modified_at >= tasks.modified_at`;
 })();
+
+// Sub-resource backfill (section 1.1): a bigger batch and a short re-arm while
+// a backlog remains, so a one-time fill of a few thousand tasks takes tens of
+// minutes rather than days. Each task is one or two Graph GETs (plus one
+// Substrate GET when it has steps), well inside the paid plan's subrequest cap.
+const BACKFILL_TASKS_PER_CYCLE = 40;
+const BACKFILL_REARM_MS = 20_000;
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -127,7 +159,9 @@ const MAX_LIMIT = 200;
 // subrequests. The My Day scan only runs on calm (non-mid-cycle) cycles and is
 // itself capped at MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE (default 6) + 1 substrate
 // mint, so even a calm cycle that fully drained its task pages stays ≈ 48 — still
-// under the ceiling with headroom.
+// under the ceiling with headroom. The sidebar appearance read
+// (#refreshListAppearance) adds two Substrate GETs at most once per
+// DELTA_SYNC_INTERVAL_MIN, plus once when a new list appears.
 const ROSTER_MAX_PAGES = 10;
 const MAX_PAGES_PER_CYCLE = 30;
 // While a baseline is still draining, re-arm quickly; otherwise wait the cron
@@ -152,6 +186,22 @@ interface SyncStateRow {
 // a string). It is NOT a "lists"/"tasks:*"/"myday:*" resource, so syncStatus'
 // generic report loop ignores it — it only surfaces via #webhookHealth().
 const WEBHOOK_HEALTH_KEY = "meta:webhook";
+
+// Reserved sync_state row for the sidebar appearance read (#refreshListAppearance):
+// last_synced_at = the last successful read. Like meta:webhook, syncStatus
+// doesn't report it.
+const APPEARANCE_STATE_KEY = "meta:appearance";
+// StateStore key for the read's backoff after failures, and its ceiling.
+const APPEARANCE_BACKOFF_KEY = "appearance:backoff";
+// When the first sidebar read succeeded (ms). Every group existing then got a
+// row stamped with that time, so a retried group create can tell old groups
+// from new only for an attempt made after it (ops/lists.ts).
+const APPEARANCE_FIRST_READ_KEY = "appearance:first_read_at";
+const APPEARANCE_BACKOFF_MAX_MS = 6 * 3_600_000;
+interface AppearanceBackoff {
+  failures: number;
+  next_at: number;
+}
 
 // Delivery-health view of the Graph change-notification (webhook) path. The
 // signal that distinguishes "subscriptions exist (coverage ok)" from
@@ -219,6 +269,10 @@ export interface SubscriptionStatus {
 // DO-storage keys for the MCP grant epoch and the re-auth flag (see authState).
 const AUTH_EPOCH_KEY = "auth:epoch";
 const REAUTH_KEY = "auth:reauth";
+// The pending lists config (refreshListSync) and how long it outranks KV:
+// KV's 60 s worst-case staleness after a write, plus margin.
+const PENDING_LISTS_CONFIG_KEY = "config:lists:pending";
+const LISTS_CONFIG_PENDING_MS = 90_000;
 
 export class IndexCore implements TokenProvider {
   readonly #sql: SqlDb;
@@ -226,8 +280,36 @@ export class IndexCore implements TokenProvider {
   readonly #alarms: AlarmScheduler;
   readonly #env: AppEnv;
 
-  constructor(deps: { sql: SqlDb; state: StateStore; alarms: AlarmScheduler; env: AppEnv }) {
+  readonly #transact: Transact;
+  // Set by the sub-resource scan while more than one batch is waiting.
+  #scanBacklog = false;
+  readonly #notifier: ChangeNotifier | null;
+  // The highest change-log seq announced to push clients.
+  #announcedSeq = -1;
+  // Lists named by webhooks, or whose sync setting just changed, since the
+  // last sync cycle; synced first.
+  #hotLists = new Set<string>();
+  // The last lists config handed to refreshListSync (see there). undefined
+  // until read back from storage.
+  #pendingListsConfig: { cfg: ListsConfig; at: number } | null | undefined = undefined;
+  // Serializes updateListsConfig.
+  #configChain: Promise<void> = Promise.resolve();
+  // Per list, how many times #purgeSkippedList has emptied it. #syncResource
+  // compares it across its Graph fetch (see there).
+  #purges = new Map<string, number>();
+
+  constructor(deps: {
+    sql: SqlDb;
+    transact: Transact;
+    state: StateStore;
+    alarms: AlarmScheduler;
+    env: AppEnv;
+    notifier?: ChangeNotifier;
+  }) {
+    // One message per burst of changes, not one per write (sync/coalesce.ts).
+    this.#notifier = deps.notifier ? coalescing(deps.notifier) : null;
     this.#sql = deps.sql;
+    this.#transact = deps.transact;
     this.#state = deps.state;
     this.#alarms = deps.alarms;
     this.#env = deps.env;
@@ -240,7 +322,16 @@ export class IndexCore implements TokenProvider {
     this.#sql.exec(SCHEMA_DDL);
     // Versioned migrations: ALTER existing/new DBs up to the latest schema.
     // Idempotent across boots (gated by the stored schema_meta version).
-    applyMigrations(this.#sql);
+    const { from, applied } = applyMigrations(this.#sql);
+    // A migration that cleared or reset sync state (v4, v7) must start the next cycle
+    // itself; otherwise the re-baseline waits for whatever alarm was set before
+    // the deploy (up to DELTA_SYNC_INTERVAL_MIN). Seen in production 2026-11-24.
+    // A fresh database (from 0) has nothing to rebuild; ensureSyncing starts it.
+    if (from > 0 && (applied.includes(4) || applied.includes(7))) {
+      void this.#alarms.setAlarm(Date.now() + 1000).catch((e) =>
+        log.warn("migration_alarm_failed", { error: String(e) }),
+      );
+    }
   }
 
   // -- MCP grant epoch + re-auth state --------------------------------------
@@ -269,6 +360,7 @@ export class IndexCore implements TokenProvider {
   async revokeAllGrants(): Promise<string> {
     const epoch = await this.#newEpoch();
     log.warn("mcp_grants_revoked", {});
+    this.#notifier?.closeAll("revoked");
     return epoch;
   }
 
@@ -320,11 +412,19 @@ export class IndexCore implements TokenProvider {
   // mint or an identity switch.
   #substrateToken: { access_token: string; expires_at: number } | null = null;
   #substrateUnavailable = false;
+  // Set when Substrate answers the sidebar read with a 403 (#refreshListAppearance).
+  // Separate from #substrateUnavailable: it turns off only list appearance.
+  // Cleared by an identity switch or a restart of the object.
+  #appearanceUnavailable = false;
 
   // Bumped by resetIdentity() on an owner switch. Captured at the start of each
   // refresh so a refresh that resolves AFTER the switch can detect it and refuse
   // to persist the prior account's tokens over the new identity's (H4).
   #identityGeneration = 0;
+  // Bumped by every sidebar store from a write (storeFolderAppearance,
+  // storeFolderGroup, removeFolderGroup). A sidebar read that sees it change
+  // between its GETs and its apply may predate the write, so it is dropped.
+  #sidebarWriteGen = 0;
 
   // Returns a valid access token, refreshing only if the stored one is within
   // REFRESH_SKEW_MS of expiry. The agent already gates on freshness before
@@ -462,9 +562,73 @@ export class IndexCore implements TokenProvider {
   }
 
   // -- Task CRUD ------------------------------------------------------------
+  // A task in an excluded list is never mirrored (section 1.2), even when a
+  // write tool just created or changed it in Graph: its row (if any) goes,
+  // and the feed sends a deletion. The same guard is on every write-through
+  // below that names a list.
   upsertTask(task: TodoTask, listId: string): void {
+    if (this.#isExcluded(listId)) {
+      this.deleteTask(task.id);
+      return;
+    }
     const row = taskToRow(task, listId);
-    this.#sql.exec(UPSERT_TASK_SQL, ...TASK_COLUMNS.map((c) => row[c]));
+    const modified = task.lastModifiedDateTime ? Date.parse(task.lastModifiedDateTime) : NaN;
+    this.#clocked("task", task.id, Number.isNaN(modified) ? Date.now() : modified, () =>
+      this.#sql.exec(UPSERT_TASK_SQL, ...TASK_COLUMNS.map((c) => row[c])),
+    );
+    this.#stampTask(task.id);
+  }
+
+  // Runs a write to one entity's row and stamps the field clock of each
+  // clocked field it changed with max(existing, atMs). A row the write
+  // inserted stamps nothing: no app edit can predate the entity's arrival,
+  // and stamping a create's defaults would supersede the app's own queued
+  // edits to them.
+  //
+  // Lists, links and a step's title carry no modification time from Graph,
+  // so their changes are stamped when this server sees them (a write-through,
+  // or for one made in To Do, the next roster sync or sub-resource scan).
+  // That can be later than the To Do edit, so a queued app edit made in
+  // between loses to it: a bias toward To Do, accepted.
+  #clocked<T>(kind: string, graphId: string, atMs: number | ((field: string) => number), write: () => T): T {
+    const spec = CLOCKED[kind];
+    const cols = [...new Set(Object.values(spec.fields).flat())];
+    const read = () =>
+      this.#sql
+        .exec<Record<string, SqlValue>>(`SELECT ${cols.join(", ")} FROM ${spec.table} WHERE ${spec.key} = ?`, graphId)
+        .toArray()[0];
+    const before = read();
+    const out = write();
+    if (!before) return out;
+    const after = read();
+    if (!after) return out;
+    const changed = Object.entries(spec.fields)
+      .filter(([, columns]) => columns.some((c) => before[c] !== after[c]))
+      .map(([field]) => field);
+    if (changed.length === 0) return out;
+    const sid = this.#sql
+      .exec<{ sid: string }>("SELECT sid FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
+      .toArray()[0]?.sid;
+    if (!sid) return out;
+    for (const field of changed) {
+      this.#sql.exec(
+        `INSERT INTO field_clock (kind, sid, field, at_ms) VALUES (?, ?, ?, ?)
+         ON CONFLICT(kind, sid, field) DO UPDATE SET at_ms = max(at_ms, excluded.at_ms)`,
+        kind, sid, field, typeof atMs === "number" ? atMs : atMs(field),
+      );
+    }
+    return out;
+  }
+
+  // While its list is re-baselining, mark a task as seen by this baseline so
+  // the sweep keeps it. Covers delta rows and write-throughs alike (section
+  // 3.3). A no-op when no baseline is in progress.
+  #stampTask(taskId: string): void {
+    this.#sql.exec(
+      `UPDATE tasks SET baseline_gen = s.sweep_gen FROM sync_state s
+        WHERE tasks.task_id = ? AND s.resource = 'tasks:' || tasks.list_id AND s.sweep_gen IS NOT NULL`,
+      taskId,
+    );
   }
 
   deleteTask(taskId: string): void {
@@ -472,6 +636,60 @@ export class IndexCore implements TokenProvider {
     // Cascade: no FK, so drop the task's checklist rows explicitly (FTS follows
     // via the AFTER DELETE trigger). Cheap no-op when the cache is unused.
     this.#sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
+    this.#sql.exec("DELETE FROM linked_resources WHERE task_id = ?", taskId);
+    this.#sql.exec("DELETE FROM attachments WHERE task_id = ?", taskId);
+  }
+
+  // A task moved to another list, as one transaction. Replaces the old
+  // delete-then-upsert re-key, which dropped the task's steps and My Day fields
+  // in between (and would read as a deletion to a change feed). newTaskId is
+  // the ID after the move when it differs (plain Graph IDs change on a
+  // re-parent); omit it when the ID is stable. If the destination is already
+  // mirrored, the source's row (and sid) replaces it; see below.
+  moveTask(taskId: string, toListId: string, newTaskId?: string): void {
+    this.#transact(() => {
+      if (this.#isExcluded(toListId)) {
+        // Moved out of the mirror: a deletion, like any task of that list.
+        this.deleteTask(taskId);
+        if (newTaskId && newTaskId !== taskId) this.deleteTask(newTaskId);
+        return;
+      }
+      const to = newTaskId ?? taskId;
+      const dest =
+        to === taskId
+          ? undefined
+          : this.#sql.exec<Record<string, SqlValue>>("SELECT * FROM tasks WHERE task_id = ?", to).toArray()[0];
+      if (dest) {
+        // The destination is already mirrored under a sid of its own (delta, or
+        // a write-through, got there first). The task's sid must follow the
+        // move, so that row goes (clients that saw its sid get a deletion) and
+        // its map row lets go of the Graph ID; its columns are copied onto the
+        // re-keyed row below, keeping the source's Substrate-only fields where
+        // the destination has none.
+        this.#sql.exec("DELETE FROM tasks WHERE task_id = ?", to);
+        for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+          this.#sql.exec(`DELETE FROM ${table} WHERE task_id = ?`, to);
+        }
+        this.#sql.exec("UPDATE entity_map SET graph_id = NULL WHERE kind = 'task' AND graph_id = ?", to);
+      }
+      // Re-point the task's stable ID first, so the change log keeps the same
+      // sid when the row's Graph ID changes.
+      if (to !== taskId) {
+        this.#sql.exec("UPDATE entity_map SET graph_id = ? WHERE kind = 'task' AND graph_id = ?", to, taskId);
+      }
+      this.#sql.exec("UPDATE tasks SET task_id = ?, list_id = ? WHERE task_id = ?", to, toListId, taskId);
+      if (dest) {
+        const substrateOnly = new Set(["committed_day", "committed_order", "order_datetime", "postponed_day"]);
+        const cols = Object.keys(dest).filter((k) => k !== "task_id" && k !== "list_id" && !(substrateOnly.has(k) && dest[k] == null));
+        if (cols.length) {
+          this.#sql.exec(`UPDATE tasks SET ${cols.map((k) => `${k} = ?`).join(", ")} WHERE task_id = ?`, ...cols.map((k) => dest[k]), to);
+        }
+      }
+      this.#stampTask(to);
+      for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+        this.#sql.exec(`UPDATE ${table} SET task_id = ?, list_id = ? WHERE task_id = ?`, to, toListId, taskId);
+      }
+    });
   }
 
   // Best-effort flag bump from a sub-resource mutation result (e.g. a checklist
@@ -543,14 +761,20 @@ export class IndexCore implements TokenProvider {
   // row isn't indexed yet — the items still land and the next delta creates the
   // task row. Synchronous (atomic) like the other write-throughs.
   replaceChecklistItems(taskId: string, listId: string, items: ChecklistItem[]): void {
-    this.#sql.exec("DELETE FROM checklist_items WHERE task_id = ?", taskId);
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
+    // Diff, not delete-and-reinsert: an unchanged step writes nothing, so the
+    // change log isn't bumped on every scan (section 18.6).
+    this.#deleteMissing("checklist_items", "item_id", taskId, items.map((i) => i.id));
     for (const item of items) {
       const row = checklistItemToRow(item, taskId, listId);
-      this.#sql.exec(
+      this.#clocked("step", item.id, stepClock(item), () => this.#sql.exec(
         `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
-           VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})`,
+           VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})
+         ON CONFLICT(item_id) DO UPDATE SET
+           task_id=excluded.task_id, list_id=excluded.list_id, display_name=excluded.display_name,
+           is_checked=excluded.is_checked, created_at=excluded.created_at, checked_at=excluded.checked_at`,
         ...CHECKLIST_COLUMNS.map((c) => row[c]),
-      );
+      ));
     }
     this.#sql.exec(
       "UPDATE tasks SET checklist_synced_at = ?, has_checklist = ? WHERE task_id = ?",
@@ -560,10 +784,94 @@ export class IndexCore implements TokenProvider {
     );
   }
 
+  // Delete a task's rows in `table` whose key isn't in `keep`.
+  #deleteMissing(table: string, key: string, taskId: string, keep: string[]): void {
+    const have = this.#sql
+      .exec<{ k: string }>(`SELECT ${key} k FROM ${table} WHERE task_id = ?`, taskId)
+      .toArray()
+      .map((r) => r.k);
+    const keepSet = new Set(keep);
+    for (const k of have) if (!keepSet.has(k)) this.#sql.exec(`DELETE FROM ${table} WHERE ${key} = ?`, k);
+  }
+
+  // Authoritative replace of a task's linked resources from a fresh Graph
+  // fetch (the sub-resource scan), as a diff.
+  replaceLinkedResources(taskId: string, listId: string, links: LinkedResource[]): void {
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
+    this.#deleteMissing("linked_resources", "link_id", taskId, links.map((l) => l.id));
+    for (const l of links) {
+      this.#clocked("link", l.id, Date.now(), () => this.#sql.exec(
+        `INSERT INTO linked_resources (link_id, task_id, list_id, web_url, display_name, application_name, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(link_id) DO UPDATE SET task_id=excluded.task_id, list_id=excluded.list_id,
+           web_url=excluded.web_url, display_name=excluded.display_name,
+           application_name=excluded.application_name, external_id=excluded.external_id`,
+        l.id, taskId, listId, l.webUrl ?? null, l.displayName ?? null, l.applicationName ?? null, l.externalId ?? null,
+      ));
+    }
+  }
+
+  // Authoritative replace of a task's attachment metadata (no bytes), as a diff.
+  replaceAttachments(taskId: string, listId: string, atts: Attachment[]): void {
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
+    this.#deleteMissing("attachments", "attachment_id", taskId, atts.map((a) => a.id));
+    for (const a of atts) {
+      const modified = a.lastModifiedDateTime ? Date.parse(a.lastModifiedDateTime) : NaN;
+      this.#sql.exec(
+        `INSERT INTO attachments (attachment_id, task_id, list_id, name, size, content_type, kind, modified_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(attachment_id) DO UPDATE SET task_id=excluded.task_id, list_id=excluded.list_id,
+           name=excluded.name, size=excluded.size, content_type=excluded.content_type,
+           kind=excluded.kind, modified_at=excluded.modified_at`,
+        a.id, taskId, listId, a.name ?? null, a.size ?? null, a.contentType ?? null,
+        a["@odata.type"] === "#microsoft.graph.taskReferenceAttachment" ? "reference" : "file",
+        Number.isNaN(modified) ? null : modified,
+      );
+    }
+  }
+
+  // One attachment this server just attached through Graph (an app upload,
+  // section 5.6), recorded at once so the feed carries it before the next
+  // sub-resource scan.
+  // Records an attachment this server just made through Graph. Only on a task
+  // the mirror has: a row for any other task (one that never arrives, or was
+  // deleted before delta saw it) would outlive it, and keep its blob copy.
+  putAttachment(taskId: string, listId: string, a: { id: string; name: string; size: number; content_type: string }): void {
+    if (this.#isExcluded(listId)) return;
+    if (!this.#sql.exec("SELECT 1 FROM tasks WHERE task_id = ?", taskId).toArray().length) return;
+    this.#sql.exec(
+      `INSERT INTO attachments (attachment_id, task_id, list_id, name, size, content_type, kind, modified_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'file', ?)
+       ON CONFLICT(attachment_id) DO NOTHING`,
+      a.id, taskId, listId, a.name, a.size, a.content_type, Date.now(),
+    );
+  }
+
+  deleteAttachment(attachmentId: string): void {
+    this.#sql.exec("DELETE FROM attachments WHERE attachment_id = ?", attachmentId);
+  }
+
   // Mark a task's checklist stale so the next budgeted scan re-fetches it. The
-  // incremental engine: the delta-apply path nulls this whenever a task changes
+  // incremental engine: the delta-apply path calls this whenever a task changes
   // (checklist edits bump the task's lastModifiedDateTime → ride $delta).
+  //
+  // checklist_synced_at: NULL = never fetched; > 0 = fetched then; < 0 = was
+  // fetched at -value and is due again. A task fetched before keeps counting
+  // as complete in the change feed while it waits: what changes on the re-fetch
+  // logs the task itself (the step/link/attachment triggers), and the marker is
+  // not a logged column, so a NULL here would leave clients holding
+  // subresources_complete: false with no later row to correct it.
   markChecklistDirty(taskId: string): void {
+    this.#sql.exec(
+      "UPDATE tasks SET checklist_synced_at = -abs(checklist_synced_at) WHERE task_id = ? AND checklist_synced_at IS NOT NULL",
+      taskId,
+    );
+  }
+
+  // The task's cached steps no longer match Graph's (a copy-move re-keyed the
+  // source's rows onto the copy, whose step IDs differ): report it as not
+  // fetched until the scan replaces them.
+  forgetSubresources(taskId: string): void {
     this.#sql.exec("UPDATE tasks SET checklist_synced_at = NULL WHERE task_id = ?", taskId);
   }
 
@@ -581,15 +889,16 @@ export class IndexCore implements TokenProvider {
   // the self-induced edit also rides delta → markChecklistDirty → authoritative
   // re-fetch next scan.
   upsertChecklistItem(taskId: string, listId: string, item: ChecklistItem): void {
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
     const row = checklistItemToRow(item, taskId, listId);
-    this.#sql.exec(
+    this.#clocked("step", item.id, stepClock(item), () => this.#sql.exec(
       `INSERT INTO checklist_items (${CHECKLIST_COLUMNS.join(", ")})
          VALUES (${CHECKLIST_COLUMNS.map(() => "?").join(", ")})
        ON CONFLICT(item_id) DO UPDATE SET
          display_name=excluded.display_name, is_checked=excluded.is_checked,
          created_at=excluded.created_at, checked_at=excluded.checked_at`,
       ...CHECKLIST_COLUMNS.map((c) => row[c]),
-    );
+    ));
     this.#sql.exec("UPDATE tasks SET has_checklist = 1 WHERE task_id = ?", taskId);
   }
 
@@ -602,6 +911,45 @@ export class IndexCore implements TokenProvider {
       "DELETE FROM checklist_items WHERE item_id = ? AND task_id = ?",
       itemId,
       taskId,
+    );
+  }
+
+  // Write-throughs for the link ops, the linked-resource twins of the two
+  // above: without them a link the sync API just created has a sid but no row,
+  // so resolveSids reports it not live until the next sub-resource scan, and an
+  // edit sent right after the create is refused as deleted.
+  upsertLinkedResource(taskId: string, listId: string, link: LinkedResource): void {
+    if (this.#isExcluded(listId)) return; // not mirrored; see upsertTask
+    this.#clocked("link", link.id, Date.now(), () => this.#sql.exec(
+      `INSERT INTO linked_resources (link_id, task_id, list_id, web_url, display_name, application_name, external_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(link_id) DO UPDATE SET web_url=excluded.web_url, display_name=excluded.display_name,
+         application_name=excluded.application_name, external_id=excluded.external_id`,
+      link.id, taskId, listId, link.webUrl ?? null, link.displayName ?? null, link.applicationName ?? null, link.externalId ?? null,
+    ));
+  }
+
+  // A step's manual order after a reorder through this server (Substrate is
+  // its only store), so the change is logged and pushed like the scan's.
+  setStepOrder(taskId: string, itemId: string, order: string | null): void {
+    this.#sql.exec(
+      "UPDATE checklist_items SET order_datetime = ? WHERE item_id = ? AND task_id = ? AND order_datetime IS NOT ?",
+      order, itemId, taskId, order,
+    );
+  }
+
+  deleteLinkedResource(taskId: string, linkId: string): void {
+    this.#sql.exec("DELETE FROM linked_resources WHERE link_id = ? AND task_id = ?", linkId, taskId);
+  }
+
+  // The task and list a mirrored step or link belongs to: the sync API names
+  // a step or link by its own sid, while Graph addresses it under its task.
+  findParentOf(kind: "step" | "link", graphId: string): { task_id: string; list_id: string } | null {
+    const [table, key] = kind === "step" ? ["checklist_items", "item_id"] : ["linked_resources", "link_id"];
+    return (
+      this.#sql
+        .exec<{ task_id: string; list_id: string }>(`SELECT task_id, list_id FROM ${table} WHERE ${key} = ?`, graphId)
+        .toArray()[0] ?? null
     );
   }
 
@@ -621,23 +969,28 @@ export class IndexCore implements TokenProvider {
   // ("needs fetch"), excluding skipped lists, newest-changed first (recently
   // touched tasks are the likeliest to be queried), capped per cycle. Completed
   // tasks are deliberately left out — they lazy-fill only if a query touches them.
+  // Tasks whose steps, links and attachments still need fetching. Open tasks
+  // come first, then completed ones (the server becomes the only copy after
+  // Graph, so history is filled in too). Lists in openOnlyListIds (archive
+  // lists) contribute open tasks only; skipListIds contribute nothing.
   selectDueChecklistTasks(
     max: number,
     skipListIds: string[],
+    openOnlyListIds: string[] = [],
   ): Array<{ task_id: string; list_id: string }> {
-    const skipClause =
-      skipListIds.length > 0
-        ? `AND list_id NOT IN (${skipListIds.map(() => "?").join(", ")})`
-        : "";
+    // One bound JSON array per list set (IN_JSON), not one parameter per list.
+    const skipClause = skipListIds.length > 0 ? `AND list_id NOT IN ${IN_JSON}` : "";
+    const openOnlyClause = openOnlyListIds.length > 0 ? `AND (status <> 'completed' OR list_id NOT IN ${IN_JSON})` : "";
     return this.#sql
       .exec(
         `SELECT task_id, list_id FROM tasks
-          WHERE checklist_synced_at IS NULL
-            AND status <> 'completed'
+          WHERE (checklist_synced_at IS NULL OR checklist_synced_at < 0)
             ${skipClause}
-          ORDER BY modified_at DESC
+            ${openOnlyClause}
+          ORDER BY (status = 'completed'), modified_at DESC
           LIMIT ?`,
-        ...skipListIds,
+        ...(skipListIds.length > 0 ? [JSON.stringify(skipListIds)] : []),
+        ...(openOnlyListIds.length > 0 ? [JSON.stringify(openOnlyListIds)] : []),
         max,
       )
       .toArray() as unknown as Array<{ task_id: string; list_id: string }>;
@@ -693,7 +1046,7 @@ export class IndexCore implements TokenProvider {
   // -- List roster ----------------------------------------------------------
   upsertList(list: TodoTaskList): void {
     const r = listToRow(list);
-    this.#sql.exec(
+    this.#clocked("list", r.list_id, Date.now(), () => this.#sql.exec(
       `INSERT INTO lists (list_id, display_name, wellknown, is_owner, is_shared)
          VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(list_id) DO UPDATE SET
@@ -704,6 +1057,11 @@ export class IndexCore implements TokenProvider {
       r.wellknown,
       r.is_owner,
       r.is_shared,
+    ));
+    this.#sql.exec(
+      `UPDATE lists SET baseline_gen = s.sweep_gen FROM sync_state s
+        WHERE lists.list_id = ? AND s.resource = 'lists' AND s.sweep_gen IS NOT NULL`,
+      r.list_id,
     );
   }
 
@@ -711,9 +1069,128 @@ export class IndexCore implements TokenProvider {
     // Drop the list and its tasks (FTS rows cascade via the AFTER DELETE
     // trigger as each task row is removed).
     this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
+    for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+      this.#sql.exec(`DELETE FROM ${table} WHERE list_id = ?`, listId);
+    }
     this.#sql.exec("DELETE FROM lists WHERE list_id = ?", listId);
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
+  }
+
+  // Copy each roster list's sync setting (section 1.2) onto its row, where the
+  // change feed reads it. Writes only rows whose setting changed; the v11
+  // trigger logs those lists again. Returns the lists that changed.
+  //
+  // A change is stamped on the list's `sync` field clock at the time it is
+  // stored, whichever path made it (set_list_config, the app, a config edit
+  // the sync cycle picked up), so a queued app edit older than it loses
+  // (section 6). The first value recorded for a list is not a change and
+  // stamps nothing.
+  #storeListSync(rows: ListRow[], cfg: ListsConfig): Array<{ list_id: string; from: string | null; to: ListSync }> {
+    const changed: Array<{ list_id: string; from: string | null; to: ListSync }> = [];
+    const now = Date.now();
+    for (const l of rows) {
+      const to = listSync(l, cfg);
+      const from = l.sync ?? null;
+      if (from === to) continue;
+      const write = () => this.#sql.exec("UPDATE lists SET sync = ? WHERE list_id = ?", to, l.list_id);
+      if (from === null) write();
+      else this.#clocked("list", l.list_id, now, write);
+      changed.push({ list_id: l.list_id, from, to });
+    }
+    return changed;
+  }
+
+  // Apply a lists config now rather than at the next cycle: record every
+  // list's setting, drop the mirrored rows of a list that became excluded (its
+  // tasks leave the feed as deletion records), and sync the changed lists
+  // first in a cycle that starts now, so a list switched back on is baselined
+  // at once and its tasks come back under their old sids.
+  //
+  // The caller hands over the config it just wrote instead of this re-reading
+  // KV: a KV read can serve the previous value for up to 60 s after a write.
+  // For the same reason the config is kept here as pending, and #listsConfig()
+  // prefers it to KV for LISTS_CONFIG_PENDING_MS, so the next sync cycle can't
+  // read the old value and flip the setting back (purging or re-baselining a
+  // list for nothing). Past that window KV has caught up and is read again.
+  async refreshListSync(cfg: ListsConfig): Promise<{ changed: number }> {
+    // Set in memory before any await, so a cycle that is reading KV right now
+    // sees it when its read returns.
+    const pending = { cfg, at: Date.now() };
+    this.#pendingListsConfig = pending;
+    await this.#state.put(PENDING_LISTS_CONFIG_KEY, pending);
+    const changed = this.#transact(() => {
+      const c = this.#storeListSync(this.listLists(), cfg);
+      for (const x of c) if (x.to === "excluded") this.#purgeSkippedList(x.list_id);
+      return c;
+    });
+    // Hot lists also make alarm() re-arm at once when this lands mid-cycle,
+    // instead of being pushed back a whole interval by the cycle's own re-arm.
+    for (const x of changed) this.#hotLists.add(x.list_id);
+    if (changed.length > 0) await this.#alarms.setAlarm(Date.now() + 1);
+    return { changed: changed.length };
+  }
+
+  // The one write path for config:lists (set_list_config, set_list_alias,
+  // list_lists pinning, the app's list.update and list.create): read, apply
+  // the change, write, apply the result here. Running it in the index
+  // serializes the writers, and the base is the pending config when it is
+  // newer than what KV may still serve, so one writer can't revert another's
+  // change with a stale read.
+  updateListsConfig(change: ListsConfigChange): Promise<ListsConfig> {
+    const run = async () => {
+      const base = await this.#listsConfig();
+      const next = ListsConfigSchema.parse(applyListsConfigChange(base, change));
+      await storeListsConfig(this.#env, next);
+      await this.refreshListSync(next);
+      return next;
+    };
+    const p = this.#configChain.then(run, run);
+    this.#configChain = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    return p;
+  }
+
+  // config:lists as this index should act on it: KV, unless a config handed
+  // to refreshListSync is recent enough that KV may not show it yet.
+  async #listsConfig(): Promise<ListsConfig> {
+    const kv = await loadListsConfig(this.#env);
+    if (this.#pendingListsConfig === undefined) {
+      const stored = (await this.#state.get<{ cfg: ListsConfig; at: number }>(PENDING_LISTS_CONFIG_KEY)) ?? null;
+      // refreshListSync may have run during the read; its value is newer.
+      if (this.#pendingListsConfig === undefined) this.#pendingListsConfig = stored;
+    }
+    const p = this.#pendingListsConfig;
+    return p && Date.now() - p.at < LISTS_CONFIG_PENDING_MS ? ListsConfigSchema.parse(p.cfg) : kv;
+  }
+
+  // The config the index acts on, for callers outside it (the MCP tools). A
+  // KV read alone can lag a change made through updateListsConfig by up to a
+  // minute (KV is eventually consistent), so a tool would show the old setting.
+  listsConfig(): Promise<ListsConfig> {
+    return this.#listsConfig();
+  }
+
+  // The list's stored setting is excluded. Read from the row each time, not
+  // from a config captured earlier, since refreshListSync can change it while
+  // a sync cycle is waiting on Graph.
+  #isExcluded(listId: string): boolean {
+    return this.#sql.exec("SELECT 1 FROM lists WHERE list_id = ? AND sync = 'excluded'", listId).toArray().length > 0;
+  }
+
+  // Excluded lists, which the feed never carries, so the app can offer to
+  // switch one back on (section 1.2). `id` is the list's sid.
+  excludedLists(): Array<{ id: string; name: string | null; wellknown: string | null }> {
+    return this.#sql
+      .exec<{ id: string; name: string | null; wellknown: string | null }>(
+        `SELECT m.sid AS id, l.display_name AS name, l.wellknown
+           FROM lists l JOIN entity_map m ON m.kind = 'list' AND m.graph_id = l.list_id
+          WHERE l.sync = 'excluded'
+          ORDER BY l.display_name`,
+      )
+      .toArray();
   }
 
   // Roster reads — the `lists` table is the authoritative roster.
@@ -788,14 +1265,11 @@ export class IndexCore implements TokenProvider {
       return;
     }
 
-    // Which lists SHOULD have a subscription: the non-skipped roster.
-    const cfg = await loadListsConfig(this.#env);
+    // Which lists SHOULD have a subscription: todo lists. Reference lists sync
+    // on the timer only, and excluded lists aren't mirrored (section 1.2).
+    const cfg = await this.#listsConfig();
     const rosterRows = this.listLists();
-    const wanted = new Set(
-      rosterRows
-        .filter((l) => !shouldSkipSync({ list_id: l.list_id, wellknown: l.wellknown }, cfg))
-        .map((l) => l.list_id),
-    );
+    const wanted = new Set(rosterRows.filter((l) => listSync(l, cfg) === "todo").map((l) => l.list_id));
 
     const graph = new GraphClient(this);
     let budget = maxSubscriptionOpsPerCycle(this.#env);
@@ -925,12 +1399,8 @@ export class IndexCore implements TokenProvider {
   async subscriptionStatus(opts: { includeRaw?: boolean } = {}): Promise<SubscriptionStatus> {
     const enabled = taskSubscriptionsEnabled(this.#env);
     const url = webhookUrl(this.#env);
-    const cfg = await loadListsConfig(this.#env);
-    const wanted = new Set(
-      this.listLists()
-        .filter((l) => !shouldSkipSync({ list_id: l.list_id, wellknown: l.wellknown }, cfg))
-        .map((l) => l.list_id),
-    );
+    const cfg = await this.#listsConfig();
+    const wanted = new Set(this.listLists().filter((l) => listSync(l, cfg) === "todo").map((l) => l.list_id));
     const records = this.getSubscriptions();
     const recByList = new Set(records.map((r) => r.list_id));
 
@@ -1147,8 +1617,19 @@ export class IndexCore implements TokenProvider {
   // deltaLink — i.e. the DO holds the authoritative tail and reads can be served
   // from it. A mid-cycle (next_link set, delta_link still null) baseline is NOT
   // yet authoritative, so callers fall back to live Graph.
+  // Served from the index once a baseline has completed. A list that is being
+  // re-baselined (mark and sweep, section 3.3) keeps serving its rows: it has
+  // completed a baseline before (last_synced_at) and nothing was dropped.
   isListSynced(listId: string): boolean {
-    return !!this.#getSyncState(`tasks:${listId}`)?.delta_link;
+    const resource = `tasks:${listId}`;
+    const st = this.#getSyncState(resource);
+    if (st?.delta_link) return true;
+    if (st?.last_synced_at == null) return false;
+    return (
+      this.#sql
+        .exec<{ g: number | null }>("SELECT sweep_gen g FROM sync_state WHERE resource = ?", resource)
+        .toArray()[0]?.g != null
+    );
   }
 
   // -- query / search -------------------------------------------------------
@@ -1162,8 +1643,8 @@ export class IndexCore implements TokenProvider {
     const params: (string | number)[] = [];
 
     if (f.lists && f.lists.length > 0) {
-      where.push(`list_id IN (${f.lists.map(() => "?").join(", ")})`);
-      params.push(...f.lists);
+      where.push(`list_id IN ${IN_JSON}`);
+      params.push(JSON.stringify(f.lists));
     }
     if (f.status && f.status.length > 0) {
       where.push(`status IN (${f.status.map(() => "?").join(", ")})`);
@@ -1259,8 +1740,8 @@ export class IndexCore implements TokenProvider {
     const tFilters: string[] = [];
     const tParams: (string | number)[] = [];
     if (opts.lists && opts.lists.length > 0) {
-      tFilters.push(`t.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
-      tParams.push(...opts.lists);
+      tFilters.push(`t.list_id IN ${IN_JSON}`);
+      tParams.push(JSON.stringify(opts.lists));
     }
     if (opts.status && opts.status.length > 0) {
       tFilters.push(`t.status IN (${opts.status.map(() => "?").join(", ")})`);
@@ -1335,15 +1816,15 @@ export class IndexCore implements TokenProvider {
     }
     if (pendingOnly) where.push("ci.is_checked = 0");
     if (opts.lists && opts.lists.length > 0) {
-      where.push(`ci.list_id IN (${opts.lists.map(() => "?").join(", ")})`);
-      params.push(...opts.lists);
+      where.push(`ci.list_id IN ${IN_JSON}`);
+      params.push(JSON.stringify(opts.lists));
     }
 
     const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
     const order = hasQuery ? "rank" : "ci.created_at ASC NULLS LAST, ci.item_id ASC";
     const sql = `SELECT ci.*, t.title AS task_title, t.status AS task_status
                    FROM ${from}
-                  WHERE ${where.join(" AND ")}
+                  ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
                   ORDER BY ${order} LIMIT ?`;
     const rows = this.#sql.exec(sql, ...params, limit).toArray() as unknown as ChecklistSearchRow[];
     return { rows };
@@ -1411,6 +1892,580 @@ export class IndexCore implements TokenProvider {
   }
 
   // -- Ops ------------------------------------------------------------------
+  // ---- Client sync API, read side (docs/SYNC-API.md sections 4 and 14.1) ----
+
+  // The current position of the change log, for a push client's hello.
+  syncCursor(): string {
+    return currentCursor(this.#sql);
+  }
+
+  // Tells push clients the log moved, at most once per new seq. The hosts call
+  // it after every RPC (announcing() below); the sync cycle also calls it after
+  // each resource, so a webhook-driven edit doesn't wait for the whole walk.
+  announceChanges(): void {
+    if (!this.#notifier) return;
+    const cursor = currentCursor(this.#sql);
+    const seq = Number(cursor.slice(cursor.indexOf(".") + 1));
+    if (seq === this.#announcedSeq) return;
+    // The first check after a start only records where the log is: a client
+    // connecting gets the cursor in its hello, so nothing was missed.
+    const first = this.#announcedSeq < 0;
+    this.#announcedSeq = seq;
+    if (!first) this.#notifier.announce(cursor);
+  }
+
+  // One page of the change feed. See change-feed.ts for the cursor rules.
+  syncChanges(opts: { cursor?: string | null; limit?: number; scope?: string }): FeedResult {
+    return changesSince(this.#sql, { ...opts, timeZone: this.#env.TIMEZONE });
+  }
+
+  // One task by sid, with its steps, links and attachment details.
+  syncTask(sid: string): ReturnType<typeof taskBySid> {
+    return taskBySid(this.#sql, sid, this.#env.TIMEZONE);
+  }
+
+  // One attachment by sid: the Graph IDs needed to fetch its bytes, plus the
+  // metadata the download's headers come from. Null when the sid is unknown,
+  // the attachment is no longer in the mirror, or its list is excluded (an
+  // excluded list isn't mirrored, so its attachments are not served, the same
+  // as GET /tasks/{sid}).
+  syncAttachment(sid: string): {
+    list_id: string;
+    task_id: string;
+    attachment_id: string;
+    name: string | null;
+    content_type: string | null;
+    kind: string | null;
+  } | null {
+    const row = this.#sql
+      .exec<{ list_id: string; task_id: string; attachment_id: string; name: string | null; content_type: string | null; kind: string | null }>(
+        // The task's list, not attachments.list_id: that one is stale after a
+        // move until the sub-resource scan reaches the task again.
+        `SELECT COALESCE(t.list_id, a.list_id) AS list_id, a.task_id, a.attachment_id, a.name, a.content_type, a.kind
+           FROM entity_map m JOIN attachments a ON a.attachment_id = m.graph_id
+           LEFT JOIN tasks t ON t.task_id = a.task_id
+          WHERE m.kind = 'attachment' AND m.sid = ?`,
+        sid,
+      )
+      .toArray()[0];
+    if (!row || this.#isExcluded(row.list_id)) return null;
+    return row;
+  }
+
+  // A file attachment's sid and metadata by its Graph id: what the connector
+  // needs to find or keep the blob store's copy (src/core/attachment-cache.ts).
+  // Null when the mirror doesn't have it, it's a reference attachment (no
+  // bytes), or its list is excluded (nothing from an excluded list is kept).
+  attachmentBlobRef(attachmentId: string): { sid: string; task_id: string; name: string | null; size: number | null; content_type: string | null } | null {
+    const row = this.#sql
+      .exec<{ sid: string; task_id: string; name: string | null; size: number | null; content_type: string | null; list_id: string }>(
+        `SELECT m.sid, a.task_id, a.name, a.size, a.content_type, COALESCE(t.list_id, a.list_id) AS list_id
+           FROM attachments a JOIN entity_map m ON m.kind = 'attachment' AND m.graph_id = a.attachment_id
+           LEFT JOIN tasks t ON t.task_id = a.task_id
+          WHERE a.attachment_id = ? AND a.kind = 'file'`,
+        attachmentId,
+      )
+      .toArray()[0];
+    if (!row || this.#isExcluded(row.list_id)) return null;
+    return { sid: row.sid, task_id: row.task_id, name: row.name, size: row.size, content_type: row.content_type };
+  }
+
+  // ── App-owned appearance (docs/SYNC-API.md section 4.8) ──────────────────
+
+  themeImage(id: string): (FeedThemeImage & { id: string }) | null {
+    const row = this.#sql.exec("SELECT * FROM theme_images WHERE image_id = ?", id).toArray()[0];
+    return row ? { id, ...themeImageData(row) } : null;
+  }
+
+  // Records an uploaded image whose bytes are already in the blob store. The
+  // same bytes uploaded again keep the stored row, dimensions included.
+  putThemeImage(img: { image_id: string; content_type: string; size: number; width: number; height: number; brightness: number | null }): {
+    created: boolean;
+    image: FeedThemeImage & { id: string };
+  } {
+    const existing = this.themeImage(img.image_id);
+    if (existing) return { created: false, image: existing };
+    this.#sql.exec(
+      `INSERT INTO theme_images (image_id, content_type, size, width, height, brightness, created_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      img.image_id, img.content_type, img.size, img.width, img.height, img.brightness, Date.now(),
+    );
+    return { created: true, image: this.themeImage(img.image_id)! };
+  }
+
+  #themeImageInUse(id: string): boolean {
+    if (this.#sql.exec("SELECT 1 FROM list_images WHERE image_id = ? LIMIT 1", id).toArray().length) return true;
+    const settings = appSettingsData(this.#sql).smart_lists;
+    return Object.values(settings).some((t) => t?.image_id === id);
+  }
+
+  // The row only; the caller deletes the bytes. A failed byte delete leaves
+  // an object the sweep removes, since the table no longer has it.
+  deleteThemeImage(id: string): "deleted" | "in_use" | "not_found" {
+    return this.#transact(() => {
+      if (!this.#sql.exec("SELECT 1 FROM theme_images WHERE image_id = ?", id).toArray().length) return "not_found";
+      if (this.#themeImageInUse(id)) return "in_use";
+      this.#sql.exec("DELETE FROM theme_images WHERE image_id = ?", id);
+      return "deleted";
+    });
+  }
+
+  // Sets a list's image and/or its style; a field left undefined keeps its
+  // value, null clears it. A list with neither has no row.
+  setListImage(
+    listId: string,
+    patch: { image_id?: string | null; image_style?: ImageStyle | null },
+  ): "ok" | "unknown_list" | "unknown_theme_image" {
+    return this.#transact(() => {
+      if (!this.#sql.exec("SELECT 1 FROM lists WHERE list_id = ?", listId).toArray().length) return "unknown_list";
+      const imageId = patch.image_id;
+      if (imageId && !this.#sql.exec("SELECT 1 FROM theme_images WHERE image_id = ?", imageId).toArray().length) {
+        return "unknown_theme_image";
+      }
+      const cur = this.#sql
+        .exec<{ image_id: string | null; style_json: string | null }>("SELECT image_id, style_json FROM list_images WHERE list_id = ?", listId)
+        .toArray()[0];
+      const nextImage = imageId === undefined ? (cur?.image_id ?? null) : imageId;
+      const nextStyle =
+        patch.image_style === undefined ? (cur?.style_json ?? null) : patch.image_style === null ? null : JSON.stringify(patch.image_style);
+      if (nextImage === null && nextStyle === null) {
+        this.#sql.exec("DELETE FROM list_images WHERE list_id = ?", listId);
+        return "ok";
+      }
+      this.#sql.exec(
+        `INSERT INTO list_images (list_id, image_id, style_json) VALUES (?, ?, ?)
+         ON CONFLICT(list_id) DO UPDATE SET image_id = excluded.image_id, style_json = excluded.style_json`,
+        listId, nextImage, nextStyle,
+      );
+      if (imageId) this.#sql.exec("UPDATE theme_images SET unreferenced_since = NULL WHERE image_id = ?", imageId);
+      return "ok";
+    });
+  }
+
+  // Replaces the themes of the smart lists named; null returns one to the
+  // app's default. All or nothing: one unknown image refuses the whole call.
+  setSmartListThemes(values: Partial<Record<SmartList, SmartListTheme | null>>): "ok" | "unknown_theme_image" {
+    return this.#transact(() => {
+      const images = Object.values(values).flatMap((v) => (v?.image_id ? [v.image_id] : []));
+      for (const id of images) {
+        if (!this.#sql.exec("SELECT 1 FROM theme_images WHERE image_id = ?", id).toArray().length) return "unknown_theme_image";
+      }
+      for (const [key, v] of Object.entries(values)) {
+        if (v === null || v === undefined) this.#sql.exec("DELETE FROM app_settings WHERE key = ?", key);
+        else {
+          this.#sql.exec(
+            "INSERT INTO app_settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            key, JSON.stringify({ color: v.color, image_id: v.image_id, image_style: v.image_style }),
+          );
+        }
+      }
+      for (const id of images) this.#sql.exec("UPDATE theme_images SET unreferenced_since = NULL WHERE image_id = ?", id);
+      return "ok";
+    });
+  }
+
+  // The blob sweep's index half (section 4.9). Marks each unused image with
+  // when the sweep first saw it unused, clears the mark on used ones, and
+  // deletes the rows of images unused for `idleMs`. Returns the deleted ids,
+  // whose bytes the caller removes.
+  sweepThemeImages(nowMs: number, idleMs: number): string[] {
+    return this.#transact(() => {
+      const used = new Set(
+        this.#sql
+          .exec<{ image_id: string }>("SELECT DISTINCT image_id FROM list_images WHERE image_id IS NOT NULL")
+          .toArray()
+          .map((r) => r.image_id),
+      );
+      for (const t of Object.values(appSettingsData(this.#sql).smart_lists)) if (t?.image_id) used.add(t.image_id);
+      const rows = this.#sql
+        .exec<{ image_id: string; unreferenced_since: number | null }>(
+          "SELECT image_id, unreferenced_since FROM theme_images",
+        )
+        .toArray();
+      const expired: string[] = [];
+      for (const r of rows) {
+        if (used.has(r.image_id)) {
+          if (r.unreferenced_since !== null) this.#sql.exec("UPDATE theme_images SET unreferenced_since = NULL WHERE image_id = ?", r.image_id);
+          continue;
+        }
+        // The idle time runs from the first sweep that saw it unused.
+        if (r.unreferenced_since === null) {
+          this.#sql.exec("UPDATE theme_images SET unreferenced_since = ? WHERE image_id = ?", nowMs, r.image_id);
+        } else if (nowMs - r.unreferenced_since >= idleMs) expired.push(r.image_id);
+      }
+      for (const id of expired) this.#sql.exec("DELETE FROM theme_images WHERE image_id = ?", id);
+      return expired;
+    });
+  }
+
+  // Of the given theme image ids and attachment sids (from a blob store
+  // listing), those the mirror still has. The sweep deletes the rest.
+  liveBlobIds(themeImageIds: string[], attachmentSids: string[]): { theme_images: string[]; attachments: string[] } {
+    const images = themeImageIds.filter(
+      (id) => this.#sql.exec("SELECT 1 FROM theme_images WHERE image_id = ?", id).toArray().length > 0,
+    );
+    const atts = attachmentSids.filter(
+      (sid) =>
+        this.#sql
+          .exec(
+            `SELECT 1 FROM entity_map m JOIN attachments a ON a.attachment_id = m.graph_id
+              WHERE m.kind = 'attachment' AND m.sid = ?`,
+            sid,
+          )
+          .toArray().length > 0,
+    );
+    return { theme_images: images, attachments: atts };
+  }
+
+  // FTS search answered with feed-shaped tasks, in one call (one RPC on
+  // Cloudflare instead of one per hit).
+  syncSearch(query: string, limit: number): NonNullable<ReturnType<typeof taskBySid>>[] {
+    const { rows } = this.search({ query, limit, include_checklist: true });
+    const ids = rows.slice(0, limit).map((r) => r.task_id);
+    const sids = taskSids(this.#sql, ids);
+    return ids.flatMap((id) => {
+      const t = sids[id] ? taskBySid(this.#sql, sids[id], this.#env.TIMEZONE) : null;
+      return t ? [t] : [];
+    });
+  }
+
+  // Graph task IDs → sids (search results are served by sid).
+  syncTaskSids(taskIds: string[]): Record<string, string> {
+    return taskSids(this.#sql, taskIds);
+  }
+
+  // ---- Client sync API, write side (docs/SYNC-API.md sections 5 and 6) ----
+  // The idempotency record and field clocks; src/core/sync/mutations.ts runs
+  // the batch and calls these. Each is one synchronous SQLite step.
+
+  // Claims a mutation id. `done` returns the stored result (a retry); a live
+  // `pending` row means another request is running it now; an expired one is
+  // taken over.
+  mutationBegin(
+    id: string,
+    principal: string,
+    nowMs: number,
+    leaseMs: number,
+  ): { state: "new"; prior_at_ms?: number } | { state: "done"; result: unknown } | { state: "leased" } {
+    return this.#transact(() => {
+      const row = this.#sql
+        .exec<{ state: string; result_json: string | null; lease_until: number | null; at_ms: number }>(
+          "SELECT state, result_json, lease_until, at_ms FROM applied_mutations WHERE mutation_id = ?",
+          id,
+        )
+        .toArray()[0];
+      if (row?.state === "done") return { state: "done" as const, result: JSON.parse(row.result_json ?? "null") };
+      if (row && (row.lease_until ?? 0) > nowMs) return { state: "leased" as const };
+      // A pending row whose lease is free is an earlier attempt that may have
+      // written (released as ambiguous, or crashed): keep its first at_ms and
+      // hand it to the caller.
+      this.#sql.exec(
+        `INSERT INTO applied_mutations (mutation_id, state, principal, lease_until, at_ms) VALUES (?, 'pending', ?, ?, ?)
+         ON CONFLICT(mutation_id) DO UPDATE SET state = 'pending', principal = excluded.principal,
+           lease_until = excluded.lease_until`,
+        id,
+        principal,
+        nowMs + leaseMs,
+        nowMs,
+      );
+      return row ? { state: "new" as const, prior_at_ms: row.at_ms } : { state: "new" as const };
+    });
+  }
+
+  // Records the outcome and the clocks of the fields it set, together. An
+  // applied result is final: an attempt that took over an expired lease and
+  // then failed must not replace it with its own rejection.
+  mutationFinish(
+    id: string,
+    result: unknown,
+    clocks: Array<{ kind: string; sid: string; field: string; at_ms: number }>,
+  ): void {
+    this.#transact(() => {
+      const stored = this.#sql
+        .exec<{ state: string; result_json: string | null }>(
+          "SELECT state, result_json FROM applied_mutations WHERE mutation_id = ?",
+          id,
+        )
+        .toArray()[0];
+      if (stored?.state === "done" && (JSON.parse(stored.result_json ?? "null") as { status?: unknown } | null)?.status === "applied") {
+        return;
+      }
+      this.#sql.exec(
+        "UPDATE applied_mutations SET state = 'done', result_json = ?, lease_until = NULL WHERE mutation_id = ?",
+        JSON.stringify(result),
+        id,
+      );
+      for (const c of clocks) {
+        this.#sql.exec(
+          `INSERT INTO field_clock (kind, sid, field, at_ms) VALUES (?, ?, ?, ?)
+           ON CONFLICT(kind, sid, field) DO UPDATE SET at_ms = excluded.at_ms`,
+          c.kind,
+          c.sid,
+          c.field,
+          c.at_ms,
+        );
+      }
+    });
+  }
+
+  // A mutation whose write may have reached Graph: keep the row, free the
+  // lease, so the retry runs at once and knows to look before writing.
+  mutationRelease(id: string): void {
+    this.#sql.exec("UPDATE applied_mutations SET lease_until = 0 WHERE mutation_id = ? AND state = 'pending'", id);
+  }
+
+  // A mutation that failed and may be retried: forget it.
+  mutationAbandon(id: string): void {
+    this.#sql.exec("DELETE FROM applied_mutations WHERE mutation_id = ? AND state = 'pending'", id);
+  }
+
+  fieldClocks(kind: string, sid: string): Record<string, number> {
+    const rows = this.#sql
+      .exec<{ field: string; at_ms: number }>("SELECT field, at_ms FROM field_clock WHERE kind = ? AND sid = ?", kind, sid)
+      .toArray();
+    return Object.fromEntries(rows.map((r) => [r.field, r.at_ms]));
+  }
+
+  // sid → Graph ID, and whether that entity exists in the mirror now.
+  // `excluded`: the entity is an excluded list, or belongs to one (section
+  // 1.2), so the sync API refuses to write to it. A task whose row is gone is
+  // placed by the list its last change-log row names, since an excluded
+  // list's tasks are deleted from the mirror.
+  resolveSids(
+    refs: Array<{ kind: string; sid: string }>,
+  ): Record<string, { graph_id: string | null; live: boolean; excluded?: true }> {
+    const table: Record<string, [string, string]> = {
+      list: ["lists", "list_id"],
+      task: ["tasks", "task_id"],
+      step: ["checklist_items", "item_id"],
+      link: ["linked_resources", "link_id"],
+      attachment: ["attachments", "attachment_id"],
+      // A sidebar group: list.update's group_id and list.reorder's reference.
+      list_group: ["list_groups", "group_id"],
+      // App-owned (section 4.8): an image's sid is its id.
+      theme_image: ["theme_images", "image_id"],
+    };
+    const out: Record<string, { graph_id: string | null; live: boolean; excluded?: true }> = {};
+    for (const r of refs) {
+      // The app_settings entity always exists once its sid is minted; it has
+      // no row of its own until a smart list is themed.
+      if (r.kind === "app_settings") {
+        const m = this.#sql
+          .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = 'app_settings' AND sid = ?", r.sid)
+          .toArray()[0];
+        out[`${r.kind}:${r.sid}`] = { graph_id: m?.graph_id ?? null, live: !!m };
+        continue;
+      }
+      const t = table[r.kind];
+      if (!t) continue;
+      const m = this.#sql
+        .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = ? AND sid = ?", r.kind, r.sid)
+        .toArray()[0];
+      const graphId = m?.graph_id ?? null;
+      const live =
+        !!graphId && this.#sql.exec(`SELECT 1 FROM ${t[0]} WHERE ${t[1]} = ? LIMIT 1`, graphId).toArray().length > 0;
+      let listId: string | null = null;
+      if (graphId && r.kind === "list") listId = graphId;
+      // Groups and theme images belong to no list.
+      else if (r.kind === "list_group" || r.kind === "theme_image") listId = null;
+      else if (graphId && live) {
+        listId = this.#sql.exec<{ l: string }>(`SELECT list_id l FROM ${t[0]} WHERE ${t[1]} = ?`, graphId).toArray()[0]?.l ?? null;
+      } else if (r.kind === "task") {
+        listId =
+          this.#sql
+            .exec<{ l: string | null }>(
+              `SELECT m.graph_id l FROM sync_log s JOIN entity_map m ON m.kind = 'list' AND m.sid = s.list_sid
+                WHERE s.kind = 'task' AND s.sid = ?`,
+              r.sid,
+            )
+            .toArray()[0]?.l ?? null;
+      }
+      const excluded = listId !== null && this.#isExcluded(listId);
+      out[`${r.kind}:${r.sid}`] = excluded ? { graph_id: graphId, live, excluded } : { graph_id: graphId, live };
+    }
+    return out;
+  }
+
+  // Gives a Graph ID about to be written to the mirror the sid the app chose
+  // for it, before the row exists, so the insert trigger never mints one and
+  // no client ever sees another sid for it. False when the sid names another
+  // entity, or the Graph ID already has a sid (the caller then falls back to
+  // adoptSid).
+  reserveSid(kind: string, sid: string, graphId: string): boolean {
+    return this.#transact(() => {
+      const taken = this.#sql
+        .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = ? AND sid = ?", kind, sid)
+        .toArray()[0];
+      if (taken) return taken.graph_id === graphId;
+      const existing = this.#sql
+        .exec<{ sid: string }>("SELECT sid FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
+        .toArray()[0];
+      if (existing) return false;
+      this.#sql.exec(
+        "INSERT INTO entity_map (kind, sid, graph_id, created_ms, app_owned) VALUES (?, ?, ?, ?, 1)",
+        kind, sid, graphId, Date.now(),
+      );
+      return true;
+    });
+  }
+
+  // For the ambiguous-create recovery: when the mirror first saw each Graph
+  // ID (its entity_map row), and whether its sid was chosen by the app (set by
+  // reserveSid/adoptSid). An entity that already carries an app's sid was made
+  // by some other mutation and is never a candidate. IDs the mirror has never
+  // seen are absent from the result.
+  createCandidates(kind: string, graphIds: string[]): Record<string, { first_seen_ms: number; app_owned: boolean }> {
+    const out: Record<string, { first_seen_ms: number; app_owned: boolean }> = {};
+    for (const id of graphIds) {
+      const row = this.#sql
+        .exec<{ created_ms: number; app_owned: number }>(
+          "SELECT created_ms, app_owned FROM entity_map WHERE kind = ? AND graph_id = ?",
+          kind,
+          id,
+        )
+        .toArray()[0];
+      if (row) out[id] = { first_seen_ms: row.created_ms, app_owned: row.app_owned === 1 };
+    }
+    return out;
+  }
+
+  // Gives a newly created entity the sid the app chose, after the fact: when
+  // reserveSid didn't run first (or lost a race with delta), the entity is
+  // already mirrored under a minted sid M that a client may have pulled. M is
+  // retired the way a deletion is (a tombstone at a new seq, for lists and
+  // tasks) and the entity is logged again under the app's sid; for a step,
+  // link or attachment, which are logged on their task, the task is logged
+  // again. False when the app's sid already names another entity.
+  adoptSid(kind: string, sid: string, graphId: string): boolean {
+    return this.#transact(() => {
+      const taken = this.#sql
+        .exec<{ graph_id: string | null }>("SELECT graph_id FROM entity_map WHERE kind = ? AND sid = ?", kind, sid)
+        .toArray()[0];
+      if (taken) return taken.graph_id === graphId;
+      const minted = this.#sql
+        .exec<{ sid: string; app_owned: number }>("SELECT sid, app_owned FROM entity_map WHERE kind = ? AND graph_id = ?", kind, graphId)
+        .toArray()[0];
+      // Another mutation's sid is never retired: that would delete an entity
+      // the app made from under it.
+      if (minted?.app_owned === 1) return false;
+      const now = Date.now();
+      if (minted) {
+        this.#sql.exec("UPDATE entity_map SET graph_id = NULL WHERE kind = ? AND sid = ?", kind, minted.sid);
+        this.#sql.exec("UPDATE field_clock SET sid = ? WHERE kind = ? AND sid = ?", sid, kind, minted.sid);
+      }
+      this.#sql.exec("INSERT INTO entity_map (kind, sid, graph_id, created_ms, app_owned) VALUES (?, ?, ?, ?, 1)", kind, sid, graphId, now);
+      if (!minted) return true;
+      const relog = (k: string, s: string, deleted: 0 | 1, listSid: string | null) => {
+        this.#sql.exec("DELETE FROM sync_log WHERE kind = ? AND sid = ?", k, s);
+        this.#sql.exec("INSERT INTO sync_log (kind, sid, deleted, list_sid, at_ms) VALUES (?, ?, ?, ?, ?)", k, s, deleted, listSid, now);
+      };
+      // A list group is logged on its own, like a list. A group just made has
+      // no lists, so none needs logging again.
+      if (kind === "task" || kind === "list" || kind === "list_group") {
+        const logged = this.#sql
+          .exec<{ list_sid: string | null }>("SELECT list_sid FROM sync_log WHERE kind = ? AND sid = ?", kind, minted.sid)
+          .toArray()[0];
+        if (!logged) return true;
+        relog(kind, minted.sid, 1, logged.list_sid);
+        relog(kind, sid, 0, kind === "list" ? sid : kind === "list_group" ? null : logged.list_sid);
+        return true;
+      }
+      // A step, link or attachment: log its task again, so a client that
+      // pulled the task with the minted sid inside gets it with the app's.
+      const child: Record<string, [string, string]> = {
+        step: ["checklist_items", "item_id"],
+        link: ["linked_resources", "link_id"],
+        attachment: ["attachments", "attachment_id"],
+      };
+      if (!child[kind]) return true;
+      const [table, key] = child[kind];
+      const task = this.#sql
+        .exec<{ sid: string; list_sid: string | null }>(
+          `SELECT m.sid, (SELECT sid FROM entity_map WHERE kind = 'list' AND graph_id = t.list_id) AS list_sid
+             FROM ${table} c JOIN tasks t ON t.task_id = c.task_id
+             JOIN entity_map m ON m.kind = 'task' AND m.graph_id = t.task_id
+            WHERE c.${key} = ?`,
+          graphId,
+        )
+        .toArray()[0];
+      if (task) relog("task", task.sid, 0, task.list_sid);
+      return true;
+    });
+  }
+
+  // Idempotency rows are kept 30 days, longer than the app keeps an unsent
+  // edit (section 5.4).
+  pruneMutations(olderThanMs: number): number {
+    const n = this.#sql
+      .exec<{ n: number }>("SELECT count(*) n FROM applied_mutations WHERE at_ms < ?", olderThanMs)
+      .one().n;
+    this.#sql.exec("DELETE FROM applied_mutations WHERE at_ms < ?", olderThanMs);
+    return n;
+  }
+
+  // What the app needs to set up and label an account (section 14.1).
+  // server_id is created once and never changes, unlike the cursor epoch, so
+  // the app recognizes a server it already has. The route decides how much of
+  // this an unauthenticated caller sees (section 18.7).
+  async syncInfo(): Promise<{
+    server_id: string;
+    cursor: string;
+    account: { email: string };
+    capabilities: {
+      my_day: boolean;
+      step_order: boolean;
+      sub_resources: boolean;
+      list_appearance: boolean;
+      list_appearance_write: boolean;
+      attachment_download: boolean;
+      attachment_upload: boolean;
+      attachment_cache: boolean;
+      theme_images: boolean;
+      push: "none" | "websocket";
+      source: "graph";
+    };
+  }> {
+    let serverId = await this.#state.get<string>("sync:server_id");
+    if (!serverId) {
+      serverId = crypto.randomUUID();
+      await this.#state.put("sync:server_id", serverId);
+    }
+    const myDay = myDayEnabled(this.#env);
+    const appearance = myDay && !this.#substrateUnavailable && !this.#appearanceUnavailable;
+    return {
+      server_id: serverId,
+      cursor: currentCursor(this.#sql),
+      account: { email: this.#env.OWNER_EMAIL ?? "" },
+      capabilities: {
+        my_day: myDay,
+        // Step order is read from Substrate by the sub-resource scan.
+        step_order: myDay && checklistCacheEnabled(this.#env),
+        // The feed carries every task's steps, links and attachments only when
+        // the sub-resource scan runs (the checklist cache). Without it a task
+        // carries just the ones written through this server, and those can go
+        // stale when edited in another app.
+        sub_resources: checklistCacheEnabled(this.#env),
+        // Sidebar groups, order and theme are read from Substrate (section
+        // 10.4). Off when the Exchange Online scope is missing or refused.
+        list_appearance: appearance,
+        // list.update theme/group_id and list.reorder (section 5.2). A flag of
+        // its own because servers that read appearance predate the writes: an
+        // app gating writes on list_appearance would send them to a server
+        // that rejects them.
+        list_appearance_write: appearance,
+        // GET /api/v1/attachments/{sid} streams an attachment's bytes.
+        attachment_download: true,
+        attachment_upload: true,
+        // The blob store (section 4.9) is a binding every host entry point
+        // shares, so the index sees the same one the routes use.
+        attachment_cache: !!this.#env.BLOBS,
+        theme_images: !!this.#env.BLOBS,
+        push: "websocket",
+        source: "graph",
+      },
+    };
+  }
+
   // Read-only health probe (sync_status tool). Reports one row per resource —
   // the roster ("lists") plus one per roster list ("tasks:{listId}") — built
   // from the UNION of the `lists` table and `sync_state`, so a list that's in
@@ -1422,19 +2477,18 @@ export class IndexCore implements TokenProvider {
   async syncStatus(): Promise<{
     resources: SyncStatusReport[];
     totals: { tasks: number; lists: number; all_idle: boolean };
+    attachments: { files: number; bytes: number; tasks_unscanned: number };
     notifications: WebhookHealth;
   }> {
-    const cfg = await loadListsConfig(this.#env);
+    const cfg = await this.#listsConfig();
 
     const stateRows = this.#sql
       .exec("SELECT * FROM sync_state")
       .toArray() as unknown as SyncStateRow[];
     const stateByResource = new Map(stateRows.map((s) => [s.resource, s]));
 
-    const listRows = this.#sql
-      .exec<{ list_id: string; wellknown: string | null }>("SELECT list_id, wellknown FROM lists")
-      .toArray();
-    const wellknownById = new Map(listRows.map((l) => [l.list_id, l.wellknown]));
+    const listRows = this.listLists();
+    const listById = new Map(listRows.map((l) => [l.list_id, l]));
     const countRows = this.#sql
       .exec<{ list_id: string; n: number }>(
         "SELECT list_id, COUNT(*) AS n FROM tasks GROUP BY list_id",
@@ -1447,7 +2501,7 @@ export class IndexCore implements TokenProvider {
       // don't sit at baseline_pending forever (which would break all_idle).
       if (resource.startsWith("tasks:")) {
         const listId = resource.slice("tasks:".length);
-        if (shouldSkipSync({ list_id: listId, wellknown: wellknownById.get(listId) ?? null }, cfg)) {
+        if (shouldSkipSync(listById.get(listId) ?? { list_id: listId, wellknown: null }, cfg)) {
           return {
             resource,
             status: "sync_disabled",
@@ -1491,8 +2545,20 @@ export class IndexCore implements TokenProvider {
     return {
       resources,
       totals: { tasks, lists: listRows.length, all_idle },
+      attachments: this.#attachmentTotals(),
       notifications: this.#webhookHealth(Date.now()),
     };
+  }
+
+  // File attachments in the mirror and their total size, as Graph reports it.
+  // tasks_unscanned: tasks whose sub-resources (attachments among them) the
+  // budgeted scan hasn't read yet, so the totals are complete only at 0.
+  #attachmentTotals(): { files: number; bytes: number; tasks_unscanned: number } {
+    const a = this.#sql
+      .exec<{ files: number; bytes: number | null }>("SELECT COUNT(*) AS files, SUM(size) AS bytes FROM attachments WHERE kind = 'file'")
+      .one();
+    const t = this.#sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE checklist_synced_at IS NULL").one();
+    return { files: Number(a.files), bytes: Number(a.bytes ?? 0), tasks_unscanned: Number(t.n) };
   }
 
   // -- Sync (alarm-driven, resumable, budget-bounded) -----------------------
@@ -1529,6 +2595,7 @@ export class IndexCore implements TokenProvider {
         continue;
       }
       accepted += 1;
+      this.#hotLists.add(rec.list_id);
       work.push({ listId: rec.list_id, taskId: item.resourceId, changeType: item.changeType });
     }
 
@@ -1561,6 +2628,12 @@ export class IndexCore implements TokenProvider {
           // Row must exist for updateMyDayFields to land (it no-ops otherwise).
           // A brand-new task's notification can beat the delta that creates the
           // row → fall back to mark-scan-due so the periodic scan fills it.
+          // A notification's resourceId may be a default REST ID; translate it
+          // when it doesn't match the immutable-keyed mirror.
+          if (this.getMyDayFields(w.taskId) === null && !looksImmutable(w.taskId)) {
+            const t = await new GraphClient(this).translateToImmutable([w.taskId]);
+            w.taskId = t.get(w.taskId) ?? w.taskId;
+          }
           if (this.getMyDayFields(w.taskId) === null) {
             this.#setSyncState(`myday:${w.listId}`, { last_synced_at: null });
             continue;
@@ -1698,24 +2771,86 @@ export class IndexCore implements TokenProvider {
     if (await this.#state.get(REAUTH_KEY)) return;
     const midCycle = await this.runSyncCycle();
     const intervalMs = this.#intervalMs();
-    await this.#alarms.setAlarm(
-      Date.now() + (midCycle ? MID_CYCLE_REARM_MS : intervalMs),
-    );
+    // A webhook that arrived while this cycle ran armed the alarm for now, and
+    // the setAlarm below would push it back a whole interval: run again at once
+    // for any list it named.
+    const next =
+      this.#hotLists.size > 0
+        ? 1
+        : midCycle
+          ? MID_CYCLE_REARM_MS
+          : this.#scanBacklog
+            ? Math.min(intervalMs, BACKFILL_REARM_MS)
+            : intervalMs;
+    await this.#alarms.setAlarm(Date.now() + next);
+    // Ends push sockets whose token expired even when nothing changed, since
+    // an idle socket is otherwise only checked when a change goes out.
+    this.#notifier?.sweep();
   }
 
   // Force a re-baseline: drop rows + delta tokens (one list or everything) and
   // arm the alarm now. Manual twin of the 410 path. Note: if the target list is
   // skipped (no_sync / built-in flaggedEmails), the next cycle won't re-baseline
   // it, so resync on a skipped list is effectively just a purge.
+  // Re-baseline one list, or the roster and every list, without emptying
+  // anything first: rows stay served while the baseline runs, and rows it
+  // doesn't return are deleted when it completes (section 3.3).
   async resync(listId?: string): Promise<void> {
     if (listId) {
-      this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
-      this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
+      this.#beginSweep(`tasks:${listId}`);
     } else {
-      this.#sql.exec("DELETE FROM tasks");
-      this.#sql.exec("DELETE FROM sync_state"); // roster + every list re-baseline
+      this.#beginSweep("lists");
+      for (const l of this.listLists()) this.#beginSweep(`tasks:${l.list_id}`);
     }
     await this.#alarms.setAlarm(Date.now() + 1);
+  }
+
+  // Start a mark-and-sweep baseline for one resource: drop its delta cursor and
+  // record a new generation.
+  #beginSweep(resource: string, lastError: string | null = null): void {
+    this.#setSyncState(resource, {
+      delta_link: null,
+      next_link: null,
+      status: "baseline",
+      ...(lastError ? { last_error: lastError } : {}),
+    });
+    this.#sql.exec("UPDATE sync_state SET sweep_gen = ? WHERE resource = ?", Date.now(), resource);
+  }
+
+  // The baseline reached its deltaLink: delete what it didn't see, then clear
+  // the generation. One transaction, so a crash can't leave half a sweep.
+  #finishSweep(resource: string): void {
+    const gen = this.#sql
+      .exec<{ g: number | null }>("SELECT sweep_gen g FROM sync_state WHERE resource = ?", resource)
+      .toArray()[0]?.g;
+    if (gen == null) return;
+    this.#transact(() => {
+      if (resource === "lists") {
+        const stale = this.#sql
+          .exec<{ list_id: string }>(
+            "SELECT list_id FROM lists WHERE baseline_gen IS NULL OR baseline_gen <> ?",
+            gen,
+          )
+          .toArray();
+        for (const l of stale) this.deleteList(l.list_id);
+      } else {
+        const listId = resource.slice("tasks:".length);
+        for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+          this.#sql.exec(
+            `DELETE FROM ${table} WHERE task_id IN (
+               SELECT task_id FROM tasks WHERE list_id = ? AND (baseline_gen IS NULL OR baseline_gen <> ?))`,
+            listId,
+            gen,
+          );
+        }
+        this.#sql.exec(
+          "DELETE FROM tasks WHERE list_id = ? AND (baseline_gen IS NULL OR baseline_gen <> ?)",
+          listId,
+          gen,
+        );
+      }
+      this.#sql.exec("UPDATE sync_state SET sweep_gen = NULL WHERE resource = ?", resource);
+    });
   }
 
   // Hard identity reset: wipe ALL indexed state because the owning Microsoft
@@ -1744,8 +2879,12 @@ export class IndexCore implements TokenProvider {
     // cleans up when it safely can and otherwise leaves the orphans to lapse
     // (≤2.94d). It never blocks or fails the wipe below.
     await this.#teardownAllSubscriptions();
+    this.#notifier?.closeAll("reset");
     this.#substrateToken = null;
     this.#substrateUnavailable = false;
+    this.#appearanceUnavailable = false;
+    await this.#state.delete(APPEARANCE_BACKOFF_KEY);
+    await this.#state.delete(APPEARANCE_FIRST_READ_KEY);
     // Kill every MCP grant paired with the outgoing account; the new account's
     // grant is issued under the fresh epoch right after this wipe.
     await this.#newEpoch();
@@ -1754,6 +2893,20 @@ export class IndexCore implements TokenProvider {
     this.#sql.exec("DELETE FROM lists");
     this.#sql.exec("DELETE FROM sync_state");
     this.#sql.exec("DELETE FROM subscriptions");
+    // A different owner: no client may continue from a cursor into the old
+    // owner's data. Drop the change log and stable IDs (the deletes above
+    // logged tombstones) and replace the epoch.
+    // The app-owned appearance (section 4.8) was the old owner's too. Its
+    // image bytes are left to the blob sweep, which deletes any image the
+    // table no longer has.
+    for (const table of [
+      "checklist_items", "linked_resources", "attachments", "list_groups",
+      "theme_images", "list_images", "app_settings", "field_clock", "sync_log", "entity_map",
+    ]) {
+      this.#sql.exec(`DELETE FROM ${table}`);
+    }
+    this.#sql.exec("UPDATE sync_meta SET epoch = lower(hex(randomblob(8))) WHERE id = 1");
+    seedAppSettings(this.#sql);
     await this.#alarms.deleteAlarm();
   }
 
@@ -1812,13 +2965,15 @@ export class IndexCore implements TokenProvider {
 
     // Load the per-list sync policy once per cycle (a cheap KV read alongside the
     // existing network I/O). Drives both the skip set and self-heal purge below.
-    const cfg = await loadListsConfig(this.#env);
+    const cfg = await this.#listsConfig();
     const rosterRows = this.listLists();
-    const skip = (listId: string): boolean =>
-      shouldSkipSync(
-        { list_id: listId, wellknown: rosterRows.find((l) => l.list_id === listId)?.wellknown ?? null },
-        cfg,
-      );
+    const settingOf = (listId: string): ListSync =>
+      listSync(rosterRows.find((l) => l.list_id === listId) ?? { list_id: listId, wellknown: null }, cfg);
+    // Record each list's setting on its row, where the change feed reads it.
+    this.#storeListSync(rosterRows, cfg);
+    // From here on the row is the setting: refreshListSync can change it while
+    // this cycle waits on Graph, so every later check reads it again.
+    const skip = (listId: string): boolean => this.#isExcluded(listId);
 
     // 2. Self-heal: purge any indexed rows / sync_state left behind for a list
     //    that is now skipped (added to no_sync, or flaggedEmails before this
@@ -1832,13 +2987,30 @@ export class IndexCore implements TokenProvider {
     //    priority rotation guarantees the unvisited tail is covered on following
     //    cycles. Running out of budget is NOT "outstanding" work — only a
     //    resource that returned an outstanding nextLink is (set via r.midCycle).
+    // Lists a webhook just named go first, and each list's changes are
+    // announced as soon as they land (docs/SYNC-API.md section 7.2), so an
+    // edit reaches push clients without waiting for the rest of the walk.
     let remaining = maxTaskPages;
-    for (const listId of this.#listIdsByPriority()) {
+    const hot = [...this.#hotLists];
+    this.#hotLists.clear();
+    // Todo lists first, then reference lists (section 1.2): a reference list
+    // only gets what's left of the page budget.
+    const byPriority = this.#listIdsByPriority();
+    const order = [
+      ...byPriority.filter((id) => settingOf(id) !== "reference"),
+      ...byPriority.filter((id) => settingOf(id) === "reference"),
+    ];
+    for (const listId of [...hot.filter((id) => order.includes(id)), ...order.filter((id) => !hot.includes(id))]) {
       if (skip(listId)) continue;
       if (remaining <= 0) break;
       const r = await this.#syncResource(`tasks:${listId}`, tasksDeltaUrl(listId), remaining);
       remaining -= r.pagesFetched;
       anyOutstanding ||= r.midCycle;
+      try {
+        this.announceChanges();
+      } catch (e) {
+        log.warn("sync_announce_failed", { error: String(e) });
+      }
     }
 
     // 4. Background My Day Substrate scan — only when nothing is still draining
@@ -1859,6 +3031,11 @@ export class IndexCore implements TokenProvider {
       await this.renewSubscriptions().catch((e) =>
         log.warn("subscription_renew_batch_failed", { error: String(e) }),
       );
+      // Sidebar groups, order and theme (section 10.4): two Substrate GETs
+      // when due. Never fails the cycle.
+      await this.#refreshListAppearance().catch((e) =>
+        log.warn("list_appearance_failed", { error: String(e) }),
+      );
       await this.#runMyDayScanBatch(skip).catch((e) =>
         log.warn("my_day_scan_failed", { error: String(e) }),
       );
@@ -1867,6 +3044,11 @@ export class IndexCore implements TokenProvider {
       await this.#runChecklistScanBatch(skip).catch((e) =>
         log.warn("checklist_scan_failed", { error: String(e) }),
       );
+      try {
+        this.pruneMutations(Date.now() - MUTATION_RETENTION_MS);
+      } catch (e) {
+        log.warn("prune_mutations_failed", { error: String(e) });
+      }
     }
     return anyOutstanding;
   }
@@ -1881,8 +3063,11 @@ export class IndexCore implements TokenProvider {
     const hasState =
       !!this.#getSyncState(`tasks:${listId}`) || !!this.#getSyncState(`myday:${listId}`);
     if (!hasRows && !hasState) return;
+    this.#purges.set(listId, (this.#purges.get(listId) ?? 0) + 1);
     this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
-    this.#sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
+    for (const table of ["checklist_items", "linked_resources", "attachments"]) {
+      this.#sql.exec(`DELETE FROM ${table} WHERE list_id = ?`, listId);
+    }
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `tasks:${listId}`);
     this.#sql.exec("DELETE FROM sync_state WHERE resource = ?", `myday:${listId}`);
   }
@@ -1901,10 +3086,23 @@ export class IndexCore implements TokenProvider {
     const isBaseline = !st?.next_link && !st?.delta_link;
     const graph = new GraphClient(this);
 
+    // A list purged while its pages were in flight (refreshListSync excluded
+    // it): drop what came back and leave no sync state. If it is still
+    // excluded, the rows and a fresh cursor would bring it back into the
+    // mirror. If it was switched back on meanwhile, the result continues a
+    // cursor that no longer matches the emptied list: storing its delta link
+    // would leave the list empty but idle. With no state, the list's next
+    // sync (it is hot, so at once) is a fresh baseline.
+    const listId = resource.startsWith("tasks:") ? resource.slice("tasks:".length) : null;
+    const purgesBefore = listId === null ? 0 : (this.#purges.get(listId) ?? 0);
+    const excludedNow = () =>
+      listId !== null && (this.#isExcluded(listId) || (this.#purges.get(listId) ?? 0) !== purgesBefore);
     try {
       const res = await followToTerminal(graph, startUrl, Math.max(1, maxPages));
+      if (excludedNow()) return { pagesFetched: res.pagesFetched, midCycle: false };
       this.#applyRows(resource, res.rows);
       if (res.deltaLink) {
+        this.#finishSweep(resource);
         this.#setSyncState(resource, {
           delta_link: res.deltaLink,
           next_link: null,
@@ -1927,17 +3125,14 @@ export class IndexCore implements TokenProvider {
       }
       return { pagesFetched: res.pagesFetched, midCycle: !!res.nextLink };
     } catch (e) {
+      if (excludedNow()) return { pagesFetched: 1, midCycle: false };
       if (e instanceof GraphError && e.status === 410) {
-        // Delta token expired (~30d). Purge the resource's rows and reset to
-        // baseline; the next cycle repopulates from the full collection.
+        // Delta token expired (~30d). Re-baseline with mark and sweep: rows
+        // stay served, and those the new baseline doesn't return are removed
+        // when it completes. For the roster this sweeps lists only; each list's
+        // own task delta token is still valid.
         log.warn("sync_410_rebaseline", { resource });
-        this.#purgeResource(resource);
-        this.#setSyncState(resource, {
-          delta_link: null,
-          next_link: null,
-          status: "baseline",
-          last_error: "410_gone",
-        });
+        this.#beginSweep(resource, "410_gone");
         return { pagesFetched: 1, midCycle: true };
       }
       if (e instanceof GraphError && (e.status === 429 || e.status === 503)) {
@@ -1973,30 +3168,38 @@ export class IndexCore implements TokenProvider {
     const checklist = checklistCacheEnabled(this.#env);
     for (const row of rows) {
       if (row.kind === "removed") {
+        // A list's delta reports a task that left it — deleted, or moved to
+        // another list. Task IDs are immutable, so a moved task's row already
+        // sits under its new list (the move's write-through, or the other
+        // list's delta earlier in the cycle); deleting by ID alone would drop
+        // it from the mirror until it next changed. Only remove it from here.
+        const owner = this.#sql
+          .exec<{ list_id: string }>("SELECT list_id FROM tasks WHERE task_id = ?", row.id)
+          .toArray()[0];
+        if (owner && owner.list_id !== listId) {
+          log.info("delta_removed_moved_task_kept", { list_id: listId, now_in: owner.list_id });
+          continue;
+        }
         this.deleteTask(row.id); // cascades checklist_items
       } else {
+        const modifiedAt = () =>
+          this.#sql.exec<{ m: number | null }>("SELECT modified_at m FROM tasks WHERE task_id = ?", row.task.id).toArray()[0];
+        const before = checklist ? modifiedAt() : undefined;
         this.upsertTask(row.task, listId);
+        if (!checklist) continue;
         // Incremental engine: a task that rode delta CHANGED (checklist edits bump
         // its lastModifiedDateTime), so its cached checklist may be stale — mark it
         // for re-fetch by the next budgeted scan. Delta carries no expansions, so
         // we can't diff the checklist here; the marker + scan does it cheaply.
-        if (checklist) this.markChecklistDirty(row.task.id);
+        // A row whose modified time didn't move is skipped: a re-baseline returns
+        // every task unchanged and must not re-queue the whole backfill (18.6).
+        const after = modifiedAt();
+        if (before && after && before.m === after.m) continue;
+        this.markChecklistDirty(row.task.id);
       }
     }
   }
 
-  #purgeResource(resource: string): void {
-    if (resource === "lists") {
-      this.#sql.exec("DELETE FROM tasks");
-      this.#sql.exec("DELETE FROM checklist_items");
-      this.#sql.exec("DELETE FROM lists");
-      this.#sql.exec("DELETE FROM sync_state WHERE resource LIKE 'tasks:%'");
-      return;
-    }
-    const listId = resource.slice("tasks:".length);
-    this.#sql.exec("DELETE FROM tasks WHERE list_id = ?", listId);
-    this.#sql.exec("DELETE FROM checklist_items WHERE list_id = ?", listId);
-  }
 
   #getSyncState(resource: string): SyncStateRow | null {
     const rows = this.#sql
@@ -2084,6 +3287,202 @@ export class IndexCore implements TokenProvider {
       .map((k) => k.list_id);
   }
 
+  // The To Do sidebar, read-only from Substrate (docs/SYNC-API.md section
+  // 10.4): every folder's group, position and theme, and every list group.
+  // Due when a list has never been read (a new list, or the first cycle after
+  // migration v12), or when the last successful read is a sync interval old;
+  // a sidebar reorder or theme change doesn't show in Graph's roster delta,
+  // so the interval is what picks those up. Without the Exchange Online scope
+  // it does nothing and the columns stay NULL.
+  //
+  // A 403 sets #appearanceUnavailable, never the My Day latch: a sidebar
+  // endpoint refusing the owner says nothing about My Day. Any other failure
+  // backs off: the next read waits DELTA_SYNC_INTERVAL_MIN × 2^(failures−1),
+  // at most APPEARANCE_BACKOFF_MAX_MS, persisted so it survives eviction.
+  async #refreshListAppearance(now: number = Date.now()): Promise<void> {
+    if (!myDayEnabled(this.#env) || this.#substrateUnavailable || this.#appearanceUnavailable) return;
+    const backoff = (await this.#state.get<AppearanceBackoff>(APPEARANCE_BACKOFF_KEY)) ?? null;
+    if (backoff && now < backoff.next_at) return;
+    const unread = this.#sql.exec("SELECT 1 FROM lists WHERE appearance_synced_at IS NULL LIMIT 1").toArray().length > 0;
+    const last = this.#getSyncState(APPEARANCE_STATE_KEY)?.last_synced_at ?? null;
+    if (!backoff && !unread && last !== null && now - last < this.#intervalMs()) return;
+    const listIds = this.listLists().map((l) => l.list_id);
+    if (listIds.length === 0) return;
+    // An owner switch during the reads (resetIdentity) makes them the old
+    // account's sidebar: nothing from them is written.
+    const gen = this.#identityGeneration;
+    const writeGen = this.#sidebarWriteGen;
+    try {
+      const sub = await this.#substrateForScan();
+      // Both reads before any write, so a failed second read changes nothing.
+      // No 429 retries: a throttled mailbox fails the read, which backs off,
+      // rather than holding the alarm for up to 40 s.
+      const folders = await sub.listFolders({ fast: true });
+      const groups = await sub.listFolderGroups({ fast: true });
+      if (gen !== this.#identityGeneration) return;
+      if (writeGen !== this.#sidebarWriteGen) {
+        // A write stored during the GETs may be missing from them; applying
+        // them would undo it. last_synced_at stays, so the next cycle reads again.
+        log.info("list_appearance_read_superseded", {});
+        return;
+      }
+      const r = this.applyListAppearance(folders, groups, listIds, now);
+      if ((await this.#state.get<number>(APPEARANCE_FIRST_READ_KEY)) === undefined) {
+        // The apply's time, not the read's start: the groups' entity_map rows
+        // are stamped as they are inserted, after the GETs.
+        await this.#state.put(APPEARANCE_FIRST_READ_KEY, Date.now());
+      }
+      this.#setSyncState(APPEARANCE_STATE_KEY, { last_synced_at: now, status: "idle", last_error: null });
+      if (backoff) await this.#state.delete(APPEARANCE_BACKOFF_KEY);
+      log.info("list_appearance_synced", r);
+    } catch (e) {
+      if (gen !== this.#identityGeneration) return;
+      if (e instanceof Error && e.message.includes("my_day_unavailable")) return;
+      if (e instanceof SubstrateError && e.status === 403) {
+        this.#appearanceUnavailable = true;
+        log.warn("list_appearance_unavailable", { error: e.detail ?? "403" });
+        return;
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      const failures = (backoff?.failures ?? 0) + 1;
+      const delay = Math.min(this.#intervalMs() * 2 ** (failures - 1), APPEARANCE_BACKOFF_MAX_MS);
+      await this.#state.put(APPEARANCE_BACKOFF_KEY, { failures, next_at: now + delay } satisfies AppearanceBackoff);
+      this.#setSyncState(APPEARANCE_STATE_KEY, { status: "error", last_error: msg });
+      log.warn("list_appearance_read_failed", { error: msg, failures, retry_in_min: Math.round(delay / 60_000) });
+    }
+  }
+
+  // Stores one sidebar read: upserts the groups and deletes the ones that are
+  // gone (each logs a change or deletion record through migration v12's
+  // triggers), then sets each list's group, position and theme. Groups are
+  // written first, so a list moved into a new group is logged after the
+  // group. `listIds`: the lists that existed when the read started; each is
+  // marked read, matched or not, so a list Substrate doesn't return isn't
+  // read again every cycle. Lists added since keep the marker NULL.
+  applyListAppearance(
+    folders: SubstrateFolder[],
+    groups: SubstrateFolderGroup[],
+    listIds: string[],
+    now: number = Date.now(),
+  ): {
+    lists: number;
+    unmatched_folders: number;
+    unread_lists: number;
+    groups: number;
+    groups_deleted: number;
+    groups_kept_unconfirmed: boolean;
+  } {
+    return this.#transact(() => {
+      const keep = new Set(groups.map((g) => g.Id));
+      // A folder naming a group the group read didn't return means the two
+      // reads disagree (a group made between them, or a short group read):
+      // keep every stored group this time rather than delete one in use.
+      const groupsComplete = folders.every((f) => !f.ParentFolderGroupId || keep.has(f.ParentFolderGroupId));
+      for (const g of groups) {
+        this.#sql.exec(
+          `INSERT INTO list_groups (group_id, name, order_datetime) VALUES (?, ?, ?)
+           ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, order_datetime = excluded.order_datetime`,
+          g.Id, g.Name ?? null, g.OrderDateTime ?? null,
+        );
+      }
+      const stored = this.#sql.exec<{ group_id: string }>("SELECT group_id FROM list_groups").toArray();
+      let deleted = 0;
+      for (const { group_id } of groupsComplete ? stored : []) {
+        if (keep.has(group_id)) continue;
+        // Ungroup its lists first, so each is logged again with group_id
+        // null even when this read doesn't return it (section 4.2).
+        this.#sql.exec("UPDATE lists SET group_id = NULL WHERE group_id = ?", group_id);
+        this.#sql.exec("DELETE FROM list_groups WHERE group_id = ?", group_id);
+        deleted += 1;
+      }
+      const known = new Set(listIds);
+      const read = new Set<string>();
+      let unmatched = 0;
+      for (const f of folders) {
+        if (!known.has(f.Id)) {
+          unmatched += 1;
+          continue;
+        }
+        read.add(f.Id);
+        this.#sql.exec(
+          `UPDATE lists SET group_id = ?, order_datetime = ?, theme_color = ?, theme_background = ?,
+             appearance_synced_at = ? WHERE list_id = ?`,
+          f.ParentFolderGroupId ?? null, f.OrderDateTime ?? null,
+          rawAppearance(f.ThemeColor), rawAppearance(f.ThemeBackground), now, f.Id,
+        );
+      }
+      for (const id of listIds) {
+        if (!read.has(id)) this.#sql.exec("UPDATE lists SET appearance_synced_at = ? WHERE list_id = ?", now, id);
+      }
+      return {
+        lists: read.size,
+        unmatched_folders: unmatched,
+        unread_lists: listIds.length - read.size,
+        groups: groups.length,
+        groups_deleted: deleted,
+        groups_kept_unconfirmed: !groupsComplete,
+      };
+    });
+  }
+
+  // The sidebar as the mirror last read it: each list's group and position,
+  // and each group's position (docs/SYNC-API.md section 10.4). Excluded lists
+  // are included: they still hold a place in To Do's sidebar.
+  sidebar(): {
+    lists: Array<{ list_id: string; group_id: string | null; order_datetime: string | null; wellknown: string | null }>;
+    groups: Array<{ group_id: string; order_datetime: string | null }>;
+  } {
+    return {
+      lists: this.#sql
+        .exec<{ list_id: string; group_id: string | null; order_datetime: string | null; wellknown: string | null }>(
+          "SELECT list_id, group_id, order_datetime, wellknown FROM lists",
+        )
+        .toArray(),
+      groups: this.#sql
+        .exec<{ group_id: string; order_datetime: string | null }>("SELECT group_id, order_datetime FROM list_groups")
+        .toArray(),
+    };
+  }
+
+  // When the first sidebar read succeeded, or null if none has.
+  async sidebarFirstReadAt(): Promise<number | null> {
+    return (await this.#state.get<number>(APPEARANCE_FIRST_READ_KEY)) ?? null;
+  }
+
+  // Stores one folder as a write returned it (ops setListAppearance), the
+  // same columns a sidebar read sets. A group the mirror hasn't read yet is
+  // stored as named; the next sidebar read adds the group itself.
+  storeFolderAppearance(folder: SubstrateFolder): void {
+    this.#sidebarWriteGen++;
+    this.#sql.exec(
+      `UPDATE lists SET group_id = ?, order_datetime = ?, theme_color = ?, theme_background = ? WHERE list_id = ?`,
+      folder.ParentFolderGroupId ?? null, folder.OrderDateTime ?? null,
+      rawAppearance(folder.ThemeColor), rawAppearance(folder.ThemeBackground), folder.Id,
+    );
+  }
+
+  // Stores one list group as a write returned it (ops/lists.ts), the same
+  // columns a sidebar read sets. The insert trigger logs it; on a create the
+  // caller has reserved the app's sid first, so none is minted.
+  storeFolderGroup(group: SubstrateFolderGroup): void {
+    this.#sidebarWriteGen++;
+    this.#sql.exec(
+      `INSERT INTO list_groups (group_id, name, order_datetime) VALUES (?, ?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, order_datetime = excluded.order_datetime`,
+      group.Id, group.Name ?? null, group.OrderDateTime ?? null,
+    );
+  }
+
+  // Drops a deleted group the way a sidebar read does: its lists are
+  // ungrouped first, so each is logged again with group_id null.
+  removeFolderGroup(groupId: string): void {
+    this.#sidebarWriteGen++;
+    this.#transact(() => {
+      this.#sql.exec("UPDATE lists SET group_id = NULL WHERE group_id = ?", groupId);
+      this.#sql.exec("DELETE FROM list_groups WHERE group_id = ?", groupId);
+    });
+  }
+
   // Budgeted background My Day Substrate scan. Substrate has no delta, so each
   // list is a full per-folder enumeration; running the whole roster in one cycle
   // would stack N Substrate GETs onto the task-delta page burst and can blow the
@@ -2132,9 +3531,15 @@ export class IndexCore implements TokenProvider {
     for (const listId of due) {
       try {
         const folderTasks = await sub.listFolderTasks(listId);
+        // Substrate returns default REST IDs; the mirror is keyed on immutable
+        // IDs (section 18.2), so translate the folder's IDs in one call.
+        const ids = await new GraphClient(this).translateToImmutable(
+          folderTasks.map((t) => t.Id ?? "").filter(Boolean),
+        );
         for (const t of folderTasks) {
-          if (!t.Id) continue;
-          this.updateMyDayFields(t.Id, {
+          const id = t.Id ? ids.get(t.Id) : undefined;
+          if (!id) continue;
+          this.updateMyDayFields(id, {
             committed_day: t.CommittedDay ? t.CommittedDay.slice(0, 10) : null,
             committed_order: t.CommittedOrder ?? null,
             order_datetime: t.OrderDateTime ?? null,
@@ -2196,20 +3601,60 @@ export class IndexCore implements TokenProvider {
   async #runChecklistScanBatch(skip: (listId: string) => boolean = () => false): Promise<void> {
     if (!checklistCacheEnabled(this.#env)) return;
 
-    const max = checklistScanMaxTasksPerCycle(this.#env);
-    const skipIds = this.listLists()
-      .filter((l) => skip(l.list_id))
+    // Flagged email gets no sub-resource fetch at all; other archive lists get
+    // it for open tasks only (sections 1.2, 18.7a).
+    // From the stored setting, which backfillRemaining (change-feed.ts) also
+    // reads, so the count it reports matches what this scan will drain.
+    const lists = this.listLists();
+    const skipIds = lists
+      .filter((l) => skip(l.list_id) || l.wellknown === "flaggedEmails")
       .map((l) => l.list_id);
-    const due = this.selectDueChecklistTasks(max, skipIds);
+    const openOnlyIds = lists.filter((l) => l.sync === "reference").map((l) => l.list_id);
+    // Backfill mode: while more than one batch is waiting, take a bigger batch
+    // and have alarm() come back soon instead of after the full interval.
+    const normal = checklistScanMaxTasksPerCycle(this.#env);
+    const probe = this.selectDueChecklistTasks(normal + 1, skipIds, openOnlyIds);
+    this.#scanBacklog = probe.length > normal;
+    const due = this.#scanBacklog
+      ? this.selectDueChecklistTasks(Math.max(normal, BACKFILL_TASKS_PER_CYCLE), skipIds, openOnlyIds)
+      : probe;
     if (due.length === 0) return;
+    const sub = myDayEnabled(this.#env) ? await this.#substrateForScan() : null;
 
     const graph = new GraphClient(this);
     let scanned = 0;
     let errored = 0;
     for (const { task_id, list_id } of due) {
       try {
-        const items = await listChecklistItems(graph, list_id, task_id);
-        this.replaceChecklistItems(task_id, list_id, items);
+        // One GET returns the steps and linked resources; attachments need
+        // their own call, made only when the task has any (section 1.1).
+        const t = await getTaskWithSubresources(graph, list_id, task_id);
+        const atts = t.hasAttachments ? await listAttachments(graph, list_id, task_id) : [];
+        // Step order lives only in Substrate. Best effort: a failure keeps the
+        // steps and leaves their order as it was.
+        let order: Map<string, string | null> | null = null;
+        if (sub && (t.checklistItems?.length ?? 0) > 0) {
+          try {
+            const subtasks = await sub.listSubtasks(list_id, task_id, { fast: true });
+            order = new Map(subtasks.filter((s) => s.Id).map((s) => [s.Id as string, s.OrderDateTime ?? null]));
+          } catch (e) {
+            log.warn("checklist_order_fetch_failed", { task_id, error: String(e) });
+          }
+        }
+        this.#transact(() => {
+          this.replaceLinkedResources(task_id, list_id, t.linkedResources ?? []);
+          this.replaceAttachments(task_id, list_id, atts);
+          // Last: it clears the "needs fetch" marker.
+          this.replaceChecklistItems(task_id, list_id, t.checklistItems ?? []);
+          if (order) {
+            for (const [id, at] of order) {
+              this.#sql.exec(
+                "UPDATE checklist_items SET order_datetime = ? WHERE item_id = ? AND task_id = ? AND order_datetime IS NOT ?",
+                at, id, task_id, at,
+              );
+            }
+          }
+        });
         scanned += 1;
       } catch (e) {
         errored += 1;
@@ -2219,6 +3664,17 @@ export class IndexCore implements TokenProvider {
       }
     }
     log.info("checklist_scan_batch", { scanned, errored, due: due.length });
+  }
+
+  async #substrateForScan(): Promise<SubstrateClient> {
+    const ident = await loadIdentity(this.#env);
+    return new SubstrateClient(
+      {
+        getSubstrateAccessToken: () => this.getSubstrateAccessToken(),
+        forceSubstrateRefresh: () => this.forceSubstrateRefresh(),
+      },
+      ident?.anchorMailbox ?? null,
+    );
   }
 
   #intervalMs(): number {
@@ -2242,7 +3698,188 @@ export class IndexCore implements TokenProvider {
     const n = Number(this.#env.MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE);
     return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 6;
   }
+
+  // -- Write lease (docs/SYNC-API.md section 18.4) ----------------------------
+  // One writer at a time across every surface that changes Microsoft data (MCP
+  // tools today, sync mutations and the n8n routes later). The writes run in
+  // the caller — the McpAgent Worker on Cloudflare, the request on Node — not
+  // in here, and a closure can't cross Durable Object RPC, so the queue can't
+  // be a promise chain like #refreshChain. It is a lease: the writer acquires
+  // it, makes its Graph/Substrate calls, renews it while they run, and
+  // releases it. Waiting happens HERE, in a FIFO of pending acquires, so a
+  // burst of writes queues in arrival order instead of polling; only the
+  // wait crosses RPC. A writer that dies stops renewing and the TTL hands the
+  // lease to the next waiter. Client side: src/core/ops/write-lease.ts.
+  //
+  // {holder, expiresAt} is persisted in the StateStore so a restart of the
+  // object (it can be evicted between a holder's renewals) doesn't drop a live
+  // lease; the waiters are in memory because their RPCs die with the object.
+  #writeLease: { holder: string; expiresAt: number } | null = null;
+  #writeLeaseLoaded: Promise<void> | null = null;
+  #writeLeaseWaiters: Array<{
+    holder: string;
+    ttl: number;
+    resolve: (r: { granted: true; expiresAt: number } | { granted: false }) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
+  #writeLeaseExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Grants the lease to `holder` when it already holds it (renewal: extends
+  // it), or when it is free and nobody is queued ahead. Otherwise waits up to
+  // waitMs in FIFO order; { granted: false } when the wait runs out. TTL and
+  // wait are clamped so a bad caller can't hold or block writes for long.
+  async acquireWriteLease(
+    holder: string,
+    ttlMs: number,
+    waitMs = 0,
+  ): Promise<{ granted: true; expiresAt: number } | { granted: false }> {
+    await this.#loadWriteLease();
+    const ttl = clampMs(ttlMs, WRITE_LEASE_MIN_TTL_MS, WRITE_LEASE_MAX_TTL_MS);
+    const lease = this.#writeLease;
+    const now = Date.now();
+    const free = !lease || lease.expiresAt <= now;
+    if (lease?.holder === holder && lease.expiresAt > now) return this.#grantWriteLease(holder, ttl);
+    if (free && this.#writeLeaseWaiters.length === 0) return this.#grantWriteLease(holder, ttl);
+    const wait = clampMs(waitMs, 0, WRITE_LEASE_MAX_WAIT_MS);
+    if (wait === 0) return { granted: false };
+    const granted = new Promise<{ granted: true; expiresAt: number } | { granted: false }>((resolve) => {
+      const w = {
+        holder,
+        ttl,
+        resolve,
+        timer: setTimeout(() => {
+          this.#writeLeaseWaiters = this.#writeLeaseWaiters.filter((x) => x !== w);
+          resolve({ granted: false });
+        }, wait),
+      };
+      this.#writeLeaseWaiters.push(w);
+    });
+    this.#handOffWriteLease();
+    return granted;
+  }
+
+  // Releases the lease only if `holder` still holds it (a holder whose lease
+  // expired and passed on can't release the new owner's), then hands it to
+  // the next waiter. True if released.
+  async releaseWriteLease(holder: string): Promise<boolean> {
+    await this.#loadWriteLease();
+    if (this.#writeLease?.holder !== holder) return false;
+    this.#writeLease = null;
+    if (!this.#handOffWriteLease()) await this.#persistWriteLease();
+    return true;
+  }
+
+  async #grantWriteLease(holder: string, ttl: number): Promise<{ granted: true; expiresAt: number }> {
+    const expiresAt = Date.now() + ttl;
+    this.#writeLease = { holder, expiresAt };
+    this.#armWriteLeaseExpiry();
+    await this.#persistWriteLease();
+    return { granted: true, expiresAt };
+  }
+
+  // Gives a free or expired lease to the head of the queue. True if it did.
+  #handOffWriteLease(): boolean {
+    const lease = this.#writeLease;
+    if (lease && lease.expiresAt > Date.now()) {
+      this.#armWriteLeaseExpiry();
+      return false;
+    }
+    const next = this.#writeLeaseWaiters.shift();
+    if (!next) {
+      this.#writeLease = null;
+      return false;
+    }
+    clearTimeout(next.timer);
+    void this.#grantWriteLease(next.holder, next.ttl).then(next.resolve);
+    return true;
+  }
+
+  // While someone waits, wake at the holder's expiry so a dead holder's lease
+  // passes on without anyone polling. Renewals push expiresAt out; the timer
+  // re-checks and re-arms.
+  #armWriteLeaseExpiry(): void {
+    if (this.#writeLeaseExpiryTimer !== undefined) clearTimeout(this.#writeLeaseExpiryTimer);
+    this.#writeLeaseExpiryTimer = undefined;
+    const lease = this.#writeLease;
+    if (!lease || this.#writeLeaseWaiters.length === 0) return;
+    this.#writeLeaseExpiryTimer = setTimeout(
+      () => {
+        this.#writeLeaseExpiryTimer = undefined;
+        this.#handOffWriteLease();
+      },
+      Math.max(lease.expiresAt - Date.now(), 0) + 5,
+    );
+  }
+
+  #loadWriteLease(): Promise<void> {
+    this.#writeLeaseLoaded ??= this.#state
+      .get<{ holder: string; expiresAt: number }>(WRITE_LEASE_KEY)
+      .then((stored) => {
+        if (stored && !this.#writeLease && stored.expiresAt > Date.now()) this.#writeLease = stored;
+      })
+      .catch((e) => log.warn("write_lease_load_failed", { error: String(e) }));
+    return this.#writeLeaseLoaded;
+  }
+
+  // Memory is authoritative; a failed persist only loses restart survival.
+  async #persistWriteLease(): Promise<void> {
+    try {
+      if (this.#writeLease) await this.#state.put(WRITE_LEASE_KEY, this.#writeLease);
+      else await this.#state.delete(WRITE_LEASE_KEY);
+    } catch (e) {
+      log.warn("write_lease_persist_failed", { error: String(e) });
+    }
+  }
 }
+
+const WRITE_LEASE_KEY = "write_lease";
+const WRITE_LEASE_MIN_TTL_MS = 1_000;
+const WRITE_LEASE_MAX_TTL_MS = 120_000;
+const WRITE_LEASE_MAX_WAIT_MS = 120_000;
+const clampMs = (v: number, min: number, max: number) => Math.min(Math.max(Number.isFinite(v) ? v : 0, min), max);
+
+// The columns behind each sync API field that carries a field clock
+// (docs/SYNC-API.md section 6), per kind: a server-side write that changes
+// one stamps that field's clock, so an older queued app edit is superseded.
+// Idempotency rows outlive any edit the app still holds (section 5.4).
+const MUTATION_RETENTION_MS = 30 * 86_400_000;
+
+// A step's `checked` is stamped with Graph's checkedDateTime when it's checked;
+// anything else with now.
+function stepClock(item: ChecklistItem): (field: string) => number {
+  const now = Date.now();
+  const checkedAt = item.isChecked && item.checkedDateTime ? Date.parse(item.checkedDateTime) : NaN;
+  return (field) => (field === "checked" && !Number.isNaN(checkedAt) ? checkedAt : now);
+}
+
+// A theme value as stored: the string Substrate sent, or the JSON of anything
+// else (the format is undocumented, so nothing is mapped or validated).
+function rawAppearance(v: unknown): string | null {
+  if (v == null) return null;
+  return typeof v === "string" ? v : JSON.stringify(v);
+}
+
+const CLOCKED: Record<string, { table: string; key: string; fields: Record<string, readonly string[]> }> = {
+  task: {
+    table: "tasks",
+    key: "task_id",
+    fields: {
+      title: ["title"],
+      body: ["body_content", "body_type"],
+      status: ["status"],
+      completed_at: ["completed_at"],
+      importance: ["importance"],
+      due: ["due_at"],
+      start: ["start_at"],
+      reminder: ["reminder_at", "is_reminder_on"],
+      categories: ["categories_json"],
+      recurrence: ["recurrence_json"],
+    },
+  },
+  list: { table: "lists", key: "list_id", fields: { name: ["display_name"], sync: ["sync"] } },
+  step: { table: "checklist_items", key: "item_id", fields: { title: ["display_name"], checked: ["is_checked"] } },
+  link: { table: "linked_resources", key: "link_id", fields: { url: ["web_url"], title: ["display_name"] } },
+};
 
 // Every public method — the RPC surface the Cloudflare shell delegates and
 // core callers use via ownerIndex(). bootstrap() is host lifecycle, not surface.
@@ -2258,3 +3895,44 @@ type Promisified<T> = {
   [K in keyof T]: T[K] extends (...a: infer A) => infer R ? (...a: A) => Promise<Awaited<R>> : never;
 };
 export type IndexBackendSurface = Promisified<Omit<IndexCoreMethods, "alarm">>;
+
+// Wraps an IndexCore so every method call is followed by announceChanges():
+// one check of the log's top seq per RPC, so a burst of writes inside one call
+// sends one message. Both hosts route their RPC surface through it.
+export function announcing(core: IndexCore): IndexCore {
+  return new Proxy(core, {
+    get(target, key) {
+      const member: unknown = Reflect.get(target, key);
+      if (typeof member !== "function" || key === "announceChanges" || key === "constructor") {
+        return typeof member === "function" ? member.bind(target) : member;
+      }
+      return (...args: unknown[]) => {
+        const after = () => {
+          try {
+            target.announceChanges();
+          } catch (e) {
+            log.warn("sync_announce_failed", { error: String(e) });
+          }
+        };
+        let out: unknown;
+        try {
+          out = (member as (...a: unknown[]) => unknown).apply(target, args);
+        } catch (e) {
+          after();
+          throw e;
+        }
+        if (out instanceof Promise) {
+          return out.then(
+            (v) => (after(), v),
+            (e) => {
+              after();
+              throw e;
+            },
+          );
+        }
+        after();
+        return out;
+      };
+    },
+  });
+}

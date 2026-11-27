@@ -93,6 +93,9 @@ export const TASK_COLUMNS = [
   "status",
   "title",
   "body_plain",
+  // The body as Graph stores it, for clients that render it (migration v7).
+  "body_content",
+  "body_type",
   "created_at",
   "due_at",
   "completed_at",
@@ -116,6 +119,8 @@ export interface TaskRow {
   status: string;
   title: string;
   body_plain: string | null;
+  body_content: string | null;
+  body_type: string | null;
   created_at: number | null;
   due_at: number | null;
   completed_at: number | null;
@@ -141,6 +146,17 @@ export interface ListRow {
   wellknown: string | null;
   is_owner: number | null;
   is_shared: number | null;
+  // The list's sync setting (migration v11): todo | reference | excluded, or
+  // NULL until the sync cycle first records it.
+  sync?: string | null;
+  // Sidebar appearance read from Substrate (migration v12), NULL until read:
+  // the list group's Substrate Id, the sidebar position, and the theme as
+  // Substrate sends it.
+  group_id?: string | null;
+  order_datetime?: string | null;
+  theme_color?: string | null;
+  theme_background?: string | null;
+  appearance_synced_at?: number | null;
 }
 
 // One row per checklist item (migration v3). Joinable to `tasks` by task_id so
@@ -252,6 +268,8 @@ export function taskToRow(t: TodoTask, listId: string): TaskRow {
     list_id: listId,
     status: t.status ?? "notStarted",
     title: t.title ?? "",
+    body_content: t.body?.content ?? null,
+    body_type: t.body?.contentType ?? null,
     body_plain:
       t.body?.content == null ? null : stripHtml(t.body.content, t.body.contentType),
     created_at: isoToEpoch(t.createdDateTime),
