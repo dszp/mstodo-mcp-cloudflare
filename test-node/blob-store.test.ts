@@ -444,6 +444,9 @@ describe("POST /api/v1/attachments", () => {
     const fail: { next: "drop-before" | "drop-after" | null } = { next: null };
     // Runs while Graph handles an attach POST, before it answers.
     const hooks: { duringPost?: () => void } = {};
+    // Graph refuses the next attachment listing (a 403, which isn't retried), and how far Graph's
+    // clock runs behind the server's.
+    const graphOpts = { throttleNextList: false, clockBehindMs: 0 };
     let next = 0;
     const meta = (a: GraphAttachment) => ({
       "@odata.type": "#microsoft.graph.taskFileAttachment", id: a.id, name: a.name, size: a.bytes.byteLength,
@@ -457,7 +460,7 @@ describe("POST /api/v1/attachments", () => {
         if (failure === "drop-before") throw new TypeError("network connection lost");
         posts.push(url);
         const body = JSON.parse(String(init.body)) as { name: string; contentBytes: string };
-        const a = { id: `A${++next + 1}`, name: body.name, bytes: new Uint8Array(Buffer.from(body.contentBytes, "base64")), modified: new Date().toISOString() };
+        const a = { id: `A${++next + 1}`, name: body.name, bytes: new Uint8Array(Buffer.from(body.contentBytes, "base64")), modified: new Date(Date.now() - graphOpts.clockBehindMs).toISOString() };
         graph.push(a);
         hooks.duringPost?.();
         if (failure === "drop-after") throw new TypeError("network connection lost");
@@ -468,6 +471,10 @@ describe("POST /api/v1/attachments", () => {
         const a = graph.find((x) => x.id === decodeURIComponent(one[1]));
         if (!a) return Response.json({ error: { code: "NotFound" } }, { status: 404 });
         return Response.json({ ...meta(a), contentBytes: Buffer.from(a.bytes).toString("base64") });
+      }
+      if (path.endsWith("/attachments") && graphOpts.throttleNextList) {
+        graphOpts.throttleNextList = false;
+        return Response.json({ error: { code: "Forbidden" } }, { status: 403 });
       }
       return Response.json({ value: path.endsWith("/attachments") ? graph.map(meta) : [] });
     });
@@ -481,7 +488,7 @@ describe("POST /api/v1/attachments", () => {
         undefined,
       );
     const named = (name: string) => graph.filter((a) => a.name === name);
-    return { ...t, env, posts, graph, fail, hooks, named, send };
+    return { ...t, env, posts, graph, fail, hooks, graphOpts, named, send };
   }
   const SID = "0190a1b2-c3d4-7e5f-8a9b-00000000aa01";
   afterEach(() => vi.unstubAllGlobals());
@@ -520,6 +527,27 @@ describe("POST /api/v1/attachments", () => {
     expect(await retry.json()).toMatchObject({ status: "applied", sid: SID });
     expect(t.named("note.txt").map((a) => a.id)).toEqual(["A2"]);
     expect(t.sidOf("attachment", "A2")).toBe(SID);
+  });
+
+  it("a retry that Graph refuses keeps the earlier attempt's mark, so the next retry still doesn't attach twice", async () => {
+    const t = uploadSetup();
+    t.fail.next = "drop-after";
+    expect((await t.send(SID)).status).toBe(502);
+    t.graphOpts.throttleNextList = true;
+    expect((await t.send(SID)).status).not.toBe(200);
+    const third = await t.send(SID);
+    expect(await third.json()).toMatchObject({ status: "applied", sid: SID });
+    expect(t.posts).toHaveLength(1);
+    expect(t.named("note.txt")).toHaveLength(1);
+  });
+
+  it("a retry recognises its own upload when Graph's clock runs a minute behind", async () => {
+    const t = uploadSetup();
+    t.graphOpts.clockBehindMs = 60_000;
+    t.fail.next = "drop-after";
+    expect((await t.send(SID)).status).toBe(502);
+    expect(await (await t.send(SID)).json()).toMatchObject({ status: "applied", sid: SID });
+    expect(t.named("note.txt")).toHaveLength(1);
   });
 
   it("a retry never adopts a same-name attachment that was on the task before", async () => {

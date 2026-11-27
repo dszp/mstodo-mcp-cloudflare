@@ -118,9 +118,10 @@ export async function uploadAttachment(req: Request, env: AppEnv, props: Partial
       return json({ error: "write_busy", retry: true }, 503);
     }
     // A 5xx or a dropped connection may have attached the file: the retry
-    // looks for it before attaching again.
+    // looks for it before attaching again. A retry that fails any other way
+    // keeps the earlier attempt's mark, which may still have attached it.
     const maybeWritten = (e instanceof GraphError && e.status >= 500) || e instanceof TypeError;
-    if (maybeWritten) await index.mutationRelease(mutationId);
+    if (maybeWritten || begun.prior_at_ms !== undefined) await index.mutationRelease(mutationId);
     else await index.mutationAbandon(mutationId);
     return graphFailure(e, sid, "attachment_upload");
   }
@@ -149,7 +150,10 @@ async function repeated(result: unknown, sid: string, index: IndexBackend): Prom
 class Ambiguous extends Error {}
 
 // Graph's clock against this server's, for an attachment's lastModifiedDateTime.
-const CLOCK_SKEW_MS = 5_000;
+// Generous: too small and a retry misses its own upload and attaches twice;
+// too large only admits identical bytes under the same name, which are still
+// byte-compared and must be unknown to the mirror before the first attempt.
+const CLOCK_SKEW_MS = 10 * 60_000;
 
 // A retry after a failure that may have reached Graph: the attachment the
 // earlier attempt made, if Graph stored it. A candidate has this name and
