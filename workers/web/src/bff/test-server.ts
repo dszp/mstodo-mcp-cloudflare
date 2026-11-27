@@ -35,6 +35,8 @@ export class TestServer {
   access: AccessMode = "off";
   /** When set, /token answers with this status and an empty body. */
   tokenFailure: number | null = null;
+  /** When set, replaces the cf_access_token in a token response. */
+  cfAccessTokenOverride: string | null = null;
   /** When set, /register answers with this status. */
   registerFailure: number | null = null;
   #codes = new Map<string, Code>();
@@ -168,8 +170,11 @@ export class TestServer {
     if (!client) return invalidClient("Client not found");
     if (client.secret !== secret) return invalidClient("Client authentication failed: invalid client_secret");
 
-    // RFC 7009 revocation: a token and no grant_type. Always 200, revoking only
-    // a token that belongs to this client.
+    // RFC 7009 revocation: a token and no grant_type, after the client checks
+    // above (a dead client is 401 invalid_client, like the library's
+    // parseTokenEndpointRequest, lines 3189 and 3217). Then always 200, revoking only
+    // a token that belongs to this client; a token that isn't three ":"-parts
+    // is answered 200 without a lookup (revokeToken, lines 4255-4256).
     if (!form.get("grant_type") && form.get("token")) {
       const grant = this.grants.find((g) => g.refresh_token === form.get("token") && g.client_id === clientId);
       if (grant) grant.revoked = true;
@@ -199,7 +204,7 @@ export class TestServer {
       refresh_token,
       // oauth.ts adds these (app-signin.ts withAccessToken) when the grant
       // started at /app/signin.
-      ...(code.cf_access ? { cf_access_token: CF_ACCESS_TOKEN, cf_access_expires_at: CF_ACCESS_EXPIRES_AT } : {}),
+      ...(code.cf_access ? { cf_access_token: this.cfAccessTokenOverride ?? CF_ACCESS_TOKEN, cf_access_expires_at: CF_ACCESS_EXPIRES_AT } : {}),
     });
   }
 

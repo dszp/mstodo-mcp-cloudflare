@@ -114,8 +114,8 @@ function errorPage(status: number, title: string, detail: string, cookies: strin
   return new Response(html, { status, headers });
 }
 
-const unavailable = (detail = "The Potem server can't be reached. Try again in a minute.") =>
-  errorPage(502, "Sign-in unavailable", detail, [clearCookie(LOGIN_COOKIE)]);
+const unavailable = (detail = "The Potem server can't be reached. Try again in a minute.", cookies: string[] = []) =>
+  errorPage(502, "Sign-in unavailable", detail, [...cookies, clearCookie(LOGIN_COOKIE)]);
 
 function redirect(location: string, cookies: string[]): Response {
   const headers = new Headers({ location });
@@ -145,6 +145,33 @@ async function register(cfg: BffConfig): Promise<Device> {
   return device;
 }
 
+/**
+ * Whether the server still knows this client, checked with a revocation call
+ * for a random token. The library authenticates the client first, answering
+ * 401 invalid_client when it's gone (parseTokenEndpointRequest in
+ * oauth-provider.js, lines 3189 and 3217), then answers 200 for a token that
+ * isn't three ":"-parts without looking anything up (revokeToken, lines
+ * 4255-4256); a 200 also renews the registration's expiry (line 2931).
+ * Without this, a registration that expired while the device cookie lived on
+ * would end every sign-in at the server's "Invalid client_id" page, which
+ * never redirects back here. Throws on any other answer, so a transient
+ * failure doesn't mint a new client.
+ */
+async function clientIsKnown(cfg: BffConfig, device: Device): Promise<boolean> {
+  const res = await cfg.upstream("/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", authorization: basicAuth(device) },
+    body: new URLSearchParams({ token: base64Url(cfg.random(32)) }),
+  });
+  if (res.ok) {
+    await res.body?.cancel();
+    return true;
+  }
+  const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+  if (body?.error === "invalid_client") return false;
+  throw new Error(`client check answered ${res.status}`);
+}
+
 /** GET /auth/login?return_to=<path> */
 export async function handleLogin(req: Request, cfg: BffConfig): Promise<Response> {
   const s = await sealer(cfg.secret);
@@ -157,13 +184,17 @@ export async function handleLogin(req: Request, cfg: BffConfig): Promise<Respons
   let device = await readDevice(req, s, cfg);
   let access: boolean;
   try {
+    // At most one registration per login: a client registered here isn't checked.
+    if (device && !(await clientIsKnown(cfg, device))) device = null;
     if (!device) {
       device = await register(cfg);
       cookies.push(cookieHeader(DEVICE_COOKIE, await s.seal(DEVICE_COOKIE, device), DEVICE_MAX_AGE_SEC));
     }
     access = await serverUsesAccess(cfg.upstream);
   } catch {
-    return unavailable();
+    // A client registered before the failure is kept, so the next attempt
+    // doesn't register another.
+    return unavailable(undefined, cookies);
   }
 
   const login: LoginState = {
@@ -289,10 +320,17 @@ export async function handleCallback(req: Request, cfg: BffConfig): Promise<Resp
     ...(Number.isFinite(body.cf_access_expires_at) ? { cf_access_exp: body.cf_access_expires_at } : {}),
   };
   if (!isSession(session)) return unavailable("The Potem server sent an unexpected token response.");
-  return redirect(`${cfg.webOrigin}${login.return_to}`, [
-    cookieHeader(SESSION_COOKIE, await s.seal(SESSION_COOKIE, session), cfg.maxHours * 3600),
-    clearCookie(LOGIN_COOKIE),
-  ]);
+  const sealed = await s.seal(SESSION_COOKIE, session);
+  let sessionCookie: string;
+  try {
+    sessionCookie = cookieHeader(SESSION_COOKIE, sealed, cfg.maxHours * 3600);
+  } catch {
+    // Over the cookie size cap, most likely a large cf_access_token. The size
+    // only: the record holds the tokens. Same line shape as core/log.ts.
+    console.warn(JSON.stringify({ level: "warn", event: "session_cookie_too_large", bytes: sealed.length }));
+    return unavailable("The sign-in response was too large to store.");
+  }
+  return redirect(`${cfg.webOrigin}${login.return_to}`, [sessionCookie, clearCookie(LOGIN_COOKIE)]);
 }
 
 /** POST /auth/logout */

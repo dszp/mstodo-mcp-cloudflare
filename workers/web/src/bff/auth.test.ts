@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCallback, handleLogin, handleLogout } from "./auth.ts";
 import { DEVICE_COOKIE, LOGIN_COOKIE, SESSION_COOKIE } from "./cookies.ts";
 import { sealer } from "./seal.ts";
@@ -193,6 +193,85 @@ describe("GET /auth/login", () => {
     expect(set.every((l) => l.startsWith(`${LOGIN_COOKIE}=;`))).toBe(true);
   });
 
+  it("checks a stored device once with a revocation call and doesn't register", async () => {
+    const jar = new Jar();
+    await jar.login();
+    const device = (await jar.unseal<Device>(DEVICE_COOKIE))!;
+    const res = await jar.login();
+    expect(res.status).toBe(302);
+    expect(server.registrations).toHaveLength(1);
+    expect(server.tokenRequests).toHaveLength(1);
+    const check = server.tokenRequests[0];
+    expect(check.headers.get("authorization")).toBe(`Basic ${btoa(`${device.client_id}:${device.client_secret}`)}`);
+    expect(check.form.has("grant_type")).toBe(false);
+    expect(check.form.get("token")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(res.headers.getSetCookie().some((l) => l.startsWith(`${DEVICE_COOKIE}=`))).toBe(false);
+    expect(new URL(res.headers.get("location")!).searchParams.get("client_id")).toBe(device.client_id);
+  });
+
+  it("registers again before redirecting when the stored client is gone", async () => {
+    const jar = new Jar();
+    await jar.login();
+    const first = (await jar.unseal<Device>(DEVICE_COOKIE))!.client_id;
+    server.deleteClient(first);
+    const res = await jar.login();
+    expect(res.status).toBe(302);
+    expect(server.registrations).toHaveLength(2);
+    const second = (await jar.unseal<Device>(DEVICE_COOKIE))!.client_id;
+    expect(second).not.toBe(first);
+    const loc = new URL(res.headers.get("location")!);
+    expect(loc.searchParams.get("client_id")).toBe(second);
+    expect((await jar.unseal<Login>(LOGIN_COOKIE))!.client_id).toBe(second);
+    // The browser can now finish signing in.
+    const done = await jar.callback(await server.authorize(loc.toString()));
+    expect(done.status).toBe(302);
+    expect(jar.values.has(SESSION_COOKIE)).toBe(true);
+  });
+
+  it("shows a 502 page and keeps the device when the check answers 5xx", async () => {
+    const jar = new Jar();
+    await jar.login();
+    const device = jar.values.get(DEVICE_COOKIE);
+    server.tokenFailure = 503;
+    const res = await jar.login();
+    expect(res.status).toBe(502);
+    expect(res.headers.getSetCookie()).toEqual([expect.stringMatching(new RegExp(`^${LOGIN_COOKIE}=;.*Max-Age=0`))]);
+    expect(jar.values.get(DEVICE_COOKIE)).toBe(device);
+    expect(server.registrations).toHaveLength(1);
+  });
+
+  it("shows a 502 page and keeps the device when the check can't reach the server", async () => {
+    const jar = new Jar();
+    await jar.login();
+    const device = jar.values.get(DEVICE_COOKIE);
+    const real = cfg.upstream;
+    cfg.upstream = async (path, init) => {
+      if (path === "/token") throw new TypeError("fetch failed");
+      return real(path, init);
+    };
+    const res = await jar.login();
+    expect(res.status).toBe(502);
+    expect(jar.values.get(DEVICE_COOKIE)).toBe(device);
+    expect(server.registrations).toHaveLength(1);
+  });
+
+  it("keeps a new registration when the Access probe then fails", async () => {
+    const real = cfg.upstream;
+    cfg.upstream = async (path, init) => {
+      if (path === "/api/v1/sync/info") throw new TypeError("fetch failed");
+      return real(path, init);
+    };
+    const jar = new Jar();
+    const res = await jar.login();
+    expect(res.status).toBe(502);
+    expect(jar.values.has(LOGIN_COOKIE)).toBe(false);
+    const device = (await jar.unseal<Device>(DEVICE_COOKIE))!;
+    expect(server.clients.has(device.client_id)).toBe(true);
+    cfg.upstream = real;
+    await jar.login();
+    expect(server.registrations).toHaveLength(1);
+  });
+
   it("shows a 502 page when the server can't be reached", async () => {
     cfg.upstream = async () => {
       throw new TypeError("fetch failed");
@@ -270,6 +349,30 @@ describe("GET /auth/callback", () => {
     expect(s.cf_access_token).toBe(CF_ACCESS_TOKEN);
     // app-signin.ts sends seconds since the epoch, the session's unit too.
     expect(s.cf_access_exp).toBe(CF_ACCESS_EXPIRES_AT);
+  });
+
+  it("shows a 502 page for a token response too large to store, logging its size but not the token", async () => {
+    server.cfAccessTokenOverride = "x".repeat(5000);
+    server.access = "forbidden";
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "warn").mockImplementation((...a: unknown[]) => void logged.push(a.join(" ")));
+    try {
+      const jar = new Jar();
+      const res = await jar.signIn();
+      expect(res.status).toBe(502);
+      expect(await res.text()).toContain("The sign-in response was too large to store.");
+      expect(res.headers.getSetCookie()).toEqual([expect.stringMatching(new RegExp(`^${LOGIN_COOKIE}=;.*Max-Age=0`))]);
+      expect(jar.values.has(SESSION_COOKIE)).toBe(false);
+      expect(logged).toHaveLength(1);
+      const entry = JSON.parse(logged[0]) as Record<string, unknown>;
+      expect(entry.event).toBe("session_cookie_too_large");
+      expect(entry.bytes).toBeGreaterThan(4000);
+      expect(logged[0]).not.toContain("xxxx");
+      expect(logged[0]).not.toContain("access-");
+      expect(logged[0]).not.toContain("refresh-");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("refuses a state that doesn't match the login cookie: 400, no session, no code exchange", async () => {
