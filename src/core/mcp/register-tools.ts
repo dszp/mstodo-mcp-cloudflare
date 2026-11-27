@@ -1064,7 +1064,8 @@ class ToDoTools implements TokenProvider {
               "Backdate a task's completion. ISO 8601 date (e.g. '2026-05-25'); To Do stores completion at " +
                 "DATE granularity, so any time-of-day is dropped (midnight UTC). Marks the task completed as of " +
                 "that date — works whether the task is not-yet-done OR already completed (the server forces the " +
-                "completion to re-stamp). For a normal complete-now, omit this and just set status:'completed'. " +
+                "completion to re-stamp). For a normal complete-now, omit this and just set status:'completed'; " +
+                "the server then stamps today's date in the owner's TIMEZONE. " +
                 "Implies status:'completed' unless you pass status explicitly. NOT supported on recurring tasks " +
                 "(completing one advances it to the next occurrence) — returns recurring_completion_unsupported. " +
                 "Pass null to clear the completion date.",

@@ -155,6 +155,86 @@ describe("task write tools", () => {
     expect(await h.call("update_task", { list: "L1", task_id: "GONE", title: "x" })).toMatchSnapshot();
   });
 
+  describe("completion date", () => {
+    // 23:30 in New York on Nov 24 is already Nov 25 in UTC, the day Graph
+    // would stamp on its own.
+    const EVENING = Date.parse("2026-11-25T04:30:00Z");
+    const patches = (h: { calls: Call[] }) => h.calls.filter((c) => c.method === "PATCH").map((c) => c.body);
+    const completedOn = (date: string) => ({ status: "completed", completedDateTime: { dateTime: `${date}T00:00:00.0000000`, timeZone: "UTC" } });
+
+    it("stamps the owner's local date when a task is completed without one", async () => {
+      const h = await harness({
+        routes: [
+          on("GET", `${G}/L1/tasks/T1`, () => json(task("T1"))),
+          on("PATCH", `${G}/L1/tasks/T1`, (b) => json(task("T1", b as Record<string, unknown>))),
+        ],
+      });
+      vi.setSystemTime(EVENING);
+      const r = await h.call("update_task", { list: "L1", task_id: "T1", status: "completed" });
+      expect(r.isError).toBe(false);
+      expect(patches(h)).toEqual([{ status: "completed", completedDateTime: { dateTime: "2026-11-24", timeZone: "UTC" } }]);
+    });
+
+    it("leaves an already-completed task's date alone when it's completed again", async () => {
+      const h = await harness({
+        routes: [
+          on("GET", `${G}/L1/tasks/T1`, () => json(task("T1", completedOn("2026-11-02")))),
+          on("PATCH", `${G}/L1/tasks/T1`, (b) => json(task("T1", { ...completedOn("2026-11-02"), ...(b as Record<string, unknown>) }))),
+        ],
+      });
+      vi.setSystemTime(EVENING);
+      await h.call("update_task", { list: "L1", task_id: "T1", status: "completed" });
+      expect(patches(h)).toEqual([{ status: "completed" }]);
+    });
+
+    it("completes a recurring task without a date, since Graph advances it instead", async () => {
+      const recurrence = { pattern: { type: "daily", interval: 1 }, range: { type: "noEnd", startDate: "2026-11-01" } };
+      const h = await harness({
+        routes: [
+          on("GET", `${G}/L1/tasks/T1`, () => json(task("T1", { recurrence }))),
+          on("PATCH", `${G}/L1/tasks/T1`, (b) => json(task("T1", { recurrence, ...(b as Record<string, unknown>) }))),
+        ],
+      });
+      const r = await h.call("update_task", { list: "L1", task_id: "T1", status: "completed" });
+      expect(r.isError).toBe(false);
+      expect(patches(h)).toEqual([{ status: "completed" }]);
+    });
+
+    it("resets and sends the date again when Graph answers with another day", async () => {
+      // Graph ignores completedDateTime while it still treats the task as
+      // completed (a re-check moments after an uncheck) and keeps its own day.
+      let n = 0;
+      const h = await harness({
+        routes: [
+          on("GET", `${G}/L1/tasks/T1`, () => json(task("T1"))),
+          on("PATCH", `${G}/L1/tasks/T1`, (b) => {
+            n++;
+            if (n === 1) return json(task("T1", completedOn("2026-11-27")));
+            return json(task("T1", b as Record<string, unknown>));
+          }),
+        ],
+      });
+      const r = await h.call("update_task", { list: "L1", task_id: "T1", status: "completed", completed_date: "2026-11-26" });
+      const want = { status: "completed", completedDateTime: { dateTime: "2026-11-26", timeZone: "UTC" } };
+      expect(patches(h)).toEqual([want, { status: "notStarted" }, want]);
+      expect((r.result as { task: { completedDateTime: unknown } }).task.completedDateTime).toEqual(want.completedDateTime);
+    });
+
+    it("sends the date again only once", async () => {
+      const h = await harness({
+        routes: [
+          on("GET", `${G}/L1/tasks/T1`, () => json(task("T1"))),
+          on("PATCH", `${G}/L1/tasks/T1`, (b) =>
+            json(task("T1", (b as { status: string }).status === "completed" ? completedOn("2026-11-27") : {})),
+          ),
+        ],
+      });
+      const r = await h.call("update_task", { list: "L1", task_id: "T1", completed_date: "2026-11-26" });
+      expect(r.isError).toBe(false);
+      expect(patches(h)).toHaveLength(3);
+    });
+  });
+
   it("delete_task deletes and drops the index row; maps a missing task", async () => {
     const h = await harness({
       routes: [on("DELETE", `${G}/L1/tasks/T1`, noContent), on("DELETE", `${G}/L1/tasks/GONE`, notFound)],

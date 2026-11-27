@@ -10,7 +10,7 @@ import { attachFile, bytesFromBase64, PER_FILE_MAX_BYTES } from "../upload/graph
 import { toGraphDate, toGraphDateTime } from "../util/dates";
 import { bestEffort, getGraphInnerErrorCode, isGraphNotFound, reserveSid, type OpsContext } from "./context";
 import { buildMoveCopyBody, decideAfterReparentFailure, isReparentConfirmed } from "./move-task";
-import { committedDatePart } from "./my-day";
+import { committedDatePart, todayInTimeZone } from "./my-day";
 import { computeOrder, orderValues, type ReorderPosition } from "./position";
 import { err, ok, type ToolResult } from "./result";
 
@@ -209,6 +209,9 @@ export type UpdateTaskInput = {
   if_match?: string;
 };
 
+// The day a task's completion is stamped on, as Graph returns it.
+const completedDay = (t: TodoTask): string | null => t.completedDateTime?.dateTime?.slice(0, 10) ?? null;
+
 // PATCH with only the supplied fields; null clears a date or the recurrence.
 // link_rules is present only when title or body changed (the fields the rules
 // match on).
@@ -243,8 +246,15 @@ export function updateTask(
     // recurring task can't hold one at all (completing advances it to the next
     // occurrence). So look the task up, refuse recurring, and reset an
     // already-completed one to notStarted before the PATCH below.
+    //
+    // Completing without a date gets the owner's local date: left alone,
+    // Graph stamps the UTC day, which is tomorrow for an evening completion
+    // west of UTC. Not for a recurring task, and not for one already
+    // completed, whose date a repeated status write mustn't move.
     let mainIfMatch = if_match;
-    if (completed_date !== undefined && completed_date !== null) {
+    let wantDate: string | null = null;
+    const completingNow = status === "completed" && completed_date === undefined;
+    if ((completed_date !== undefined && completed_date !== null) || completingNow) {
       let current: TodoTask;
       try {
         current = await ctx.graph.getJson(url, TodoTaskSchema);
@@ -252,23 +262,39 @@ export function updateTask(
         if (isGraphNotFound(e)) return err("task_not_found", { list_id, task_id });
         throw e;
       }
-      if (current.recurrence != null) {
-        return err("recurring_completion_unsupported", {
-          list_id,
-          task_id,
-          hint: "Completing a recurring task advances it to the next occurrence, so To Do can't keep a fixed completion date. Remove the recurrence first, or complete it without completed_date.",
-        });
-      }
-      if ((current.status ?? "") === "completed") {
-        await ctx.graph.patchJson(url, { status: "notStarted" }, TodoTaskSchema, { ifMatch: if_match });
-        // The reset consumed the caller's ETag; don't reuse a stale one.
-        mainIfMatch = undefined;
+      if (completingNow) {
+        if (current.recurrence == null && (current.status ?? "") !== "completed") {
+          wantDate = todayInTimeZone(ctx.env.TIMEZONE);
+          graphBody.completedDateTime = { dateTime: wantDate, timeZone: "UTC" };
+        }
+      } else {
+        if (current.recurrence != null) {
+          return err("recurring_completion_unsupported", {
+            list_id,
+            task_id,
+            hint: "Completing a recurring task advances it to the next occurrence, so To Do can't keep a fixed completion date. Remove the recurrence first, or complete it without completed_date.",
+          });
+        }
+        if (graphBody.status === "completed") wantDate = completed_date ?? null;
+        if ((current.status ?? "") === "completed") {
+          await ctx.graph.patchJson(url, { status: "notStarted" }, TodoTaskSchema, { ifMatch: if_match });
+          // The reset consumed the caller's ETag; don't reuse a stale one.
+          mainIfMatch = undefined;
+        }
       }
     }
 
     let task: TodoTask;
     try {
       task = await ctx.graph.patchJson(url, graphBody, TodoTaskSchema, { ifMatch: mainIfMatch });
+      // Graph can still treat the task as completed moments after it was
+      // reset (a re-check right after an uncheck), and then ignores the date
+      // and keeps its own day. Reset and send it once more.
+      if (wantDate !== null && completedDay(task) !== wantDate) {
+        log.warn("completion_date_ignored", { task_id, want: wantDate, got: completedDay(task) });
+        await ctx.graph.patchJson(url, { status: "notStarted" }, TodoTaskSchema);
+        task = await ctx.graph.patchJson(url, graphBody, TodoTaskSchema);
+      }
     } catch (e) {
       if (isGraphNotFound(e)) return err("task_not_found", { list_id, task_id });
       if (e instanceof GraphError && e.status === 412) {

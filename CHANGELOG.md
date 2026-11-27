@@ -106,6 +106,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports `capabilities.attachment_download`.
 
 ### Fixed
+- **Completion dates follow the owner's day.** Completing a task through the sync API or
+  `update_task` without a date stamps today in `TIMEZONE` instead of Graph's UTC day,
+  which put evening completions in New York on tomorrow. An already-completed task keeps
+  its date; recurring tasks are unchanged. When Graph ignores the completion date (a
+  re-check moments after an uncheck), the server resets the task and sends it once more.
 - `create_upload_link` returns `task_not_found` for a task that isn't in the named list,
   instead of minting a link whose upload fails after the person has picked files. A task the
   index already holds in that list is not checked again; any other task costs one Graph read.

@@ -1025,6 +1025,16 @@ Invariants stay on the server, applied together: completing a task sets `status`
 `completed_at` in one write, and in Graph mode Microsoft creates the next instance of a
 repeating task (section 10.1).
 
+**Completion dates.** A `task.update` that sets `status: "completed"` without
+`completed_at` is stamped with today's date in the owner's `TIMEZONE`. Left to itself,
+Graph stamps the UTC day, which is tomorrow for an evening completion west of UTC. A
+task that is already completed keeps its date, and a recurring task gets none (Graph
+advances it to the next occurrence). When Graph answers a completion with a different
+day than the one sent (it ignores the date while it still treats the task as completed,
+for example a re-check moments after an uncheck), the server resets the task and sends
+the date once more. Completions made in Microsoft's own To Do apps keep the UTC day
+those apps write.
+
 ---
 
 ## 7. Push over WebSocket
@@ -1798,6 +1808,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-27: section 6: completing a task without `completed_at` is stamped with the
+  owner's local date, and a completion date Graph ignored is sent once more.
 - 2026-11-27: section 4.6: the Claude connector's attachment reads and uploads use the
   same blob store copy as the app's downloads.
 - 2026-11-26: sections 4.6, 4.8, 4.9, 5.2 and 5.6: a blob store (R2). Attachment
