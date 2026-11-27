@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Named deployments.** Each deployment is a gitignored folder, `deployments/<name>/`, with a
+  `deployment.jsonc` (account ID, Worker name, `base_url`, custom domains, KV IDs, R2 buckets,
+  var overrides), a `.dev.vars` and a `last-deployed.json`. `deployment.example.jsonc` shows the shape.
+- **`npm run render|check|dry-run|deploy|secrets|dev|tail -- <name>`.** The commands render
+  `wrangler.example.jsonc` plus the deployment file and, once every check passes, write it to
+  `.wrangler/deployments/<name>/rendered.json`; `render` only prints it. They refuse a missing or
+  colliding deployment, a live Worker whose KV bindings differ from the file, a shell
+  `CLOUDFLARE_ACCOUNT_ID` that names another account, and a shell `CLOUDFLARE_ENV` or
+  `WRANGLER_CI_OVERRIDE_NAME`. `deploy` shows the changes
+  since the last deploy and needs an interactive terminal, or `--non-interactive` with no pending changes.
+  It also asks before detaching a custom domain missing from `custom_domains` or changing
+  `workers_dev` or `preview_urls` from the live value, and `--non-interactive` refuses both;
+  `check` exits 1 on those and on a conflicting domain.
+- `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `ACCESS_HANDOFF_REDIRECT_URIS`, `APPLE_TEAM_ID` and `APPLE_BUNDLE_IDS`
+  are vars in `wrangler.example.jsonc`, empty by default (off). A deployment sets them under `vars`.
+
+### Changed
+- The package name is `potem-server`.
+- `npm run types` reads `wrangler.example.jsonc`, as CI does.
+- A new binding goes in `wrangler.example.jsonc` once; every deployment picks it up on its next deploy.
+
+### Removed
+- `scripts/push-secrets.sh`; `npm run secrets -- <name>` replaces it.
+- The root `wrangler.jsonc`. Deploys no longer read it, and `config-live/` is no longer used.
+
+### Upgrading a self-hosted deployment
+If you deployed from a root `wrangler.jsonc`, convert it before your next deploy:
+1. Create `deployments/<name>/deployment.jsonc` from `deployment.example.jsonc`, copying the
+   account ID, Worker name, KV namespace IDs, R2 bucket name and any changed vars from your
+   `wrangler.jsonc`. Move your `.dev.vars` to `deployments/<name>/.dev.vars`.
+2. Set `workers_dev` and `preview_urls` explicitly to the values the live Worker has now. A
+   deploy changes them to whatever the file says.
+3. List every custom domain attached to the Worker in `custom_domains`, including ones added in
+   the Cloudflare dashboard. With any listed, a deploy detaches the ones that are missing.
+4. Run `npm run check -- <name>` and fix whatever it reports.
+5. Run `npm run deploy -- <name>` from a terminal. The first deploy has no `last-deployed.json`,
+   so it shows what it sends and asks you to confirm.
+
 ## [0.18.0] – 2026-11-27
 
 ### Added

@@ -1,0 +1,13 @@
+// Fake values only: a deployment file that covers every binding in wrangler.example.jsonc.
+{
+  "account_id": "0123456789abcdef0123456789abcdef",
+  "worker_name": "example-potem",
+  "base_url": "https://example-potem.example.workers.dev",
+  "workers_dev": true,
+  "preview_urls": false,
+  "kv": {
+    "OAUTH_KV": "0123456789abcdef0123456789abcde1",
+    "TODO_CACHE": "0123456789abcdef0123456789abcde2"
+  },
+  "r2": { "BLOBS": "example-blobs" }
+}

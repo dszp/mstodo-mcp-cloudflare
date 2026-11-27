@@ -1,18 +1,23 @@
 {
-  "name": "mstodo-mcp",
+  "name": "potem-server",
   "version": "0.18.0",
   "private": true,
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.2"
   },
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "node scripts/deployment/cli.ts deploy",
+    "dry-run": "node scripts/deployment/cli.ts dry-run",
+    "check": "node scripts/deployment/cli.ts check",
+    "secrets": "node scripts/deployment/cli.ts secrets",
+    "dev": "node scripts/deployment/cli.ts dev",
+    "tail": "node scripts/deployment/cli.ts tail",
+    "render": "node scripts/deployment/cli.ts render",
     "build:node": "node scripts/build-node.mjs",
     "start:node": "node dist/main.mjs",
-    "types": "wrangler types",
+    "types": "wrangler types -c wrangler.example.jsonc",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -30,6 +35,7 @@
     "@types/ws": "^8.18.2",
     "buffer": "^6.0.3",
     "esbuild": "^0.28.2",
+    "jsonc-parser": "^3.3.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.12",
     "wrangler": "^4.158.0"

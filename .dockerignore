@@ -1,6 +1,6 @@
 # Allowlist: the build context is ONLY what is re-included below. The repository
 # directory also holds gitignored secrets and local config (.dev.vars,
-# wrangler.jsonc, config-live/, ...), and the Compose .env sits in
+# deployments/, ...), and the Compose .env sits in
 # src/hosts/node/; none of it may reach an image. Only TypeScript source is
 # re-included from src/. Buildah/Podman drop an excluded directory together
 # with everything under it, so directories can't be excluded and re-entered;

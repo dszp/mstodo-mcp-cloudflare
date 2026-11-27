@@ -611,20 +611,20 @@ Deployment and setup change with it: the Microsoft secrets (`MS_*`) become the T
 adapter's configuration, not the server's, and `DEPLOYMENT.md` gains a setup path
 without them.
 
-## 15. One repository, several Cloudflare accounts
+## 15. One repository, several Cloudflare accounts (done)
 
 Each account the app shows is its own deployment (`docs/SYNC-API.md` section 14), and
-the owner wants to deploy them to different Cloudflare accounts from this one
-repository. Today that works by hand: one gitignored config per deployment
-(`wrangler.jsonc`, `config-live/<name>/wrangler.jsonc`) and `CLOUDFLARE_ACCOUNT_ID`
-set at deploy time. The step to build is a named deployment: a gitignored file per
-deployment holding its account ID, Worker name, hostname, bindings and vars, and one
-command, such as `npm run deploy -- <name>`, that renders the wrangler config from the
-example and deploys it. A new binding is then added once, in the example, not by hand
-in every config (see CLAUDE.md, "Deployments"). Adapter Workers (section 13) use the
-same mechanism.
+the owner deploys them to different Cloudflare accounts from this one repository. That
+now works through named deployments. A deployment is a gitignored folder,
+`deployments/<name>/`, whose `deployment.jsonc` holds the account ID, Worker name,
+hostname, bindings and var overrides (`deployment.example.jsonc` shows the shape).
+`npm run deploy -- <name>` renders `wrangler.example.jsonc` plus that file into a wrangler
+config and deploys it, and `check`, `dry-run`, `secrets`, `dev`, `tail` and `render` take
+the same name. A new binding is added once, in the example. The root `wrangler.jsonc` and
+`scripts/push-secrets.sh` are gone.
 
-The deploy command refuses to run without a named deployment, and refuses a name with
-no file or a file without an account ID. A bare `wrangler deploy` must not pick a
-default: with several accounts, a default is how one account's Worker gets deployed
-over another's. The root `wrangler.jsonc` goes away for the same reason.
+The commands refuse to run without a name, with a name that has no file, or with a file
+that collides with another deployment's Worker, KV namespace, bucket, domain or `base_url`.
+A deploy also refuses when the live Worker's KV bindings differ from the file (unless
+`--adopt`), and when the shell's `CLOUDFLARE_ACCOUNT_ID` names another account. Adapter
+Workers (section 13) use the same mechanism.

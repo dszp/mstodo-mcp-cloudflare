@@ -1,4 +1,4 @@
-// Bindings declared in wrangler.jsonc (KV namespaces, durable_objects, vars)
+// Bindings declared in wrangler.example.jsonc (KV namespaces, durable_objects, vars)
 // are emitted into worker-configuration.d.ts by `wrangler types` and merge
 // into the global Env. Only declare here what wrangler does NOT know about:
 // secrets without defaults, set via `wrangler secret put` or `.dev.vars`,
@@ -16,7 +16,7 @@ interface OwnerSecrets {
   OWNER_EMAIL: string;
   OWNER_OBJECT_ID?: string;
   // Optional R2 bucket (docs/SYNC-API.md section 4.9). Declared here so the
-  // code type-checks whether or not a deployment's wrangler.jsonc binds it.
+  // code type-checks whether or not a deployment binds it.
   BLOBS?: R2Bucket;
 }
 

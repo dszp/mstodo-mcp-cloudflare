@@ -25,7 +25,7 @@ export const SUBSTRATE_SCOPES = `${EXO_TASKS_SCOPE} offline_access`;
 
 // Feature flag — read as a string var ("true"/"false"). String() widens the
 // generated literal type so the comparison is well-typed regardless of the
-// committed default in wrangler.jsonc.
+// committed default in wrangler.example.jsonc.
 export function myDayEnabled(env: AppEnv): boolean {
   return String(env.ENABLE_MY_DAY ?? "").toLowerCase() === "true";
 }
