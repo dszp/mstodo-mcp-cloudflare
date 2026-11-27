@@ -1,0 +1,15 @@
+{
+  // The web Worker's own check: the BFF and the Cloudflare host, tests excluded.
+  // The WebWorker lib has fetch, Request, crypto and setTimeout but no document
+  // or window, and no Node types, so a DOM or Node global in either directory
+  // fails to compile. The host declares the Env it needs by hand (worker.ts), so
+  // no generated worker-configuration.d.ts is required.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "WebWorker"],
+    "types": [],
+    "paths": { "@potem/core/*": ["../../packages/core/*"] }
+  },
+  "include": ["src/bff/**/*.ts", "src/hosts/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -59,6 +59,7 @@ Each relied-on behaviour is cited in a code comment by its line in `node_modules
 | The Cloudflare API calls and shapes wrangler's SDK uses (script settings, domains list, domain changeset, subdomain; error code 10007 for a missing Worker) | `live.ts` | Refuses: "could not verify the live Worker" |
 | Custom domains are replaced (`replace_state=true`) only when the config has custom-domain routes | `cli.ts` `detachedDomains` | A detach goes unannounced |
 | `.dev.vars` is parsed by bundled dotenv 16.3.1 | `dev-vars.ts` (self-check) and `scripts/deployment/test/deployment-dev-vars.test.ts` (parser copy) | `dev` refuses to write the secrets file |
+| A `build` block without `cwd` runs its command in the process's working directory (`runCustomBuild`/`runCommand` pass `build.cwd` to the spawn unchanged; the config's `build.cwd` has no default) | `workers/web/wrangler.example.jsonc` (comment on `build`); `scripts/deployment/` runs wrangler from the repository root | `npm run web:build` runs in the wrong directory and the deploy fails or ships a stale `workers/web/dist` |
 
 To upgrade:
 

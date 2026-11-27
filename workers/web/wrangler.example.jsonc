@@ -16,7 +16,11 @@
   // security headers to asset responses; the single-page-application fallback
   // serves index.html for client-side routes. Wrangler runs the build command
   // from the directory it is started in, which the deployment tool sets to the
-  // repository root.
+  // repository root: with no build.cwd the command runs in the process's working
+  // directory (node_modules/wrangler/wrangler-dist/cli.js: runCustomBuild passes
+  // build.cwd to runCommand at line 192705, which hands it to the spawn at line
+  // 192643 unchanged; the config's build.cwd is read at line 214702 with no
+  // default). Do not set "cwd" here.
   "assets": {
     "directory": "dist",
     "binding": "ASSETS",

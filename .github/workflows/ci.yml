@@ -53,8 +53,17 @@ jobs:
       - name: Typecheck (web sync engine)
         run: npx tsc --noEmit -p workers/web/tsconfig.engine.json
 
+      # The web Worker (workers/web/src/bff and src/hosts, tests excluded):
+      # WebWorker lib, no DOM or Node types, so a document or process reference
+      # in the BFF or the Cloudflare host fails here.
+      - name: Typecheck (web Worker)
+        run: npx tsc --noEmit -p workers/web/tsconfig.worker.json
+
       - name: Build (Node host)
         run: npm run build:node
+
+      - name: Build (web client)
+        run: npm run web:build
 
       - name: Test
         run: npm test
