@@ -260,7 +260,7 @@ requires `SERVICE_BASE_URL` (same as upload); unset/placeholder ⇒ `download_di
 
 ## Reset
 
-Three scopes, smallest to largest. Run from the project root. First run `npm run render -- <name>`; every command below passes the rendered config with `-c`, because `--binding` needs it to find the namespace. Replace `--remote` with `--local --persist-to .wrangler/state/<name>` to operate on the local KV store that `npm run dev -- <name>` uses.
+Three scopes, smallest to largest. Run from the project root. First run `npm run check -- <name>`: it writes `.wrangler/deployments/<name>/rendered.json` only after every check passes, including the read of the live Worker, and removes it when a check fails. Every command below passes that file with `-c`, because `--binding` needs it to find the namespace. These direct wrangler commands get no account or identity checks beyond that `check`, so run them from a shell where `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ENV` and `WRANGLER_CI_OVERRIDE_NAME` are unset. Replace `--remote` with `--local --persist-to .wrangler/state/<name>` to operate on the local KV store that `npm run dev -- <name>` uses.
 
 ### 1. Soft reset between test iterations
 
@@ -295,7 +295,7 @@ Edit `deployments/<name>/.dev.vars` with the new values, then push them all to C
 npm run secrets -- <name>
 ```
 
-The script reads each secret from `deployments/<name>/.dev.vars` and pipes the value over stdin to `wrangler secret put`, so values never appear in argv, environment, terminal scrollback, or AI transcripts. Verify with `npx wrangler secret list -c .wrangler/deployments/<name>/rendered.json`.
+The script reads each secret from `deployments/<name>/.dev.vars` and pipes the value over stdin to `wrangler secret put`, so values never appear in argv, environment, terminal scrollback, or AI transcripts. Verify with `npx wrangler secret list -c .wrangler/deployments/<name>/rendered.json` (written by the `secrets` run).
 
 Any value in `.dev.vars` may instead be a **1Password secret reference** of the form `op://<vault>/<item>/<field>` — the script resolves it via the [`op` CLI](https://developer.1password.com/docs/cli/) at push time (requires `op signin`, or `OP_SERVICE_ACCOUNT_TOKEN` for headless use) and pipes the resolved value over stdin like any other secret. Literal values still work unchanged, so you can keep some or all secrets out of the file:
 
@@ -303,7 +303,7 @@ Any value in `.dev.vars` may instead be a **1Password secret reference** of the 
 MS_CLIENT_SECRET=op://Private/MS To-Do MCP/credential
 ```
 
-To push a single secret manually instead:
+To push a single secret manually instead, run `npm run check -- <name>` first and then:
 
 ```bash
 npx wrangler secret put MS_CLIENT_SECRET -c .wrangler/deployments/<name>/rendered.json   # prompts for value
@@ -315,7 +315,7 @@ After rotating, do a soft reset (above) so the next `/authorize` uses the new id
 
 ### 3. Full clean slate
 
-For pre-launch publishability checks, or to recover from corrupted state:
+For pre-launch publishability checks, or to recover from corrupted state. Run `npm run check -- <name>` first; these commands get no account or identity checks of their own:
 
 ```bash
 npx wrangler delete -c .wrangler/deployments/<name>/rendered.json                      # nukes Worker + all DO state

@@ -2,7 +2,7 @@
 // wrangler.example.jsonc plus that deployment's deployment.jsonc. The example stays
 // the single source of structure (bindings, migrations, vars, crons); the deployment
 // file only supplies what differs. Erasable TypeScript only: this runs on bare Node.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { DeploymentRefusal, deploymentPaths, parseJsonc, type DeploymentFile } from "./schema.ts";
 
@@ -92,6 +92,8 @@ export function findPlaceholders(config: WranglerConfig): string[] {
   return found;
 }
 
+// Renders in memory only. rendered.json is what direct wrangler commands are
+// pointed at, so the CLI writes it (writeRender) only once every check passed.
 export function loadAndRender(repoRoot: string, dep: DeploymentFile): WranglerConfig {
   const paths = deploymentPaths(repoRoot, dep.name);
   const examplePath = join(repoRoot, "wrangler.example.jsonc");
@@ -101,7 +103,15 @@ export function loadAndRender(repoRoot: string, dep: DeploymentFile): WranglerCo
   if (placeholders.length > 0) {
     throw new DeploymentRefusal(paths.file, placeholders[0], "still holds an example placeholder; the deployment file must supply it");
   }
+  return rendered;
+}
+
+export function writeRender(repoRoot: string, name: string, rendered: WranglerConfig): void {
+  const paths = deploymentPaths(repoRoot, name);
   mkdirSync(paths.renderDir, { recursive: true });
   writeFileSync(paths.rendered, `${JSON.stringify(rendered, null, 2)}\n`);
-  return rendered;
+}
+
+export function removeRender(repoRoot: string, name: string): void {
+  rmSync(deploymentPaths(repoRoot, name).rendered, { force: true });
 }

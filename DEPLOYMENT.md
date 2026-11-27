@@ -200,8 +200,10 @@ optional: set `"BLOBS": null` in step 3 to leave it out.
 Each deployment is a folder under `deployments/<name>/`, which is gitignored because it
 holds account-specific IDs. `<name>` is lowercase letters, digits and hyphens. The
 commands below render `wrangler.example.jsonc` plus this folder's `deployment.jsonc` into
-a wrangler config at `.wrangler/deployments/<name>/rendered.json` and run wrangler against
-it. There is no root `wrangler.jsonc`.
+a wrangler config, check it, write it to `.wrangler/deployments/<name>/rendered.json` and run
+wrangler against it. A deployment that fails a check gets no `rendered.json`, and a stale one
+is removed. `npm run render -- <name>` prints the config without writing it. There is no root
+`wrangler.jsonc`.
 
 ```bash
 mkdir -p deployments/<name>
@@ -258,7 +260,12 @@ npm run check -- <name>
 
 `check` renders the config, validates it against your other deployments and the shell, and
 reads the live Worker (read-only) to compare KV bindings, custom domains, `workers_dev` and
-preview URLs. It reports a missing Worker as "no live Worker yet", which is the expected
+preview URLs. When everything passes it writes `rendered.json`.
+
+Run `check` before any direct `npx wrangler ... -c .wrangler/deployments/<name>/rendered.json`
+command (KV keys, `secret list`, `delete`). Those commands get no account or identity checks
+beyond that `check`, so run them from a shell where `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ENV`
+and `WRANGLER_CI_OVERRIDE_NAME` are unset. It reports a missing Worker as "no live Worker yet", which is the expected
 answer before the first deploy.
 
 ### 5. Deploy

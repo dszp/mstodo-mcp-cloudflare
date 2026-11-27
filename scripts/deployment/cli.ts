@@ -39,7 +39,7 @@ import {
   wranglerToken,
   type CloudflareApi,
 } from "./live.ts";
-import { loadAndRender, type WranglerConfig } from "./render.ts";
+import { loadAndRender, removeRender, writeRender, type WranglerConfig } from "./render.ts";
 import { nodeRunner, type Runner } from "./runner.ts";
 import { DeploymentRefusal, deploymentPaths, parseDeploymentFile, parseJsonc, type DeploymentFile } from "./schema.ts";
 
@@ -86,6 +86,18 @@ async function runCommand(argv: string[], deps: CliDeps): Promise<number> {
   // command clears them first, unless a live `dev` for this name is using them.
   if (!devLockHeld(paths.devLock)) removeResolvedDevVars(paths.resolvedDevVars);
 
+  try {
+    return await runChecked(args, paths, deps);
+  } catch (e) {
+    // The docs send operators to rendered.json for direct wrangler commands, so a
+    // deployment that fails a check must not leave one behind, fresh or stale. A
+    // running dev for this name is reading its copy; that one stays.
+    if (e instanceof DeploymentRefusal && !devLockHeld(paths.devLock)) removeRender(deps.repoRoot, args.name);
+    throw e;
+  }
+}
+
+async function runChecked(args: ParsedArgs, paths: Paths, deps: CliDeps): Promise<number> {
   const relFile = `deployments/${args.name}/deployment.jsonc`;
   if (!existsSync(paths.file)) {
     throw new DeploymentRefusal(relFile, "(file)", "not found; copy deployment.example.jsonc there and fill it in");
@@ -116,6 +128,7 @@ async function runCommand(argv: string[], deps: CliDeps): Promise<number> {
     case "dev":
       return dev(ctx);
     case "tail":
+      publishRender(ctx);
       return wrangler(ctx, ["tail"]);
   }
 }
@@ -132,14 +145,21 @@ function wrangler(ctx: Ctx, head: string[], tail: string[] = []): Promise<number
 
 const list = (xs: string[]): string => (xs.length === 0 ? "(none)" : xs.join(", "));
 
+// rendered.json reflects a render that passed every check the command makes, so
+// each command writes it after those checks and before wrangler reads it.
+function publishRender(ctx: Ctx): void {
+  writeRender(ctx.deps.repoRoot, ctx.dep.name, ctx.rendered);
+}
+
 async function check(ctx: Ctx): Promise<number> {
   const { dep, deps } = ctx;
-  deps.log(`render OK: ${ctx.paths.rendered}`);
   deps.log("local checks OK: base_url, other deployment files, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ENV, WRANGLER_CI_OVERRIDE_NAME");
   const api = await deps.api(dep);
   const { found } = await inspectLiveWorker(api, dep, { adopt: false });
   if (!found) {
     deps.log(`live Worker ${dep.worker_name}: no live Worker yet; the first deploy creates it`);
+    publishRender(ctx);
+    deps.log(`rendered: ${ctx.paths.rendered}`);
     return 0;
   }
   deps.log(`live Worker ${dep.worker_name}: found, KV bindings match`);
@@ -150,6 +170,8 @@ async function check(ctx: Ctx): Promise<number> {
   const flag = (live: boolean, file: boolean) => `live ${live}, file ${file}${live === file ? "" : " (mismatch)"}`;
   deps.log(`workers.dev: ${flag(sub.enabled, dep.workers_dev)}`);
   deps.log(`preview URLs: ${flag(sub.previews_enabled, dep.preview_urls)}`);
+  publishRender(ctx);
+  deps.log(`rendered: ${ctx.paths.rendered}`);
   return 0;
 }
 
@@ -157,6 +179,7 @@ async function dryRun(ctx: Ctx): Promise<number> {
   // Wrangler's dry run makes no API calls, so the live check is the only one.
   const api = await ctx.deps.api(ctx.dep);
   await inspectLiveWorker(api, ctx.dep, { adopt: false });
+  publishRender(ctx);
   return wrangler(ctx, ["deploy", "--dry-run"]);
 }
 
@@ -209,6 +232,7 @@ async function deploy(ctx: Ctx): Promise<number> {
     }
   }
 
+  publishRender(ctx);
   const code = await wrangler(ctx, ["deploy", "--strict"]);
   if (code === 0) writeFileSync(ctx.paths.lastDeployed, `${JSON.stringify(ctx.rendered, null, 2)}\n`);
   return code;
@@ -251,6 +275,7 @@ async function secrets(ctx: Ctx): Promise<number> {
   const present = new Set(entries.map(([n]) => n));
   for (const name of SECRET_NAMES) if (!present.has(name)) deps.log(`${name}: skipped (empty)`);
 
+  publishRender(ctx);
   let failed = 0;
   for (const [name, value] of entries) {
     const r = await deps.run("npx", ["wrangler", "secret", "put", name, "-c", ctx.paths.rendered, WRANGLER_NO_ENV], {
@@ -274,6 +299,7 @@ async function dev(ctx: Ctx): Promise<number> {
   try {
     const entries = await resolveAll(ctx);
     writeResolvedDevVars(ctx.paths.resolvedDevVars, entries);
+    publishRender(ctx);
     // Separate local state per deployment: a shared store would trigger the
     // identity-change wipe when signing in as the other deployment's owner.
     return await wrangler(ctx, ["dev"], ["--persist-to", join(ctx.deps.repoRoot, ".wrangler", "state", ctx.dep.name)]);

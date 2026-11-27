@@ -9,7 +9,7 @@ import {
   parseJsonc,
   type DeploymentFile,
 } from "../scripts/deployment/schema.ts";
-import { findPlaceholders, loadAndRender, renderConfig, type WranglerConfig } from "../scripts/deployment/render.ts";
+import { findPlaceholders, loadAndRender, removeRender, renderConfig, writeRender, type WranglerConfig } from "../scripts/deployment/render.ts";
 
 const repoRoot = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 const exampleText = readFileSync(join(repoRoot, "wrangler.example.jsonc"), "utf8");
@@ -169,14 +169,25 @@ describe("loadAndRender", () => {
     for (const d of scratch.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  it("writes rendered.json under the repo's render directory and returns the config", () => {
+  it("returns the config without writing anything", () => {
     const root = scratchRoot();
     // A scratch repo root: only the example is needed.
     writeFileSync(join(root, "wrangler.example.jsonc"), exampleText);
     const out = loadAndRender(root, fixture({ name: "scratch" }));
+    expect(out.name).toBe(fixture().worker_name);
+    expect(existsSync(deploymentPaths(root, "scratch").renderDir)).toBe(false);
+  });
+
+  it("writeRender puts rendered.json under the repo's render directory; removeRender deletes it", () => {
+    const root = scratchRoot();
+    writeFileSync(join(root, "wrangler.example.jsonc"), exampleText);
+    const out = loadAndRender(root, fixture({ name: "scratch" }));
+    writeRender(root, "scratch", out);
     const p = deploymentPaths(root, "scratch").rendered;
-    expect(existsSync(p)).toBe(true);
     expect(JSON.parse(readFileSync(p, "utf8"))).toEqual(out);
+    removeRender(root, "scratch");
+    expect(existsSync(p)).toBe(false);
+    removeRender(root, "scratch");
   });
 
   it("refuses with the first placeholder path when one survives", () => {

@@ -100,8 +100,12 @@ const paths = () => deploymentPaths(root, "alpha");
 async function seedLastDeployed(): Promise<void> {
   const h = harness();
   expect(await main(["render", "alpha"], h.deps)).toBe(0);
-  copyFileSync(paths().rendered, paths().lastDeployed);
+  writeFileSync(paths().lastDeployed, `${h.logs.join("\n")}\n`);
 }
+const writeStaleRender = (): void => {
+  mkdirSync(paths().renderDir, { recursive: true });
+  writeFileSync(paths().rendered, `{"name":"stale"}\n`);
+};
 
 describe("main: arguments", () => {
   it("refuses a missing name before any child or API call", async () => {
@@ -148,11 +152,60 @@ describe("main: identity checks", () => {
   });
 });
 
+describe("main: rendered.json", () => {
+  it("is written only after every check passes", async () => {
+    const h = harness();
+    expect(await main(["check", "alpha"], h.deps)).toBe(0);
+    expect(JSON.parse(readFileSync(paths().rendered, "utf8")).name).toBe("example-alpha");
+  });
+
+  it("is not written, and a stale one is removed, when a local check refuses", async () => {
+    writeStaleRender();
+    writeDeployment("alpha", { ...alphaFile, base_url: "https://elsewhere.example.test" });
+    const h = harness();
+    expect(await main(["check", "alpha"], h.deps)).toBe(1);
+    expect(h.logs.at(-1)).toMatch(/base_url/);
+    expect(existsSync(paths().rendered)).toBe(false);
+  });
+
+  it("is removed when the shell names another account", async () => {
+    writeStaleRender();
+    const h = harness({ env: { CLOUDFLARE_ACCOUNT_ID: "0123456789abcdef0123456789abcdee" } });
+    expect(await main(["secrets", "alpha"], h.deps)).toBe(1);
+    expect(existsSync(paths().rendered)).toBe(false);
+  });
+
+  it("is removed when the live check refuses", async () => {
+    writeStaleRender();
+    const h = harness({
+      apiImpl: liveApi({ getWorkerKv: async () => ({ found: true, kv: { OAUTH_KV: "0123456789abcdef0123456789abcd99" } }) }),
+    });
+    expect(await main(["check", "alpha"], h.deps)).toBe(1);
+    expect(existsSync(paths().rendered)).toBe(false);
+  });
+
+  it("is removed when the deployment file does not parse", async () => {
+    writeStaleRender();
+    writeFileSync(paths().file, "{ not json");
+    expect(await main(["check", "alpha"], harness().deps)).toBe(1);
+    expect(existsSync(paths().rendered)).toBe(false);
+  });
+
+  it("is left alone for a running dev of the same deployment, whose wrangler is reading it", async () => {
+    writeStaleRender();
+    writeFileSync(paths().devLock, String(process.pid));
+    writeDeployment("alpha", { ...alphaFile, base_url: "https://elsewhere.example.test" });
+    expect(await main(["check", "alpha"], harness().deps)).toBe(1);
+    expect(existsSync(paths().rendered)).toBe(true);
+  });
+});
+
 describe("main: render", () => {
-  it("prints the rendered config and calls nothing", async () => {
+  it("prints the rendered config, writes nothing and calls nothing", async () => {
     const h = harness();
     expect(await main(["render", "alpha"], h.deps)).toBe(0);
     expect(JSON.parse(h.logs.join("\n")).name).toBe("example-alpha");
+    expect(existsSync(paths().rendered)).toBe(false);
     expect(h.apiCalls()).toBe(0);
     expect(h.spawns).toEqual([]);
   });
