@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeploymentRefusal, type DeploymentFile } from "../scripts/deployment/schema.ts";
@@ -73,9 +73,19 @@ describe("checkBaseUrl", () => {
     expect(r.file).toBe(f);
   });
 
-  it("accepts a host listed in custom_domains, ignoring case and a trailing dot", () => {
-    const d = dep({ base_url: "https://mstdo.example.com", workers_dev: false, custom_domains: ["MSTDO.Example.com."] });
+  it("accepts a host listed in custom_domains", () => {
+    const d = dep({ base_url: "https://mstdo.example.com", workers_dev: false, custom_domains: ["mstdo.example.com"] });
     expect(() => checkBaseUrl(d, f)).not.toThrow();
+  });
+
+  it.each([
+    ["uppercase", "MSTDO.Example.com"],
+    ["a trailing dot", "mstdo.example.com."],
+  ])("refuses a custom domain that is not canonical: %s", (_label, domain) => {
+    const d = dep({ base_url: "https://mstdo.example.com", workers_dev: false, custom_domains: ["ok.example.com", domain] });
+    const r = refusal(() => checkBaseUrl(d, f));
+    expect(r.field).toBe("custom_domains[1]");
+    expect(r.file).toBe(f);
   });
 
   it("refuses workers.dev with workers_dev off", () => {
@@ -164,6 +174,26 @@ describe("checkCrossFiles", () => {
     expect(r.message).toContain(BETA_FILE);
   });
 
+  it("refuses a base_url that differs only by host case", () => {
+    const r = refusal(() =>
+      checkCrossFiles(
+        dep({ base_url: "https://host.example.test" }),
+        others(beta({ base_url: "https://Host.example.test" })),
+      ),
+    );
+    expect(r.field).toBe("base_url");
+    expect(r.message).toContain(BETA_FILE);
+  });
+
+  it("compares a base_url that is not a parseable URL raw", () => {
+    expect(() =>
+      checkCrossFiles(dep({ base_url: "https://host.example.test" }), others(beta({ base_url: "not a url" }))),
+    ).not.toThrow();
+    expect(refusal(() => checkCrossFiles(dep({ base_url: "not a url" }), others(beta({ base_url: "not a url" })))).field).toBe(
+      "base_url",
+    );
+  });
+
   it("refuses the same base_url", () => {
     const r = refusal(() => checkCrossFiles(dep(), others(beta({ base_url: dep().base_url }))));
     expect(r.field).toBe("base_url");
@@ -220,6 +250,17 @@ describe("loadAllDeployments", () => {
       [a, "alpha"],
       [b, "beta"],
     ]);
+  });
+
+  it("follows a symlinked deployment folder", () => {
+    const root = scratch();
+    const target = join(root, "elsewhere");
+    mkdirSync(target);
+    writeFileSync(join(target, "deployment.jsonc"), body("example-linked"));
+    mkdirSync(join(root, "deployments"));
+    symlinkSync(target, join(root, "deployments", "linked"), "dir");
+    const all = loadAllDeployments(root);
+    expect(all.map((x) => [x.dep.name, x.dep.worker_name])).toEqual([["linked", "example-linked"]]);
   });
 
   it("refuses naming the file that fails to parse", () => {

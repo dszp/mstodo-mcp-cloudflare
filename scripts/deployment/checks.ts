@@ -1,7 +1,7 @@
 // Identity checks that need no network: the base URL belongs to this deployment,
 // no two deployment files collide, and the shell's account matches the file's.
 // Erasable TypeScript only: this runs on bare Node.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DeploymentRefusal, deploymentPaths, parseDeploymentFile, type DeploymentFile } from "./schema.ts";
 
@@ -28,6 +28,9 @@ export function checkBaseUrl(dep: DeploymentFile, file: string): void {
     if (!BARE_HOST.test(host)) {
       refuse(`custom_domains[${i}]`, "must be a bare hostname (letters, digits, hyphens and dots; no scheme, path or port)");
     }
+    if (host !== d) {
+      refuse(`custom_domains[${i}]`, `must be written in canonical form (lowercase, no trailing dot): ${host}`);
+    }
     return host;
   });
 
@@ -53,6 +56,16 @@ export function checkBaseUrl(dep: DeploymentFile, file: string): void {
   );
 }
 
+// Origin form of a base_url so a case variant still collides; a value that is not
+// a parseable URL is compared raw.
+const canonicalUrl = (u: string): string => {
+  try {
+    return new URL(u).origin;
+  } catch {
+    return u;
+  }
+};
+
 export function checkCrossFiles(dep: DeploymentFile, others: LoadedDeployment[]): void {
   const file = ownFile(dep);
   for (const { file: otherFile, dep: o } of others) {
@@ -76,7 +89,7 @@ export function checkCrossFiles(dep: DeploymentFile, others: LoadedDeployment[])
     dep.custom_domains.forEach((d, i) => {
       if (theirDomains.includes(normalizeHost(d))) refuse(`custom_domains[${i}]`, "same custom domain");
     });
-    if (o.base_url === dep.base_url) refuse("base_url", "same base_url");
+    if (canonicalUrl(o.base_url) === canonicalUrl(dep.base_url)) refuse("base_url", "same base_url");
   }
 }
 
@@ -96,7 +109,8 @@ export function loadAllDeployments(repoRoot: string): LoadedDeployment[] {
   if (!existsSync(root)) return [];
   const out: LoadedDeployment[] = [];
   for (const entry of readdirSync(root, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
-    if (!entry.isDirectory()) continue;
+    // statSync follows a symlinked deployment folder; a dirent does not.
+    if (!statSync(join(root, entry.name), { throwIfNoEntry: false })?.isDirectory()) continue;
     const file = deploymentPaths(repoRoot, entry.name).file;
     if (!existsSync(file)) continue;
     out.push({ file, dep: parseDeploymentFile(readFileSync(file, "utf8"), file, entry.name) });
