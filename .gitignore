@@ -13,7 +13,7 @@ RESUME.md
 .env
 .env.*
 
-# Deploys render their config from wrangler.example.jsonc plus deployments/<name>/
+# Deploys render their config from workers/server/wrangler.example.jsonc plus deployments/<name>/
 # (npm run deploy -- <name>). A root wrangler config from before that holds an
 # account ID and KV namespace IDs, so any left in a checkout stays out of git.
 wrangler.jsonc
@@ -32,7 +32,7 @@ deployments/
 node_modules
 .wrangler/
 dist/
-worker-configuration.d.ts
+**/worker-configuration.d.ts
 
 # Node host databases: a local SQLite file holds sealed tokens, OAuth grants
 # and the plaintext task cache.
@@ -53,3 +53,7 @@ docs/superpowers/
 
 # Claude Code per-user files: they can hold tokens copied from approved commands
 **/CLAUDE.local.md
+
+# Local agent and tool scratch: browser-automation captures and agent working notes
+.playwright-mcp/
+.superpowers/

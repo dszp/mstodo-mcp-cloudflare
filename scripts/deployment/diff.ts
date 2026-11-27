@@ -1,5 +1,5 @@
 // Compares a fresh render against the one last deployed from this machine, so the
-// deploy command can show an operator what a changed wrangler.example.jsonc default
+// deploy command can show an operator what a changed workers/server/wrangler.example.jsonc default
 // is about to do to their deployment. Erasable TypeScript only: this runs on bare Node.
 import type { WranglerConfig } from "./render.ts";
 

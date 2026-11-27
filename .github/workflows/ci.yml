@@ -31,13 +31,13 @@ jobs:
       # worker-configuration.d.ts. Generate it from the committed example config
       # (placeholder account_id/IDs are irrelevant — only binding shapes matter).
       - name: Generate Worker types
-        run: npx wrangler types -c wrangler.example.jsonc
+        run: npx wrangler types -c workers/server/wrangler.example.jsonc workers/server/worker-configuration.d.ts
 
       - name: Typecheck
         run: npx tsc --noEmit
 
       # The Node host's own check: Node types only, no Workers globals, so a
-      # Workers-only API reaching src/core or src/hosts/node fails here.
+      # Workers-only API reaching packages/core or workers/server/src/hosts/node fails here.
       - name: Typecheck (Node host)
         run: npx tsc -p tsconfig.node.json
 

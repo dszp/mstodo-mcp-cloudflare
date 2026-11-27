@@ -1,0 +1,178 @@
+// Shared change-feed assertions (docs/SYNC-API.md section 4), run on both
+// hosts' SQLite through IndexCore. Returns named facts so each host's test can
+// assert them one by one.
+import type { IndexCore } from "@potem/core/index/index-core";
+import type { FeedChange, FeedPage } from "@potem/core/index/change-feed";
+
+const DAY = 86_400_000;
+const task = (id: string, title: string, extra: Record<string, unknown> = {}) =>
+  ({ id, title, status: "notStarted", lastModifiedDateTime: "2026-11-24T10:00:00Z", ...extra }) as never;
+const completedAt = (ms: number) => ({
+  status: "completed",
+  completedDateTime: { dateTime: new Date(ms).toISOString().replace("Z", "0000"), timeZone: "UTC" },
+});
+
+function page(c: IndexCore, opts: Parameters<IndexCore["syncChanges"]>[0]): FeedPage {
+  const r = c.syncChanges(opts);
+  if (!r.ok) throw new Error(`unexpected ${r.error}`);
+  return r.page;
+}
+function walk(c: IndexCore, cursor: string | null, scope: string, limit = 500) {
+  const all: FeedChange[] = [];
+  let pages = 0;
+  for (;;) {
+    const p = page(c, { cursor, scope, limit });
+    all.push(...p.changes);
+    cursor = p.cursor;
+    pages++;
+    if (!p.has_more || pages > 50) return { all, cursor, pages };
+  }
+}
+
+export async function runChangeFeedChecks(c: IndexCore) {
+  const now = Date.now();
+  c.upsertList({ id: "L1", displayName: "One" } as never);
+  c.upsertList({ id: "L2", displayName: "Two", wellknownListName: "defaultList" } as never);
+  c.upsertTask(
+    task("T1", "open", {
+      body: { contentType: "html", content: "<p>hi</p>" },
+      dueDateTime: { dateTime: "2026-11-25T05:00:00.0000000", timeZone: "UTC" },
+      categories: ["Red"],
+      isReminderOn: true,
+      reminderDateTime: { dateTime: "2026-11-25T14:00:00.0000000", timeZone: "UTC" },
+    }),
+    "L1",
+  );
+  c.upsertTask(task("T2", "done recently", completedAt(now - 5 * DAY)), "L1");
+  c.upsertTask(task("T3", "done long ago", completedAt(now - 40 * DAY)), "L2");
+  c.replaceChecklistItems("T1", "L1", [{ id: "S1", displayName: "step one", isChecked: false } as never]);
+  c.replaceLinkedResources("T1", "L1", [{ id: "K1", webUrl: "https://example.com", displayName: "ex" } as never]);
+  // A deleted task before the first sync: a full sync must not send its record.
+  c.upsertTask(task("T9", "gone"), "L1");
+  c.deleteTask("T9");
+
+  const full = walk(c, null, "all");
+  const ids = (cs: FeedChange[]) => cs.map((x) => `${x.kind}:${x.deleted ? "-" : "+"}`).sort();
+  const t1 = full.all.find((x) => x.kind === "task" && !x.deleted && x.data.title === "open");
+  const l1 = full.all.find((x) => x.kind === "list" && !x.deleted && x.data.name === "One");
+  const t1d = t1 && !t1.deleted && t1.kind === "task" ? t1.data : null;
+
+  const paged = walk(c, null, "all", 1);
+  const pagedCursors: string[] = [];
+  for (let cur: string | null = null, i = 0; i < 10; i++) {
+    const p = page(c, { cursor: cur, scope: "all", limit: 1 });
+    pagedCursors.push(p.cursor);
+    cur = p.cursor;
+    if (!p.has_more) break;
+  }
+  const active = walk(c, null, "active");
+
+  // Incremental: one edit and one delete after the full sync's cursor.
+  c.upsertTask(task("T2", "done recently, renamed", { ...completedAt(now - 5 * DAY), lastModifiedDateTime: "2026-11-24T11:00:00Z" }), "L1");
+  c.deleteTask("T1");
+  const inc = walk(c, full.cursor, "all");
+  // Caught up: the same cursor again returns nothing.
+  const again = page(c, { cursor: inc.cursor, scope: "all" });
+
+  const [epoch, seq] = inc.cursor.split(".");
+  const otherEpoch = c.syncChanges({ cursor: `${epoch === "abc" ? "abd" : "abc"}.${seq}` });
+  const ahead = c.syncChanges({ cursor: `${epoch}.${Number(seq) + 100}` });
+  const garbage = c.syncChanges({ cursor: "not-a-cursor" });
+  const badScope = c.syncChanges({ scope: "everything" });
+
+  // A task sent on the first page of a full sync and deleted while the walk
+  // is still paging must reach the device as a deletion.
+  c.upsertTask(task("T5", "doomed"), "L1");
+  const first = page(c, { cursor: null, scope: "all", limit: 1 });
+  let midCursor = first.cursor;
+  const doomedSid = c.syncTaskSids(["T5"]).T5;
+  c.deleteTask("T5");
+  const rest = walk(c, midCursor, "all", 1);
+  midCursor = rest.cursor;
+
+  // A phone holds T4 open, goes offline, and T4 is completed long ago (a
+  // backdated completion, or the phone was away more than 30 days). The
+  // incremental pull must tell it to drop T4, not skip it.
+  c.upsertTask(task("T4", "open on the phone"), "L1");
+  const phone = walk(c, null, "active");
+  c.upsertTask(task("T4", "open on the phone", { ...completedAt(now - 45 * DAY), lastModifiedDateTime: "2026-11-24T12:00:00Z" }), "L1");
+  const back = walk(c, phone.cursor, "active");
+  const t4sid = c.syncTaskSids(["T4"]).T4;
+
+  const t2sid = c.syncTaskSids(["T2"]).T2;
+  const one = t2sid ? c.syncTask(t2sid) : null;
+  const info1 = await c.syncInfo();
+  const info2 = await c.syncInfo();
+
+  return {
+    "full sync sends the app settings, two lists and three live tasks, no deletion records":
+      JSON.stringify(ids(full.all)) === JSON.stringify(["app_settings:+", "list:+", "list:+", "task:+", "task:+", "task:+"]),
+    "full sync ends caught up with an epoch.seq cursor": /^[0-9a-f]+\.\d+$/.test(full.cursor),
+    "paging one at a time returns the same entities, no deletion records":
+      JSON.stringify(ids(paged.all)) === JSON.stringify(ids(full.all)) && paged.pages === 6,
+    "a full sync's intermediate cursors are marked as a walk": pagedCursors.slice(0, -1).every((x) => /\.f\d+$/.test(x)) && !/\.f/.test(pagedCursors[pagedCursors.length - 1]),
+    "task references its list by sid": !!t1d && !!l1 && t1d.list_id === l1.id,
+    "due goes out as a bare date": t1d?.due === "2026-11-25",
+    "reminder is an instant": t1d?.reminder.on === true && t1d.reminder.at === "2026-11-25T14:00:00.000Z",
+    "body keeps its type": t1d?.body?.type === "html" && t1d.body.content === "<p>hi</p>",
+    "categories parsed": JSON.stringify(t1d?.categories) === '["Red"]',
+    "steps embedded with sids": t1d?.steps.length === 1 && t1d.steps[0].title === "step one" && /^[0-9a-f]{32}$/.test(t1d.steps[0].id),
+    "links embedded with sids": t1d?.links.length === 1 && t1d.links[0].url === "https://example.com",
+    "subresources_complete after a scan": t1d?.subresources_complete === true,
+    "active scope drops a task completed 40 days ago": !active.all.some((x) => !x.deleted && x.kind === "task" && x.data.title === "done long ago"),
+    "active scope keeps a task completed 5 days ago": active.all.some((x) => !x.deleted && x.kind === "task" && x.data.title === "done recently"),
+    "active scope cursor reaches the top of the log": active.cursor === full.cursor,
+    "incremental sends the edit and the deletion":
+      JSON.stringify(ids(inc.all)) === JSON.stringify(["task:+", "task:-"]) &&
+      inc.all.some((x) => x.kind === "task" && !x.deleted && x.data.title === "done recently, renamed"),
+    "deletion record names the deleted task's sid": inc.all.some((x) => x.deleted && x.id === t1?.id),
+    "caught-up cursor returns nothing": again.changes.length === 0 && !again.has_more && again.cursor === inc.cursor,
+    "another epoch is a cursor reset": !otherEpoch.ok && otherEpoch.error === "cursor_reset",
+    "a cursor ahead of the log is a cursor reset": !ahead.ok && ahead.error === "cursor_reset",
+    "a malformed cursor is refused": !garbage.ok && garbage.error === "bad_cursor",
+    "an unknown scope is refused": !badScope.ok && badScope.error === "bad_scope",
+    "a deletion during a full sync reaches the device":
+      first.has_more && rest.all.some((x) => x.deleted && x.id === doomedSid),
+    "an incremental pull drops a task that left the device's scope":
+      back.all.length === 1 && back.all[0].deleted === true && back.all[0].id === t4sid,
+    "a task is readable by sid": one?.data.title === "done recently, renamed" && one.id === t2sid,
+    "server_id is created once": /^[0-9a-f-]{36}$/.test(info1.server_id) && info1.server_id === info2.server_id,
+  };
+}
+
+// A page larger than Durable Object SQLite's 100 bound parameters per
+// statement: the feed's IN-list reads must split below it.
+export function runLargePageChecks(c: IndexCore) {
+  c.upsertList({ id: "LB", displayName: "Big" } as never);
+  for (let i = 0; i < 250; i++) c.upsertTask(task(`B${i}`, `big ${i}`), "LB");
+  const { all } = walk(c, null, "all", 1000);
+  const tasks = all.filter((x) => x.kind === "task" && !x.deleted);
+  return {
+    "a 1000-row page returns every task": tasks.length === 250,
+    "every task carries its list's sid": tasks.every((x) => x.kind === "task" && !x.deleted && typeof x.data.list_id === "string"),
+  };
+}
+
+// List-id filters longer than Durable Object SQLite's 100 bound parameters.
+export function runManyListFilterChecks(c: IndexCore) {
+  c.upsertList({ id: "M0", displayName: "M0" } as never);
+  c.upsertTask(task("MT", "needle"), "M0");
+  const many = ["M0", ...Array.from({ length: 150 }, (_, i) => `X${i}`)];
+  const ok = (fn: () => unknown) => {
+    try {
+      fn();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return {
+    "query filters by 151 lists": ok(() => c.query({ lists: many } as never)) && c.query({ lists: many } as never).rows.some((r) => r.task_id === "MT"),
+    "search filters by 151 lists": ok(() => c.search({ query: "needle", lists: many } as never)),
+    "search with steps filters by 151 lists": ok(() => c.search({ query: "needle", lists: many, include_checklist: true } as never)),
+    "step search filters by 151 lists": ok(() => c.searchChecklistItems({ query: "x", lists: many } as never)),
+    "the step backfill skips 151 lists": ok(() => c.selectDueChecklistTasks(10, many.slice(1), many.slice(1))),
+    "a skipped list's tasks stay out of the backfill": !c.selectDueChecklistTasks(10, many, []).some((t) => t.task_id === "MT"),
+    "an unskipped list's tasks are in it": c.selectDueChecklistTasks(10, many.slice(1), []).some((t) => t.task_id === "MT"),
+  };
+}

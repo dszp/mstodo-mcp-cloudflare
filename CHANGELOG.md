@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Repository layout.** Host-independent code moved from `src/core` to `packages/core`, imported
+  as `@potem/core/<path>`, and the server (hosts, tests, `wrangler.example.jsonc`, build scripts)
+  moved to `workers/server/`. No behaviour changes. `npm run types` now writes
+  `worker-configuration.d.ts` to `workers/server/`; the Dockerfile and Compose file are at
+  `workers/server/src/hosts/node/` with the repository root as build context.
+
 ## [0.19.0] – 2026-11-27
 
 ### Added

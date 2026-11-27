@@ -15,9 +15,9 @@
     "dev": "node scripts/deployment/cli.ts dev",
     "tail": "node scripts/deployment/cli.ts tail",
     "render": "node scripts/deployment/cli.ts render",
-    "build:node": "node scripts/build-node.mjs",
+    "build:node": "node workers/server/scripts/build-node.mjs",
     "start:node": "node dist/main.mjs",
-    "types": "wrangler types -c wrangler.example.jsonc",
+    "types": "wrangler types -c workers/server/wrangler.example.jsonc workers/server/worker-configuration.d.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "leak-guard": "node scripts/leak-guard.ts"

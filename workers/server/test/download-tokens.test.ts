@@ -1,0 +1,105 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  createUploadCapability,
+  lookupUploadCapability,
+} from "@potem/core/upload/tokens";
+import {
+  consumeDownloadCapability,
+  createDownloadCapability,
+  downloadLinksEnabled,
+  lookupDownloadCapability,
+  MAX_DOWNLOAD_TTL_SECONDS,
+} from "@potem/core/upload/tokens";
+import { testAppEnv } from "./_app-env";
+import type { AppEnv } from "@potem/core/ports";
+
+// The cloudflare:test env, wrapped with appEnv() the way the Worker wraps it
+// before calling core (see test/_app-env.ts).
+const env = testAppEnv();
+
+const SCOPE = { list_id: "L1", task_id: "T1", attachment_id: "A1" } as const;
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("download capability tokens", () => {
+  it("round-trips a capability and carries the scope + metadata", async () => {
+    const { token } = await createDownloadCapability(env, {
+      ...SCOPE,
+      filename: "report.pdf",
+      content_type: "application/pdf",
+      size: 1234,
+    });
+    const v = await lookupDownloadCapability(env, token);
+    expect(v.ok).toBe(true);
+    if (v.ok) {
+      expect(v.value.list_id).toBe("L1");
+      expect(v.value.task_id).toBe("T1");
+      expect(v.value.attachment_id).toBe("A1");
+      expect(v.value.filename).toBe("report.pdf");
+      expect(v.value.content_type).toBe("application/pdf");
+      expect(v.value.size).toBe(1234);
+    }
+  });
+
+  it("mints an opaque id that does not encode the scope", async () => {
+    // Use long, distinctive scope values. The token is a random base64url id, so
+    // short markers like "L1"/"T1" collide by chance (~flaky); these markers are
+    // long enough that a coincidental substring match is effectively impossible,
+    // while a real encoding bug would still embed them verbatim.
+    const distinct = {
+      list_id: "LIST-zq7scopemarker8x-0001",
+      task_id: "TASK-vn3scopemarker6w-0002",
+      attachment_id: "ATCH-kf9scopemarker2p-0003",
+    };
+    const { token } = await createDownloadCapability(env, distinct);
+    expect(token).not.toContain(distinct.list_id);
+    expect(token).not.toContain(distinct.task_id);
+    expect(token).not.toContain(distinct.attachment_id);
+  });
+
+  it("rejects an unknown id as link_invalid", async () => {
+    expect(await lookupDownloadCapability(env, "no-such-capability")).toEqual({
+      ok: false,
+      reason: "link_invalid",
+    });
+  });
+
+  it("consume makes the link unredeemable (single-use)", async () => {
+    const { token } = await createDownloadCapability(env, SCOPE);
+    await consumeDownloadCapability(env, token);
+    expect((await lookupDownloadCapability(env, token)).ok).toBe(false);
+  });
+
+  it("reports an expired capability as link_expired", async () => {
+    vi.useFakeTimers();
+    const { token } = await createDownloadCapability(env, SCOPE, 60);
+    vi.setSystemTime(Date.now() + 61_000);
+    const v = await lookupDownloadCapability(env, token);
+    expect(v).toEqual({ ok: false, reason: "link_expired" });
+  });
+
+  it("clamps the TTL to at most 5 minutes", async () => {
+    const before = Date.now();
+    const { expiresAt } = await createDownloadCapability(env, SCOPE, 60 * 60);
+    const ttlMs = new Date(expiresAt).getTime() - before;
+    expect(ttlMs).toBeLessThanOrEqual(MAX_DOWNLOAD_TTL_SECONDS * 1000 + 1000);
+  });
+
+  it("isolates the download and upload namespaces", async () => {
+    // An upload token must not be redeemable as a download capability...
+    const up = await createUploadCapability(env, { list_id: "L1", task_id: "T1" });
+    expect((await lookupDownloadCapability(env, up.token)).ok).toBe(false);
+    // ...and a download token must not be redeemable as an upload capability.
+    const down = await createDownloadCapability(env, SCOPE);
+    expect((await lookupUploadCapability(env, down.token)).ok).toBe(false);
+  });
+
+  it("is enabled by default and disabled only by an explicit false", () => {
+    expect(downloadLinksEnabled({} as unknown as AppEnv)).toBe(true);
+    expect(downloadLinksEnabled({ ENABLE_DOWNLOAD_LINKS: "true" } as unknown as AppEnv)).toBe(true);
+    expect(downloadLinksEnabled({ ENABLE_DOWNLOAD_LINKS: "false" } as unknown as AppEnv)).toBe(false);
+    expect(downloadLinksEnabled({ ENABLE_DOWNLOAD_LINKS: "FALSE" } as unknown as AppEnv)).toBe(false);
+  });
+});
