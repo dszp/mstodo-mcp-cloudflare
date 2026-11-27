@@ -38,6 +38,31 @@ Each deployment is a folder, `deployments/<name>/` (gitignored), holding `deploy
 - **Production serves the owner's real To Do account.** Don't create or edit test data there. Test against a secondary deployment, and give test lists and tasks a recognizable prefix so they can be found and deleted.
 - **Changing the hostname creates new grants.** Tokens are bound to `<origin>/mcp` and `<origin>/api/v1`, and `buildOAuthFront(origin)` builds the front per request, so a second hostname on the same Worker works alongside the first, but every client must sign in again on the new one. Before moving, add `https://<new host>/auth/microsoft/callback` to the Entra app's redirect URIs. Then update `SERVICE_BASE_URL`: it sets the Graph subscription `notificationUrl` and the upload and download link origin. Retire the old hostname only after the connectors and the apps have moved.
 
+## Upgrading wrangler
+
+Treat a wrangler upgrade as a code change, in its own PR, never as a routine dependency bump. `scripts/deployment/` relies on wrangler behaviour that its tests stub out, so a green suite doesn't prove the new version still behaves that way. `package.json` pins wrangler to an exact version so that `npm install` and Dependabot can't move it silently; handle a Dependabot PR for wrangler with this procedure, not by merging it.
+
+Each relied-on behaviour is cited in a code comment by its line in `node_modules/wrangler/wrangler-dist/cli.js` (search the scripts and tests for `cli.js`). The ones that matter:
+
+| Behaviour | Relied on in | If it changes |
+|---|---|---|
+| `--env=` (empty) selects no environment and adds no name suffix; `CLOUDFLARE_ENV` and `WRANGLER_CI_OVERRIDE_NAME` redirect the Worker; `.env` loads through dotenv-expand, where a truthy process value wins | `checks.ts` | A deploy can silently reach another Worker |
+| The argument parser reads `--flag=value` as one value and treats a separate token starting with `-` as a flag | `args.ts` | A passed-through value can become a flag |
+| `deploy --strict` exists and aborts on non-interactive config prompts | `cli.ts` | Config prompts auto-accept off a TTY |
+| `secret put` on a missing Worker creates a draft Worker | `cli.ts` (`secrets` refuses first) | Harmless: `secrets` refuses before wrangler runs |
+| `auth token --json` output shape and token types | `live.ts` `wranglerToken` | Refuses: "could not read the token" |
+| The Cloudflare API calls and shapes wrangler's SDK uses (script settings, domains list, domain changeset, subdomain; error code 10007 for a missing Worker) | `live.ts` | Refuses: "could not verify the live Worker" |
+| Custom domains are replaced (`replace_state=true`) only when the config has custom-domain routes | `cli.ts` `detachedDomains` | A detach goes unannounced |
+| `.dev.vars` is parsed by bundled dotenv 16.3.1 | `dev-vars.ts` (self-check) and `test-node/deployment-dev-vars.test.ts` (parser copy) | `dev` refuses to write the secrets file |
+
+To upgrade:
+
+1. On a branch, set the exact new version in `package.json`, run `npm install`, and regenerate types with `npx wrangler types -c wrangler.example.jsonc`.
+2. Run `npm test` and both `tsc` commands.
+3. For each row in the table, find the cited code in the new `cli.js` and confirm the behaviour is unchanged. Update the line numbers in the comments, and the parser copy in the dev-vars test if dotenv changed. Have a reviewer who didn't do the upgrade (Fable) repeat this check.
+4. In the main checkout, run `npm run check -- <name>` and `npm run dry-run -- <name>` for every deployment. `check` doesn't depend on the wrangler version except through `auth token`, so it mainly proves the token step still works.
+5. Merge, then deploy as usual. The first deploy after the upgrade shows an empty config diff if the rendered config is unchanged.
+
 ## Worktrees and local types
 
 Do feature work in a git worktree next to the main checkout, with `node_modules` symlinked to the main checkout's copy. Deploy from the main checkout: `deployments/` and each `last-deployed.json` are gitignored and per checkout, so a worktree has none. When you remove the worktree, delete that symlink first, or `git worktree remove` refuses because of an untracked file.
