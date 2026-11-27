@@ -799,14 +799,15 @@ its own day.
 - The scope is the whole mirror, reference lists included; or one list; or one smart
   list. A smart-list scope applies that list's "Holds" rule without its "open"
   requirement, because only "Include Completed" decides whether completed tasks
-  appear, and it still leaves out reference lists.
+  appear, and it still leaves out reference lists. My Day's "due today" clause still
+  requires the task to be open.
 - Completed tasks are included unless the user turns off "Include Completed". A
   "completed since" date, when set, drops completed tasks completed before it, and
   those with no `completed_at`.
 - Results fall into four groups in this order: open tasks whose title contains the
   first query word, open tasks whose title does not, completed tasks whose title does,
   completed tasks whose title does not. Only the first word is tested against the
-  title. Within a group, `order` desc, then `id` asc.
+  title, with the same ASCII-only case folding. Within a group, `order` desc, then `id` asc.
 - "Search all history" calls `GET /api/v1/search` for the tasks the mirror does not hold.
 
 ---
