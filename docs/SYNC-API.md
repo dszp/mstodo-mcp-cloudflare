@@ -776,8 +776,10 @@ A task completed today that is in My Day stays in `my_day` and is shown under a
 The sidebar count is the number of open tasks in the list. For `completed` it is the
 number of completed tasks.
 
-The Apple app groups `completed` by date: single days for the last two weeks, then
-weeks, then months. Other clients group it the same way.
+`completed` is grouped by completion date: one group per day for the 14 days up to
+and including today, then six seven-day weeks counting back from the day before the
+first of those days, then one group per calendar month. A date after today counts as
+its own day.
 
 **Local search.** A client searches its own mirror before it calls the server:
 
