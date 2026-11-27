@@ -179,6 +179,24 @@ describe("listTasks", () => {
 });
 
 describe("searchLocal", () => {
+  it("matches an html body's plain text, not its markup", () => {
+    const html = (content: string) => ({ type: "html", content });
+    const s = store(
+      task("h", { title: "x", body: html('<div><a href="https://example.com">Quarterly</a> &amp; report</div>') }),
+      task("split", { title: "x", body: html("<p>ham</p><p>mer</p>") }),
+      task("bold", { title: "x", body: html("ham<b>mer</b>") }),
+      task("css", { title: "x", body: html("<style>.banner { color: red }</style>hello") }),
+      task("plain", { title: "x", body: { type: "text", content: "<div>raw</div>" } }),
+    );
+    expect(ids(searchLocal(s, "div"))).toEqual(["plain"]);
+    expect(ids(searchLocal(s, "href"))).toEqual([]);
+    expect(ids(searchLocal(s, "example.com"))).toEqual([]);
+    expect(ids(searchLocal(s, "banner"))).toEqual([]);
+    expect(ids(searchLocal(s, "quarterly & report"))).toEqual(["h"]);
+    expect(ids(searchLocal(s, "hammer"))).toEqual([]);
+    expect(ids(searchLocal(s, "ham mer"))).toEqual(["bold", "split"]);
+  });
+
   it("search includes reference lists", () => {
     const s = store(task("ref", { list_id: "REF", importance: "high", title: "Quarterly report" }));
     expect(ids(searchLocal(s, "report"))).toEqual(["ref"]);

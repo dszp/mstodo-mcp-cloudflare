@@ -1,4 +1,5 @@
 import type { SmartList } from "./feed";
+import { bodyText } from "./plain-text";
 import type { MirrorStore, MirrorTask } from "./store";
 
 // Smart lists and local search, per docs/SYNC-API.md section 4.10. Pure over the
@@ -130,6 +131,16 @@ export function listTasks(store: MirrorStore, listId: string): MirrorTask[] {
 // agrees on every query. Other characters compare exactly.
 const fold = (s: string): string => s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
 
+// A body's folded plain text, kept per task object: the store replaces the
+// object when the task changes, so an entry never outlives the body it was
+// computed from.
+const foldedBodies = new WeakMap<MirrorTask, string>();
+function foldedBody(t: MirrorTask): string {
+  let text = foldedBodies.get(t);
+  if (text === undefined) foldedBodies.set(t, (text = fold(bodyText(t.body))));
+  return text;
+}
+
 export function searchLocal(store: MirrorStore, text: string, opts: SearchOpts = {}): MirrorTask[] {
   const words = fold(text).split(/\s+/).filter((w) => w !== "");
   if (words.length === 0) return []; // an empty query matches nothing
@@ -142,7 +153,7 @@ export function searchLocal(store: MirrorStore, text: string, opts: SearchOpts =
     return !inReferenceList(store, t) && holds(scope.smart, t, scope, false);
   };
   const matches = (t: MirrorTask): boolean => {
-    const fields = [t.title, t.body?.content ?? "", ...t.steps.map((s) => s.title ?? "")].map(fold);
+    const fields = [fold(t.title), foldedBody(t), ...t.steps.map((s) => fold(s.title ?? ""))];
     return words.every((w) => fields.some((f) => f.includes(w)));
   };
 

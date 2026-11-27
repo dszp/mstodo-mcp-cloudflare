@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each smart list holds, how it is ordered and counted, and how local search matches, so every
   client shows the same lists.
 
+### Fixed
+- **Task body text for search.** An HTML body's `<script>` and `<style>` contents (Outlook
+  bodies carry a `<style>` block) are no longer indexed as words, and a numeric entity beyond
+  U+10FFFF is kept as written instead of throwing while the task is stored. Section 4.10 of
+  `docs/SYNC-API.md` states the rule, and the web engine's local search matches the same text.
+
 ### Changed
 - **Repository layout.** Host-independent code moved from `src/core` to `packages/core`, imported
   as `@potem/core/<path>`, and the server (hosts, tests, `wrangler.example.jsonc`, build scripts)

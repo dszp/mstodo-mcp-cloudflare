@@ -793,9 +793,21 @@ its own day.
 
 **Local search.** A client searches its own mirror before it calls the server:
 
-- Every whitespace-separated word of the query must appear in the title, the note body,
-  or the title of a step. Matching ignores case for ASCII letters only, as SQLite's
-  `LIKE` does, so clients agree on every query.
+- The query's words are what is left after splitting it on runs of Unicode whitespace,
+  the characters JavaScript's `\s` matches. A query with no words matches nothing.
+  Every word must appear in the title, the note body's plain text, or the title of a
+  step. Matching ignores case for ASCII letters only, as SQLite's `LIKE` does, so
+  clients agree on every query.
+- A body's plain text is its `content` when `type` is `text`. When `type` is `html`,
+  it is the content with each tag (`<` to the next `>`) replaced by a space, the
+  contents of `<script>` and `<style>` elements dropped (to their closing tag, or to
+  the end when there is none), the entities `&amp;`, `&lt;`, `&gt;`, `&quot;`,
+  `&apos;` and `&nbsp;` and numeric entities (`&#39;`, `&#x27;`) decoded, other
+  entities and a numeric entity beyond U+10FFFF left as written, runs of whitespace
+  collapsed to one space, and the ends trimmed. A `<` with no `>` after it is kept as
+  text. So markup such as `div` or `href` never matches, and a word split by a tag
+  (`ham<b>mer</b>`) is two words. The server indexes a body for `GET /api/v1/search`
+  by the same rule.
 - The scope is the whole mirror, reference lists included; or one list; or one smart
   list. A smart-list scope applies that list's "Holds" rule without its "open"
   requirement, because only "Include Completed" decides whether completed tasks
