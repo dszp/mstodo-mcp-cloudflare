@@ -17,10 +17,12 @@ export interface PullResult {
 }
 
 // Pages through the change feed into the store, one applyPage per page.
-// A 410 means the cursor is unusable. A full sync (no cursor) carries no
-// deletion records, so the restart clears the store first or deleted rows
-// would linger. A pull restarts at most once: a 410 after a restart, or when
-// already pulling from null, has nowhere left to fall back to, so it throws.
+// A full sync (no cursor) carries no deletion records, so it clears the store
+// before applying its first page, or rows the server deleted would linger. The
+// clear waits for that page so a refused or failed request leaves the mirror
+// as it was. A 410 means the cursor is unusable: the pull restarts as a full
+// sync, at most once. A 410 after a restart, or when already pulling from
+// null, has nowhere left to fall back to, so it throws.
 export async function pullAll(
   fetchPage: FetchPage,
   store: MirrorStore,
@@ -31,16 +33,21 @@ export async function pullAll(
   let pages = 0;
   let changes = 0;
   let restarted = false;
+  let clearFirst = cursor === null;
   for (;;) {
     const res = await fetchPage(cursor);
     if (!res.ok) {
       if (restarted || cursor === null) throw new Error(`change feed refused a full sync: ${res.error}`);
-      store.clear();
+      clearFirst = true;
       cursor = null;
       restarted = true;
       pages = 0;
       changes = 0;
       continue;
+    }
+    if (clearFirst) {
+      store.clear();
+      clearFirst = false;
     }
     store.applyPage(res.page.changes);
     pages += 1;

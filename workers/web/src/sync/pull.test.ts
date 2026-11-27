@@ -67,6 +67,24 @@ describe("pullAll", () => {
     expect(res.cursor).toBe("n2");
   });
 
+  it("a full sync into a non-empty store drops rows the server no longer has", async () => {
+    const live = (id: string): FeedChange => ({ kind: "list", id, deleted: false, data: {} }) as unknown as FeedChange;
+    const store = new MirrorStore();
+    store.applyPage([live("kept"), live("deleted-on-server")]);
+    const { fetchPage } = scripted(okPage(page("n1", true, [live("kept")])), okPage(page("n2", false)));
+    await pullAll(fetchPage, store, null);
+    expect(store.lists().map((l) => l.id)).toEqual(["kept"]);
+  });
+
+  it("an incremental pull keeps the rows it was not told about", async () => {
+    const live = (id: string): FeedChange => ({ kind: "list", id, deleted: false, data: {} }) as unknown as FeedChange;
+    const store = new MirrorStore();
+    store.applyPage([live("a")]);
+    const { fetchPage } = scripted(okPage(page("n1", false, [live("b")])));
+    await pullAll(fetchPage, store, "c0");
+    expect(store.lists().map((l) => l.id)).toEqual(["a", "b"]);
+  });
+
   it("a second 410 in the same pull throws", async () => {
     const { fetchPage } = scripted(gone("cursor_reset"), gone("cursor_reset"));
     await expect(pullAll(fetchPage, new MirrorStore(), "c1")).rejects.toThrow(/cursor_reset/);
