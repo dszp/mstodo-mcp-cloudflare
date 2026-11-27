@@ -27,3 +27,9 @@ export function readCookie(req: Request, name: string): string | null {
   }
   return null;
 }
+
+export const SESSION_COOKIE = "__Host-potem-session";
+/** The browser's OAuth client registration; kept across logout. */
+export const DEVICE_COOKIE = "__Host-potem-device";
+/** The state of one sign-in between /auth/login and /auth/callback. */
+export const LOGIN_COOKIE = "__Host-potem-login";
