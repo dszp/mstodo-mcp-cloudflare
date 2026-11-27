@@ -16,16 +16,21 @@ npm run types        # wrangler types from workers/server/wrangler.example.jsonc
 npm run render|check|dry-run|deploy|secrets|tail -- <name> [flags]   # named deployments, see below
 npm run build:node   # esbuild the Node host into dist/main.mjs
 npm run start:node   # node dist/main.mjs (needs SERVICE_BASE_URL + the MS_* / OWNER_EMAIL env)
+npm run web:spike    # Vite dev server for the web spike (workers/web/spike), synthetic feed
+npm run web:spike:prod   # production build of the spike, then vite preview
 
 npx vitest run workers/server/test/move-task.test.ts   # one test file
 npx vitest run -t "reparent"                    # tests matching a name
 npx vitest run --project workers                # Cloudflare pool only (workers/server/test/**)
 npx vitest run --project node                   # Node host and deployment tools (workers/server/test-node/**, scripts/deployment/test/**)
+npx vitest run --project web                    # web client (workers/web/**)
 npx tsc --noEmit -p .                           # typecheck (Workers types)
 npx tsc -p tsconfig.node.json                   # typecheck core + Node host with Node-only types
+npx tsc --noEmit -p workers/web                 # typecheck the web client and spike (DOM, JSX)
+npx tsc --noEmit -p workers/web/tsconfig.engine.json   # typecheck the sync engine: ES2022 only, no DOM/Node/Workers globals
 ```
 
-**Tests need no real credentials or live config.** `vitest.config.ts` defines two projects. `workers` (`workers/server/test/**`) points the Cloudflare pool at the committed `workers/server/wrangler.example.jsonc` and supplies fake secrets via miniflare bindings; KV and DO bindings are simulated locally. `workers/server/test/_test-worker.ts` re-exports only `TodoIndex` (the `MSToDoSession` agent DO is deliberately excluded — it pulls in the MCP SDK → ajv, which the pool can't resolve). `node` (`workers/server/test-node/**` and `scripts/deployment/test/**`) runs on plain Node 24 with in-memory `node:sqlite` databases and fake `MS_*` values passed to `buildNodeEnv`; Microsoft endpoints are stubbed with `vi.stubGlobal("fetch")`. Node ≥ 24.2 is required for development (`node:sqlite`, and `import.meta.main` in `scripts/deployment/cli.ts`).
+**Tests need no real credentials or live config.** `vitest.config.ts` defines three projects; `web` (`workers/web/**`) runs the web client's tests. `workers` (`workers/server/test/**`) points the Cloudflare pool at the committed `workers/server/wrangler.example.jsonc` and supplies fake secrets via miniflare bindings; KV and DO bindings are simulated locally. `workers/server/test/_test-worker.ts` re-exports only `TodoIndex` (the `MSToDoSession` agent DO is deliberately excluded — it pulls in the MCP SDK → ajv, which the pool can't resolve). `node` (`workers/server/test-node/**` and `scripts/deployment/test/**`) runs on plain Node 24 with in-memory `node:sqlite` databases and fake `MS_*` values passed to `buildNodeEnv`; Microsoft endpoints are stubbed with `vi.stubGlobal("fetch")`. Node ≥ 24.2 is required for development (`node:sqlite`, and `import.meta.main` in `scripts/deployment/cli.ts`).
 
 ## Deployments
 
@@ -167,6 +172,7 @@ Releases are cut **from `dev`**, then merged/pushed to `main` and tagged. The co
 ## Conventions & invariants worth preserving
 - **Only `IndexCore` refreshes tokens** (hosted by the `TodoIndex` DO on Cloudflare, in process on Node). Don't add token-endpoint calls elsewhere; route through its serializer.
 - **Core import boundary.** `packages/core/**` (imported elsewhere as `@potem/core/<path>`, a `paths` alias in `tsconfig.json` and a vitest alias) never imports `cloudflare:*`, `agents`, `@cloudflare/*`, or anything under `workers/server/src/hosts/` (enforced by `workers/server/test/core-boundary.test.ts`). `workers/server/src/hosts/node` never imports `workers/server/src/hosts/cloudflare`, and `workers/server/src/hosts/shared` imports neither host (`workers/server/test-node/host-boundary.test.ts`).
+- **Web sync engine boundary.** `workers/web/src/sync` imports no React, no server code and nothing outside its directory except `@potem/core` types (`import type`, enforced by `workers/web/src/sync/boundary.test.ts`), and uses no DOM, Node or Workers globals (`workers/web/tsconfig.engine.json`). A rule it shares with core, such as a body's plain text, is a copy held to core's by shared test cases.
 - **No host switches in core.** A behavior that differs by host is a port in `packages/core/ports.ts`, implemented by each host — never `if (isCloudflare)`.
 - **Each host bounds request bodies.** Core's upload handler buffers a body it cannot size in advance; Cloudflare's platform caps bodies, the Node host caps them in `createHandler`. A new host must do the same.
 - **Host-pin before attaching a Bearer token** — keep `assertGraphUrl` / `assertSubstrateUrl` in front of every authed request when adding endpoints.

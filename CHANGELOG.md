@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unset, so a client computes "today" in the zone of the feed's bare dates. Section 14.1 also
   documents the `cursor` the response already carried, and section 4.2 says which dates
   `my_day.committed_day` holds.
+- **Web client scaffold** (`workers/web`, not deployed): a sync engine with no DOM or framework
+  dependency (an in-memory mirror, the pull loop over the change feed, smart lists and local
+  search), and a React spike that renders a synthetic feed (`npm run web:spike`). New dev
+  dependencies, pinned: `react` and `react-dom` 19.3.1, `@types/react` 19.3.2,
+  `@types/react-dom` 19.3.0, `vite` 8.3.8, `@vitejs/plugin-react` 6.3.0,
+  `@tanstack/react-virtual` 3.14.28. The Node image's runtime install leaves them out.
 
 ### Fixed
 - **Task body text for search.** An HTML body's `<script>` and `<style>` contents (Outlook
