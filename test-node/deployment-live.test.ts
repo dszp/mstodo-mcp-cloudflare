@@ -70,6 +70,15 @@ describe("checkLiveWorker", () => {
     await expect(checkLiveWorker(api, dep(), { adopt: true })).resolves.toBeUndefined();
   });
 
+  it("refuses a live Worker with none of the file's KV bindings, unless adopted", async () => {
+    for (const kv of [{}, { CACHE: KV_OTHER }] as Record<string, string>[]) {
+      const api = stubApi({ getWorkerKv: async () => ({ found: true, kv }) });
+      const r = await refusalOf(checkLiveWorker(api, dep(), { adopt: false }));
+      expect(r.field).toBe("kv.OAUTH_KV");
+      await expect(checkLiveWorker(api, dep(), { adopt: true })).resolves.toBeUndefined();
+    }
+  });
+
   it("does not refuse a binding the live Worker does not have yet", async () => {
     const api = stubApi({ getWorkerKv: async () => ({ found: true, kv: { OAUTH_KV: KV_A } }) });
     await expect(checkLiveWorker(api, dep(), { adopt: false })).resolves.toBeUndefined();
@@ -182,9 +191,16 @@ describe("createCloudflareApi", () => {
     expect(seen[0].url).toBe("https://api.cloudflare.com/client/v4/accounts/a%2Fb/workers/scripts/w%3Fx/settings");
   });
 
-  it("maps HTTP 404 on the settings call to not-found", async () => {
+  it("maps a 404 with API error 10007 on the settings call to not-found", async () => {
     const { f } = fetchStub(() => jsonResponse(404, { success: false, errors: [{ code: 10007 }], result: null }));
     expect(await createCloudflareApi(TOKEN, f).getWorkerKv(ACCOUNT, "w")).toEqual({ found: false });
+  });
+
+  it("rejects a 404 that is not the script-not-found code", async () => {
+    for (const body of [{ success: false, errors: [{ code: 7003 }], result: null }, "", "<html>", { success: false, errors: [] }]) {
+      const { f } = fetchStub(() => jsonResponse(404, body));
+      await expect(createCloudflareApi(TOKEN, f).getWorkerKv(ACCOUNT, "w")).rejects.toMatchObject({ status: 404 });
+    }
   });
 
   it("rejects on 401, 403, 500, a thrown fetch, a non-JSON body and success:false, without the token in the message", async () => {

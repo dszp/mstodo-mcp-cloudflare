@@ -58,7 +58,22 @@ export function createCloudflareApi(token: string, fetchImpl: typeof fetch = fet
     } catch {
       throw new CloudflareApiError("request failed");
     }
-    if (tolerate404 && res.status === 404) return { status: 404, result: undefined as unknown };
+    if (tolerate404 && res.status === 404) {
+      // Wrangler's isWorkerNotFoundError (cli.js:165489-165497) keys on the API error
+      // code 10007, not the status. 10090 there is the legacy-environment code, which
+      // the services/environments endpoints raise, not this scripts endpoint. Any
+      // other 404 (another code, an empty or non-JSON body) is not a definite not-found.
+      let notFound = false;
+      try {
+        const b: unknown = await res.json();
+        notFound =
+          isObject(b) && Array.isArray(b.errors) && (b.errors as unknown[]).some((e) => isObject(e) && e.code === 10007);
+      } catch {
+        // unreadable body: not definite
+      }
+      if (notFound) return { status: 404, result: undefined as unknown };
+      throw new CloudflareApiError("HTTP 404", 404);
+    }
     if (res.status < 200 || res.status > 299) throw new CloudflareApiError(`HTTP ${res.status}`, res.status);
     let body: unknown;
     try {
@@ -81,7 +96,7 @@ export function createCloudflareApi(token: string, fetchImpl: typeof fetch = fet
   return {
     // cli.js:118674, the SDK's scripts settings GET: result.bindings[] with
     // { type: "kv_namespace", name, namespace_id } (the same fields wrangler reads
-    // at cli.js:32640 and 176017). The only call where 404 means "no such Worker".
+    // at cli.js:32640 and 176017). The only call where a 404 with API error code 10007 means "no such Worker".
     async getWorkerKv(account, worker) {
       const { status, result } = await call(scriptUrl(account, worker, "/settings"), { method: "GET" }, true);
       if (status === 404) return { found: false };
@@ -165,10 +180,12 @@ export async function checkLiveWorker(api: CloudflareApi, dep: DeploymentFile, o
   } catch (e) {
     throw couldNotVerify(dep, e);
   }
-  // A binding the live Worker lacks is a new binding, not a mismatch; only an
-  // existing binding pointing at a different namespace is a wrong-target sign.
+  // A binding the live Worker lacks is a new binding (a template addition), so it
+  // is not a mismatch by itself; but at least one file binding must match live
+  // exactly, otherwise this is a different Worker that happens to share the name.
   if (live.found && !opts.adopt) {
-    for (const [binding, id] of Object.entries(dep.kv)) {
+    const entries = Object.entries(dep.kv);
+    for (const [binding, id] of entries) {
       const liveId = live.kv[binding];
       if (liveId !== undefined && liveId !== id) {
         throw new DeploymentRefusal(
@@ -177,6 +194,14 @@ export async function checkLiveWorker(api: CloudflareApi, dep: DeploymentFile, o
           `the live Worker ${dep.worker_name} binds ${binding} to ${liveId}, the file says ${id}; pass --adopt only if you mean to rebind it`,
         );
       }
+    }
+    if (entries.length > 0 && !entries.some(([binding, id]) => live.kv[binding] === id)) {
+      const [first] = entries[0];
+      throw new DeploymentRefusal(
+        file,
+        `kv.${first}`,
+        `the live Worker ${dep.worker_name} has none of the file's KV bindings (${first} is missing); pass --adopt only if this is the Worker you mean to take over`,
+      );
     }
   }
 
