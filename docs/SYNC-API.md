@@ -772,6 +772,9 @@ and `my_day.committed_day` are in that zone too (section 4.2). `order` is the ta
 `order` string from the feed (section 4.2), compared as text. "Open" means `status` is
 not `completed`.
 
+These rules cover the smart lists and search. The order of tasks inside a regular list
+is up to each client and is not part of this section.
+
 Sorting follows SQLite's rule for nulls: in a descending sort a null value sorts last,
 in an ascending sort first. Rows still tied after the listed keys sort by `id`
 ascending, so every client shows one order.
@@ -784,11 +787,12 @@ ascending, so every client shows one order.
 | `all` | open | `order` desc, then `created_at` desc | nothing extra |
 | `completed` | `status == "completed"`; a client may limit it to `completed_at >= since` | `completed_at` desc, then `modified_at` desc | nothing extra |
 
-A task completed today that is in My Day stays in `my_day` and is shown under a
+A completed task in today's My Day stays in `my_day` and is shown under a
 "Completed" section of that list, in the same order as the rest of the list.
 
 The sidebar count is the number of open tasks in the list. For `completed` it is the
-number of completed tasks.
+number of tasks the list holds: completed tasks, limited by the same "completed since"
+date when the client applies one to the list.
 
 A completed task with no `completed_at` sorts last in `completed`, forms a final group
 of its own in the grouping below, and is left out when a "completed since" date is
