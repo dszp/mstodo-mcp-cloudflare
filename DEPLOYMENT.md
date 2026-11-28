@@ -396,6 +396,12 @@ keeps the tokens in a sealed, HttpOnly cookie and forwards a fixed set of `GET` 
 that one `POST`, to the server's sync API. Editing needs no new variable, secret or binding: a
 web deployment that already works edits after you deploy this version.
 
+Live updates need nothing configured either: the page keeps a WebSocket open to the web
+Worker's `/bff/socket`, which relays the server's push socket, so a change made in the app or
+on another device shows up within seconds. If the socket can't connect, the page polls every
+30 seconds instead. The Node web host (a later milestone) will need its own socket relay, because
+the Cloudflare one uses the Workers WebSocket API.
+
 **Before you start**
 
 - A deployed server (steps 1 to 9 above), reachable over https. The web Worker needs its origin.
