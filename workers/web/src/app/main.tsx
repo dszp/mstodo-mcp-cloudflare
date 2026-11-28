@@ -1,4 +1,5 @@
 import { createRoot } from "react-dom/client";
+import "./styles.css";
 import { MirrorStore } from "../sync/store.ts";
 import { App, AppContext, type AppDeps } from "./App.tsx";
 import { createBffFetch } from "./api.ts";

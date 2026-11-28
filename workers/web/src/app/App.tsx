@@ -1,6 +1,4 @@
 import {
-  type MouseEvent,
-  type ReactNode,
   createContext,
   useCallback,
   useContext,
@@ -9,14 +7,16 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import type { SmartList } from "../sync/feed.ts";
-import { listTasks, smartCounts, smartListTasks } from "../sync/smart-lists.ts";
 import type { MirrorStore } from "../sync/store.ts";
 import { SignedOutError } from "./api.ts";
 import { type Loader, watchFocus } from "./loader.ts";
-import { type Route, currentRoute, formatRoute, navigate, subscribeRoute } from "./route.ts";
+import type { TaskView } from "./model.ts";
+import { type Route, currentRoute, navigate, subscribeRoute } from "./route.ts";
 import { type SessionClient, watchActivity } from "./session.ts";
-import { useStoreKey } from "./use-store.ts";
+import { useToday } from "./use-today.ts";
+import { Sidebar } from "./views/Sidebar.tsx";
+import { TaskDetail } from "./views/TaskDetail.tsx";
+import { TaskList } from "./views/TaskList.tsx";
 
 export interface AppDeps {
   store: MirrorStore;
@@ -70,12 +70,12 @@ export function App() {
 
   switch (status) {
     case "loading":
-      return <p>Loading your tasks…</p>;
+      return <p className="status-page">Loading your tasks…</p>;
     case "signed_out":
       return <SignedOut />;
     case "error":
       return (
-        <main>
+        <main className="status-page">
           <p>Your tasks didn't load. Check your connection, then try again.</p>
           <button type="button" onClick={() => void start()}>
             Try again
@@ -90,7 +90,7 @@ export function App() {
 function SignedOut() {
   const returnTo = window.location.pathname + window.location.search;
   return (
-    <main>
+    <main className="status-page">
       <h1>Potem</h1>
       <a href={`/auth/login?${new URLSearchParams({ return_to: returnTo })}`}>Sign in</a>
     </main>
@@ -103,45 +103,28 @@ function useRoute(): Route {
   return useMemo(() => currentRoute(), [url]);
 }
 
-/** A same-page link: a plain click navigates without a reload. */
-function RouteLink({ to, children }: { to: Route; children: ReactNode }) {
-  const onClick = (e: MouseEvent) => {
-    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    e.preventDefault();
-    navigate(to);
-  };
-  return (
-    <a href={formatRoute(to)} onClick={onClick}>
-      {children}
-    </a>
-  );
-}
-
-const SMART_NAMES: Record<SmartList, string> = {
-  my_day: "My Day",
-  important: "Important",
-  planned: "Planned",
-  all: "All",
-  completed: "Completed",
-};
-
-// Placeholder until the real views (Task 7): the smart-list counts, the list
-// names and the selected view's task count.
+/**
+ * The three panes: sidebar, task list, task detail. Below 900 px one shows at
+ * a time (styles.css): the detail when a task is open, else the sidebar or the
+ * list, with a back control on each.
+ */
 function Ready() {
   const { store, session, loader } = useApp();
-  useStoreKey(store, "tasks");
-  useStoreKey(store, "lists");
   const route = useRoute();
+  const today = useToday(loader);
+  const timeZone = loader.info()?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const [sidebarShown, setSidebarShown] = useState(false);
   const [signOutFailed, setSignOutFailed] = useState(false);
-  const today = loader.today();
-  const counts = smartCounts(store, { today });
 
-  const shown =
-    route.view === "smart"
-      ? `${SMART_NAMES[route.list]}: ${smartListTasks(store, route.list, { today }).length} tasks`
-      : route.view === "list"
-        ? `${store.list(route.id)?.name ?? "Unknown list"}: ${listTasks(store, route.id).length} tasks`
-        : `Search for "${route.q}"`;
+  // One object per shown list, so rows (memoized on it) don't re-render when only ?task changes.
+  const smart = route.view === "smart" ? route.list : null;
+  const listId = route.view === "list" ? route.id : null;
+  const view = useMemo<TaskView | null>(
+    () => (smart !== null ? { view: "smart", list: smart } : listId !== null ? { view: "list", id: listId } : null),
+    [smart, listId],
+  );
+  const task = route.view === "search" ? null : (route.task ?? null);
+  const pane = task !== null ? "detail" : sidebarShown ? "sidebar" : "list";
 
   const signOut = () => {
     setSignOutFailed(false);
@@ -150,35 +133,42 @@ function Ready() {
       setSignOutFailed(true);
     });
   };
+  const closeTask = () => {
+    if (route.view !== "search") navigate({ ...route, task: undefined });
+  };
 
   return (
-    <div>
-      <nav>
-        <ul>
-          {(Object.keys(SMART_NAMES) as SmartList[]).map((list) => (
-            <li key={list}>
-              <RouteLink to={{ view: "smart", list }}>
-                {SMART_NAMES[list]} ({counts[list]})
-              </RouteLink>
-            </li>
-          ))}
-        </ul>
-        <ul>
-          {store.lists().map((l) => (
-            <li key={l.id}>
-              <RouteLink to={{ view: "list", id: l.id }}>{l.name}</RouteLink>
-            </li>
-          ))}
-        </ul>
-        <button type="button" onClick={signOut}>
-          Sign out
-        </button>
-        {signOutFailed && <p>Sign-out didn't finish. Try again.</p>}
-      </nav>
-      <main>
-        <p>{shown}</p>
-        <p>Today is {today}.</p>
-      </main>
+    <div className="app" data-pane={pane} data-detail={task !== null ? "open" : "closed"}>
+      <Sidebar
+        store={store}
+        route={route}
+        today={today}
+        onNavigate={() => setSidebarShown(false)}
+        footer={
+          <>
+            <button type="button" className="sign-out" onClick={signOut}>
+              Sign out
+            </button>
+            {signOutFailed && <p className="small">Sign-out didn't finish. Try again.</p>}
+          </>
+        }
+      />
+      {view !== null ? (
+        <TaskList
+          key={view.view === "smart" ? view.list : view.id}
+          store={store}
+          view={view}
+          today={today}
+          timeZone={timeZone}
+          selectedTask={task}
+          onBack={() => setSidebarShown(true)}
+        />
+      ) : (
+        <main className="list-pane">
+          <p className="empty">Search isn't available yet.</p>
+        </main>
+      )}
+      {task !== null && <TaskDetail store={store} id={task} today={today} timeZone={timeZone} onBack={closeTask} />}
     </div>
   );
 }

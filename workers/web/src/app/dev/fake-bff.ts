@@ -3,13 +3,20 @@
 // /bff/api/sync/changes. Wired into workers/web/vite.config.ts for the dev
 // server only; the build never loads it. Nothing here is real data.
 //
+// Besides the spike's feed it adds a default list and a few tasks that show
+// every detail field (reminder, repeat, links, files, an html note and a
+// hostile one), and gives some lists a theme colour.
+//
+// `vite preview` (a built app) also gets the BFF, and every response there
+// carries the production page CSP, so a build can be checked against it.
+//
 // Dataset size: POTEM_FAKE_TOTAL (default 2400) tasks, POTEM_FAKE_OPEN
 // (default 545) of them open.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import { generateFeed, pageOf } from "../../../spike/fixture.ts";
-import type { FeedChange } from "../../sync/feed.ts";
+import type { FeedChange, FeedTask } from "../../sync/feed.ts";
 import { todayIn } from "../loader.ts";
 
 const TIMEZONE = "America/New_York";
@@ -32,6 +39,77 @@ const CAPABILITIES = {
   source: "graph",
 };
 
+// The page CSP from workers/web/src/bff/headers.ts, with a made-up server origin.
+const PAGE_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; " +
+  "frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://server.example.com";
+
+const THEMES = ["dark_blue", "dark_red", "dark_teal", "light_purple", "dark_green", null, "beach", null];
+
+/** The showcase: a default list and tasks with every field set. Made-up text only. */
+function showcase(today: string): FeedChange[] {
+  const day = (offset: number) => new Date(Date.parse(today) + offset * DAY_MS).toISOString().slice(0, 10);
+  let seq = 1_000_000;
+  const base = {
+    list_id: "showcase-list", status: "notStarted", importance: "normal", categories: [], start: null,
+    reminder: { on: false, at: null }, completed_at: null, recurrence: null,
+    created_at: `${day(-3)}T15:04:05Z`, modified_at: `${day(-1)}T15:04:05Z`,
+    my_day: { committed_day: null, committed_order: null, postponed_day: null },
+    subresources_complete: true, steps: [], links: [], attachments: [], body: null, due: null,
+  } satisfies Omit<FeedTask, "title" | "order">;
+  const task = (id: string, order: string, over: Partial<FeedTask> & { title: string }): FeedChange => ({
+    kind: "task", id, seq: ++seq, deleted: false, field_clock: {}, data: { ...base, order, ...over },
+  });
+  const step = (id: string, title: string, checked: boolean, order: string | null = null) => ({
+    id, title, checked, checked_at: null, created_at: `${day(-3)}T15:0${id.length % 10}:00Z`, order,
+  });
+  return [
+    {
+      kind: "list", id: "showcase-list", seq: ++seq, deleted: false,
+      data: {
+        name: "Tasks", sync: "todo", wellknown: "defaultList", is_owner: true, is_shared: false, group_id: null,
+        sort_key: null, theme: { color: "dark_blue", background: null }, image_id: null, image_style: null,
+      },
+    },
+    task("showcase-1", "9999999999", {
+      title: "Plan the example offsite",
+      importance: "high",
+      due: day(0),
+      reminder: { on: true, at: `${day(0)}T19:00:00Z` },
+      recurrence: { pattern: { type: "weekly", interval: 1, daysOfWeek: ["monday", "thursday"] }, range: { type: "noEnd" } },
+      my_day: { committed_day: today, committed_order: "9999999999", postponed_day: null },
+      body: { type: "html", content: "<div>Agenda draft at https://example.com/agenda.</div><div><br></div><div>Questions to mailto:someone@example.com&nbsp;by Friday.</div>" },
+      steps: [
+        step("st-a", "Pick a date", true),
+        step("st-b", "Set the budget", false),
+        step("st-c", "Book the venue, a step with a title long enough to wrap onto a second line", false),
+      ],
+      links: [{ id: "ln-1", url: "https://example.com/ticket/42", title: "Ticket 42", app: "Example Desk", external_id: null }],
+      attachments: [{ id: "att-1", name: "agenda.txt", size: 325, content_type: "text/plain" }],
+    }),
+    task("showcase-2", "9999999998", {
+      title: "A note that tries to run script",
+      due: day(-1),
+      body: { type: "html", content: '<img src=x onerror=alert(1)>Plain words stay.<script>alert(2)</script> <a href="javascript:alert(3)">click</a>' },
+      links: [
+        { id: "ln-2", url: "javascript:alert(4)", title: "Not a link", app: null, external_id: null },
+        { id: "ln-3", url: "data:text/html,<b>x</b>", title: "Not a link either", app: null, external_id: null },
+      ],
+    }),
+    task("showcase-3", "9999999997", {
+      title: "A text note with lines",
+      body: { type: "text", content: "First line\nSecond line <b>stays as typed</b>\n\nhttps://example.com/after-a-blank" },
+      due: day(5),
+    }),
+    task("showcase-4", "9999999996", {
+      title: "Finished example",
+      status: "completed",
+      completed_at: today,
+      my_day: { committed_day: today, committed_order: "1", postponed_day: null },
+    }),
+  ];
+}
+
 function envCount(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
@@ -51,6 +129,9 @@ export function fakeBff(): Plugin {
       // The active scope: open tasks and tasks completed in the last 30 days.
       const since = new Date(Date.parse(today) - 30 * DAY_MS).toISOString().slice(0, 10);
       const all = generateFeed({ totalTasks: total, openTasks: open, lists: LISTS, seed: SEED, today });
+      let n = 0;
+      for (const c of all) if (c.kind === "list" && !c.deleted) c.data.theme = { color: THEMES[n++ % THEMES.length]!, background: null };
+      all.push(...showcase(today));
       const active = all.filter(
         (c) => c.kind !== "task" || c.deleted || c.data.status !== "completed" || (c.data.completed_at !== null && c.data.completed_at >= since),
       );
@@ -110,6 +191,15 @@ export function fakeBff(): Plugin {
     name: "potem-fake-bff",
     apply: "serve",
     configureServer(server) {
+      server.middlewares.use(handle);
+    },
+    // The dev server can't run under the page CSP (Vite injects inline script
+    // and style), so the CSP check runs against a build: `vite preview`.
+    configurePreviewServer(server) {
+      server.middlewares.use((_req, res, next) => {
+        res.setHeader("content-security-policy", PAGE_CSP);
+        next();
+      });
       server.middlewares.use(handle);
     },
   };
