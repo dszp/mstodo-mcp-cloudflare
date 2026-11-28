@@ -150,7 +150,7 @@ export function watchFocus(loader: Pick<Loader, "reload">, target: EventTarget):
   return () => target.removeEventListener("focus", onFocus);
 }
 
-/** How often a visible page pulls on its own, until the server's push reaches the page (milestone 4). */
+/** How often a visible page pulls on its own while the push socket isn't open (live.ts). */
 const POLL_INTERVAL_MS = 30_000;
 
 /**
@@ -160,6 +160,8 @@ const POLL_INTERVAL_MS = 30_000;
  * more have passed since the last pull, otherwise when the 30 s are up. The
  * page has just pulled when this starts, so the first pull is 30 s later.
  * An idle incremental pull is one small request, cheap at any mirror size.
+ * watchLive (live.ts) starts it while the push socket isn't open and stops it
+ * while it is.
  */
 export function watchVisiblePoll(
   loader: Pick<Loader, "reload">,

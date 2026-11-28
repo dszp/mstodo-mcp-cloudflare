@@ -9,7 +9,8 @@ import {
 } from "react";
 import type { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError } from "./api.ts";
-import { type Loader, myDayOn, watchFocus, watchVisiblePoll } from "./loader.ts";
+import { type Loader, myDayOn, watchFocus } from "./loader.ts";
+import { watchLive } from "./live.ts";
 import { type TaskView, unsavedEditsText } from "./model.ts";
 import { type Route, currentRoute, replaceRoute, subscribeRoute } from "./route.ts";
 import { openAttachment, saveWithAnchor } from "./download.ts";
@@ -68,11 +69,23 @@ export function App() {
     if (status !== "ready") return;
     const stopActivity = watchSession(session, { target: window, doc: document, win: window });
     const stopFocus = watchFocus(loader, window);
-    const stopPoll = watchVisiblePoll(loader, document);
+    // The push socket says when to pull; the 30 s poll runs while it isn't open.
+    const stopLive = watchLive({
+      loader,
+      session,
+      doc: document,
+      openSocket: () => new WebSocket(new URL("/bff/socket", location.href).href.replace(/^http/, "ws")),
+      schedule: (fn, ms) => {
+        const t = setTimeout(fn, ms);
+        return () => clearTimeout(t);
+      },
+      random: Math.random,
+      log: (e) => console.warn("push", e),
+    });
     return () => {
       stopActivity();
       stopFocus();
-      stopPoll();
+      stopLive();
     };
   }, [status, session, loader]);
 
