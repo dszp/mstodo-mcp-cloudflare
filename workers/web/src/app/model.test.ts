@@ -5,6 +5,7 @@ import type { FeedChange, FeedList, FeedListGroup, FeedTask } from "../sync/feed
 import { MirrorStore } from "../sync/store.ts";
 import {
   completedBucket,
+  createdLabel,
   completedGroups,
   dateLabel,
   describeRecurrence,
@@ -204,6 +205,39 @@ describe("links", () => {
   });
 });
 
+describe("linkify on hostile input", () => {
+  const timed = (text: string) => {
+    const start = performance.now();
+    const parts = linkify(text);
+    return { parts, ms: performance.now() - start };
+  };
+
+  it("trims a long punctuation run in linear time", () => {
+    const dots = ".".repeat(50_000);
+    for (const text of [`https://example.com/${dots}`, `https://example.com/${dots}x`, `see https://example.com/${dots} more`, ".".repeat(100_000)]) {
+      const { parts, ms } = timed(text);
+      expect(ms, text.slice(-12)).toBeLessThan(50);
+      expect(parts.map((p) => p.text).join("")).toBe(text);
+    }
+  });
+
+  it("caps one link's length", () => {
+    const long = `https://example.com/${"a".repeat(5000)}`;
+    const links = linkify(long).filter((p) => p.href !== undefined);
+    // 2048 characters after the scheme.
+    expect(links[0]!.text.length).toBe("https://".length + 2048);
+  });
+
+  it.each([
+    ["(see https://example.com/a).", "https://example.com/a"],
+    ["https://example.com/a?b=c!?", "https://example.com/a?b=c"],
+    ["mailto:a@example.com;", "mailto:a@example.com"],
+    ["https://example.com/a]}", "https://example.com/a"],
+  ])("drops trailing punctuation from %s", (text, url) => {
+    expect(linkify(text).find((p) => p.href !== undefined)?.text).toBe(url);
+  });
+});
+
 describe("note text", () => {
   it("keeps a text body as written", () => {
     expect(noteText({ type: "text", content: "one\n\ntwo <b>x</b>" })).toBe("one\n\ntwo <b>x</b>");
@@ -254,6 +288,20 @@ describe("detail helpers", () => {
     ["nonsense", null],
   ])("describes %j as %j", (r, text) => {
     expect(describeRecurrence(r)).toBe(text);
+  });
+});
+
+describe("createdLabel", () => {
+  const zone = "America/New_York";
+  it.each([
+    ["2026-11-27T15:00:00Z", "Created today"],
+    ["2026-11-26T15:00:00Z", "Created yesterday"],
+    ["2026-06-22T15:00:00Z", "Created on Mon, Jun 22"],
+    // A clock ahead of the server's: a date, never "Created on Tomorrow".
+    ["2026-11-28T15:00:00Z", "Created on Sat, Nov 28"],
+    ["2027-01-05T15:00:00Z", "Created on Tue, Jan 5, 2027"],
+  ])("labels %s", (at, label) => {
+    expect(createdLabel(at, TODAY, zone, "en-US")).toBe(label);
   });
 });
 

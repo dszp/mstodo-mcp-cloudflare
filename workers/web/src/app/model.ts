@@ -34,9 +34,14 @@ export function dateLabel(day: string, today: string, locale?: string): { text: 
   if (days === 0) return { text: "Today", tone };
   if (days === 1) return { text: "Tomorrow", tone };
   if (days === -1) return { text: "Yesterday", tone };
+  return { text: plainDayLabel(day, today, locale), tone };
+}
+
+/** "Wed, May 20", with the year when it isn't today's year. */
+function plainDayLabel(day: string, today: string, locale: string | undefined): string {
   const opts: Intl.DateTimeFormatOptions = { weekday: "short", month: "short", day: "numeric" };
   if (day.slice(0, 4) !== today.slice(0, 4)) opts.year = "numeric";
-  return { text: formatDay(day, opts, locale), tone };
+  return formatDay(day, opts, locale);
 }
 
 /** The date an instant falls on in `timeZone`, as YYYY-MM-DD. */
@@ -53,12 +58,16 @@ export function instantLabel(instant: string, timeZone: string, locale?: string)
   return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short", timeZone }).format(new Date(ms));
 }
 
-/** "Created today", "Created yesterday" or "Created on Mon, Jun 22". */
+/**
+ * "Created today", "Created yesterday" or "Created on Mon, Jun 22". A day
+ * after today (a clock ahead of the server's zone) is written as a date.
+ */
 export function createdLabel(createdAt: string | null, today: string, timeZone: string, locale?: string): string | null {
   const day = createdAt === null ? null : dayIn(createdAt, timeZone);
   if (day === null) return null;
-  const { text } = dateLabel(day, today, locale);
-  return text === "Today" || text === "Yesterday" ? `Created ${text.toLowerCase()}` : `Created on ${text}`;
+  if (day === today) return "Created today";
+  if (day === addDays(today, -1)) return "Created yesterday";
+  return `Created on ${plainDayLabel(day, today, locale)}`;
 }
 
 const MAX_WAIT_MS = 3_600_000;
@@ -391,8 +400,17 @@ export function safeHref(url: string | null): string | null {
 
 export type TextPart = { text: string; href?: string };
 
-const URL_IN_TEXT = /\b(?:https?:\/\/|mailto:)[^\s<>"']+/gi;
-const TRAILING = /[.,;:!?)\]}]+$/;
+// Bounded, so one match can't run unbounded over a hostile body.
+const URL_IN_TEXT = /\b(?:https?:\/\/|mailto:)[^\s<>"']{1,2048}/gi;
+const TRAILING = new Set([".", ",", ";", ":", "!", "?", ")", "]", "}"]);
+
+// Drops trailing punctuation by walking back from the end: linear, where a
+// /[…]+$/ regex retries from every start in a long run that isn't at the end.
+function trimTrailing(url: string): string {
+  let end = url.length;
+  while (end > 0 && TRAILING.has(url[end - 1]!)) end--;
+  return url.slice(0, end);
+}
 
 /** Splits text into plain parts and links (only safe ones; others stay text). */
 export function linkify(text: string): TextPart[] {
@@ -400,7 +418,7 @@ export function linkify(text: string): TextPart[] {
   let plain = "";
   let last = 0;
   for (const m of text.matchAll(URL_IN_TEXT)) {
-    const url = m[0].replace(TRAILING, "");
+    const url = trimTrailing(m[0]);
     const href = safeHref(url);
     if (href === null || url === "") continue;
     plain += text.slice(last, m.index);

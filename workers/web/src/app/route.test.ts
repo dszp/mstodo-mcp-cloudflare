@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SMART_LISTS } from "@potem/core/index/feed-types";
 import { type Route, formatRoute, parseRoute } from "./route.ts";
 
@@ -55,5 +55,32 @@ describe("parseRoute / formatRoute", () => {
   it("accepts a 128-character id", () => {
     const id = "a".repeat(128);
     expect(parse(`/list/${id}`)).toEqual({ view: "list", id });
+  });
+});
+
+describe("replaceRoute", () => {
+  it("replaces the current history entry and tells subscribers", async () => {
+    const { replaceRoute, subscribeRoute } = await import("./route.ts");
+    const calls: string[] = [];
+    const fakeWindow = {
+      location: { pathname: "/list/L1", search: "?task=T1" },
+      history: {
+        pushState: (_s: unknown, _t: string, url: string) => calls.push(`push ${url}`),
+        replaceState: (_s: unknown, _t: string, url: string) => calls.push(`replace ${url}`),
+      },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    vi.stubGlobal("window", fakeWindow);
+    try {
+      let notified = 0;
+      const stop = subscribeRoute(() => notified++);
+      replaceRoute({ view: "list", id: "L1" });
+      stop();
+      expect(calls).toEqual(["replace /list/L1"]);
+      expect(notified).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

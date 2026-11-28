@@ -49,6 +49,11 @@ export const TaskRow = memo(function TaskRow({
   options: RowOptions;
 }) {
   useStoreKey(store, { task: id });
+  // A row that shows its list's name follows a rename. Subscribing here
+  // rather than passing the name down: only the ~30 rendered rows subscribe,
+  // and TaskList's own "lists" re-render can't reach rows through memo. A
+  // row without the name repeats its task key (a no-op second subscription).
+  useStoreKey(store, options.showList ? "lists" : { task: id });
   const t = store.task(id);
   if (!t) return null;
   const done = t.status === "completed";

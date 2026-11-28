@@ -64,7 +64,13 @@ export function navigate(route: Route): void {
   for (const cb of [...routeListeners]) cb();
 }
 
-/** Calls `cb` on navigate() and on back/forward. */
+/** Shows `route` in place of the current history entry (closing a task adds no entry). */
+export function replaceRoute(route: Route): void {
+  window.history.replaceState(null, "", formatRoute(route));
+  for (const cb of [...routeListeners]) cb();
+}
+
+/** Calls `cb` on navigate(), replaceRoute() and on back/forward. */
 export function subscribeRoute(cb: () => void): () => void {
   routeListeners.add(cb);
   window.addEventListener("popstate", cb);

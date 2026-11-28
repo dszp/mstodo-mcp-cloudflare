@@ -11,7 +11,7 @@ import type { MirrorStore } from "../sync/store.ts";
 import { SignedOutError } from "./api.ts";
 import { type Loader, watchFocus } from "./loader.ts";
 import type { TaskView } from "./model.ts";
-import { type Route, currentRoute, navigate, subscribeRoute } from "./route.ts";
+import { type Route, currentRoute, replaceRoute, subscribeRoute } from "./route.ts";
 import { type SessionClient, watchActivity } from "./session.ts";
 import { useToday } from "./use-today.ts";
 import { Sidebar } from "./views/Sidebar.tsx";
@@ -134,7 +134,8 @@ function Ready() {
     });
   };
   const closeTask = () => {
-    if (route.view !== "search") navigate({ ...route, task: undefined });
+    // Replaced, not pushed: closing a task shouldn't grow the history stack.
+    if (route.view !== "search") replaceRoute({ ...route, task: undefined });
   };
 
   return (
