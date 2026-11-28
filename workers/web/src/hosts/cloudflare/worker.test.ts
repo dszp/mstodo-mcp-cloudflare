@@ -242,7 +242,12 @@ describe("push socket", () => {
   function fakeRuntime() {
     const client = fakeSocket();
     const browser = fakeSocket();
-    const runtime: SocketRuntime = { pair: () => [client, browser], upgraded: () => new Response("upgraded") };
+    const runtime: SocketRuntime = {
+      pair: () => [client, browser],
+      upgraded: () => new Response("upgraded"),
+      schedule: () => () => {},
+      now: () => Date.now(),
+    };
     return { runtime, client, browser };
   }
 

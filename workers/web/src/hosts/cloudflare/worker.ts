@@ -24,6 +24,14 @@ const workersSockets: SocketRuntime = {
     const init: ResponseInit & { webSocket: RelaySocket } = { status: 101, webSocket: client };
     return new Response(null, init);
   },
+  // setTimeout fires at once for a delay over 2^31-1 ms (about 24.8 days),
+  // which large session limits could reach; capped, the session-end close
+  // comes early and the page's session check reconnects.
+  schedule: (fn, ms) => {
+    const t = setTimeout(fn, Math.min(ms, 2 ** 31 - 1));
+    return () => clearTimeout(t);
+  },
+  now: () => Date.now(),
 };
 
 /** The part of a Workers `Fetcher` binding this host uses. */

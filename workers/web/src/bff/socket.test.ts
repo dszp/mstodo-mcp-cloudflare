@@ -75,6 +75,27 @@ function expectRefusalHeaders(res: Response, label: string) {
 const clearsSession = (res: Response) => res.headers.getSetCookie().some((l) => l.startsWith(`${SESSION_COOKIE}=`) && l.includes("Max-Age=0"));
 
 describe("authorizeSocket", () => {
+  it("carries closeAt: the end of the idle period, in epoch ms, when that comes first", async () => {
+    const r = await authorizeSocket(await socketRequest(), cfg);
+    if (r.kind !== "open") throw new Error(r.kind);
+    expect(r.closeAt).toBe((NOW - 60 + 60 * 60) * 1000);
+  });
+
+  it("carries closeAt: the absolute end when that comes first", async () => {
+    cfg.maxHours = 1;
+    const session = { ...SESSION, created_at: NOW - 1800, last_seen: NOW };
+    const r = await authorizeSocket(await socketRequest({}, session), cfg);
+    if (r.kind !== "open") throw new Error(r.kind);
+    expect(r.closeAt).toBe((NOW + 1800) * 1000);
+  });
+
+  it("carries closeAt: the Access token's expiry when that comes first", async () => {
+    const session = { ...SESSION, cf_access_token: "cf-1", cf_access_exp: NOW + 600 };
+    const r = await authorizeSocket(await socketRequest({}, session), cfg);
+    if (r.kind !== "open") throw new Error(r.kind);
+    expect(r.closeAt).toBe((NOW + 600) * 1000);
+  });
+
   it("opens with exactly Upgrade and Authorization for a valid session", async () => {
     const r = await authorizeSocket(await socketRequest(), cfg);
     expect(r.kind).toBe("open");

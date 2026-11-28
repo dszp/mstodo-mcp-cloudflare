@@ -13,7 +13,7 @@
 // learns nothing about the session state. A refused upgrade never reaches the
 // server.
 
-import { authorize, jsonResponse } from "./api.ts";
+import { authorizeSession, jsonResponse, sessionEnd } from "./api.ts";
 import { withSecurityHeaders } from "./headers.ts";
 import type { BffConfig } from "./upstream.ts";
 
@@ -22,7 +22,19 @@ export const BFF_SOCKET_PATH = "/bff/socket";
 export const UPSTREAM_SOCKET_PATH = "/api/v1/sync/socket";
 
 export type SocketDecision =
-  | { kind: "open"; path: typeof UPSTREAM_SOCKET_PATH; headers: Headers }
+  | {
+      kind: "open";
+      path: typeof UPSTREAM_SOCKET_PATH;
+      headers: Headers;
+      /**
+       * When the relay closes the socket with 4001, in epoch ms: the session's
+       * idle end as of this upgrade, or its absolute end (maxHours, or the
+       * Access token's expiry) if sooner. The page's session check then finds
+       * the session over, or reconnects with a later closeAt if activity has
+       * moved last_seen since.
+       */
+      closeAt: number;
+    }
   | { kind: "refuse"; response: Response };
 
 /**
@@ -50,8 +62,10 @@ export async function authorizeSocket(req: Request, cfg: BffConfig): Promise<Soc
   const notUpgrade = upgradeRefusal(req);
   if (notUpgrade) return refuse(notUpgrade);
   if (req.headers.get("origin") !== cfg.webOrigin) return refuse(jsonResponse({ error: "forbidden" }, 403));
-  const headers = await authorize(req, cfg);
-  if (headers instanceof Response) return refuse(headers);
+  const authorized = await authorizeSession(req, cfg);
+  if (authorized instanceof Response) return refuse(authorized);
+  const { headers, session } = authorized;
   headers.set("upgrade", "websocket");
-  return { kind: "open", path: UPSTREAM_SOCKET_PATH, headers };
+  const idleEnd = session.last_seen + cfg.idleMinutes * 60;
+  return { kind: "open", path: UPSTREAM_SOCKET_PATH, headers, closeAt: Math.min(idleEnd, sessionEnd(session, cfg)) * 1000 };
 }

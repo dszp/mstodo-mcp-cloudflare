@@ -78,7 +78,7 @@ const unavailable = () => jsonResponse({ error: "upstream_unavailable" }, 502);
 const limits = (cfg: BffConfig) => ({ maxHours: cfg.maxHours, idleMinutes: cfg.idleMinutes });
 
 /** The absolute end of the session: maxHours after sign-in, or the Access token's expiry if sooner. */
-function sessionEnd(session: Session, cfg: BffConfig): number {
+export function sessionEnd(session: Session, cfg: BffConfig): number {
   const end = session.created_at + cfg.maxHours * 3600;
   return session.cf_access_exp === undefined ? end : Math.min(end, session.cf_access_exp);
 }
@@ -237,9 +237,16 @@ export async function handleApi(req: Request, cfg: BffConfig): Promise<Response>
 /**
  * The session's upstream headers, a fresh Headers holding only Authorization
  * and, when the session has one, cf-access-token; or the 401 that answers
- * instead. Nothing from the browser's request is copied. socket.ts uses it too.
+ * instead. Nothing from the browser's request is copied. socket.ts uses
+ * authorizeSession, which also returns the session.
  */
 export async function authorize(req: Request, cfg: BffConfig): Promise<Headers | Response> {
+  const r = await authorizeSession(req, cfg);
+  return r instanceof Response ? r : r.headers;
+}
+
+/** authorize, plus the session the headers came from. */
+export async function authorizeSession(req: Request, cfg: BffConfig): Promise<{ headers: Headers; session: Session } | Response> {
   const s = await sealer(cfg.secret);
   const session = await readSession(req, s);
   const state = session ? sessionState(session, cfg.now(), limits(cfg)) : "expired";
@@ -247,7 +254,7 @@ export async function authorize(req: Request, cfg: BffConfig): Promise<Headers |
   if (state === "refresh") return refreshNeeded();
   const headers = new Headers({ authorization: `Bearer ${session.access_token}` });
   if (session.cf_access_token) headers.set("cf-access-token", session.cf_access_token);
-  return headers;
+  return { headers, session };
 }
 
 /**
