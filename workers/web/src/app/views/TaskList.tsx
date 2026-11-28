@@ -29,11 +29,32 @@ const EMPTY: Record<string, string> = {
   completed: "No completed tasks.",
 };
 
-/** True when a key pressed in `el` belongs to it: typing, or pressing a control. */
-function keyBelongsTo(el: EventTarget | null): boolean {
-  if (!(el instanceof HTMLElement)) return false;
-  if (el.isContentEditable) return true;
-  return ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(el.tagName);
+type KeyTarget = { tagName: string; isContentEditable: boolean; closest(selector: string): unknown };
+
+/**
+ * Whether Space or Delete pressed with focus on `el` acts on the open task:
+ * only with focus on the page itself, the list, or the open task's own row.
+ * Focus on another row's link or a sidebar link means the user is somewhere
+ * else, and a text field or a control (typing, pressing) keeps its key.
+ */
+export function keyActsOnOpenTask(
+  el: KeyTarget | null,
+  ctx: { openTask: string | null; body: unknown; container: unknown },
+): boolean {
+  if (ctx.openTask === null) return false;
+  if (el === null || el === ctx.body || el === ctx.container) return true;
+  if (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(el.tagName)) return false;
+  return el.closest(`[data-task="${CSS_ESCAPE(ctx.openTask)}"]`) !== null;
+}
+
+// CSS.escape where the page has it; task sids are UUIDs, so the fallback
+// (tests in Node) needs no escaping.
+const CSS_ESCAPE = (s: string) => (typeof CSS !== "undefined" ? CSS.escape(s) : s);
+
+/** Whether a view gets the "Add a task" box: not Completed, a list that doesn't exist, or My Day while it's off. */
+export function canAddTask(view: TaskView, listExists: boolean, myDay: boolean): boolean {
+  if (view.view === "smart") return view.list !== "completed" && (view.list !== "my_day" || myDay);
+  return listExists;
 }
 
 /**
@@ -44,8 +65,8 @@ function keyBelongsTo(el: EventTarget | null): boolean {
  *
  * Keys, as in the Mac app: Space completes the open task, Delete (Backspace
  * on a Mac keyboard) asks to delete it, and Ctrl/Cmd-N goes to the add box.
- * Space and Delete are left alone while focus is in a text field or on a
- * button, where they type or press.
+ * Space and Delete act only with focus on the page, the list or the open
+ * task's row (keyActsOnOpenTask).
  */
 export function TaskList({
   store,
@@ -55,6 +76,7 @@ export function TaskList({
   selectedTask,
   edits,
   notices,
+  myDay,
   onBack,
 }: {
   store: MirrorStore;
@@ -64,6 +86,8 @@ export function TaskList({
   selectedTask: string | null;
   edits: Edits;
   notices: Pick<Notices, "add">;
+  /** Whether the server has My Day on (capabilities.my_day). */
+  myDay: boolean;
   onBack: () => void;
 }) {
   const tasksV = useStoreKey(store, "tasks");
@@ -86,9 +110,11 @@ export function TaskList({
 
   let title: string;
   let accent: Accent | null = null;
+  let listExists = true;
   if (view.view === "smart") title = SMART_NAMES[view.list];
   else {
     const l = store.list(view.id);
+    listExists = l !== undefined;
     title = l ? splitListName(l.name ?? "Untitled list").title : "List not found";
     accent = accentOf(l?.theme.color);
   }
@@ -105,7 +131,7 @@ export function TaskList({
     overscan: 8,
   });
 
-  const canAdd = !(view.view === "smart" && view.list === "completed");
+  const canAdd = canAddTask(view, listExists, myDay);
   const addBox = useRef<HTMLInputElement>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
@@ -118,8 +144,10 @@ export function TaskList({
         addBox.current.focus();
         return;
       }
-      if (e.metaKey || e.ctrlKey || e.altKey || selectedTask === null || keyBelongsTo(e.target)) return;
-      const t = store.task(selectedTask);
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      if (!keyActsOnOpenTask(target, { openTask: selectedTask, body: document.body, container: scroller.current })) return;
+      const t = store.task(selectedTask!);
       if (!t) return;
       if (e.key === " " && !e.repeat) {
         e.preventDefault();

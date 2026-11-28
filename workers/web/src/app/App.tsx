@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError } from "./api.ts";
-import { type Loader, watchFocus } from "./loader.ts";
+import { type Loader, myDayOn, watchFocus } from "./loader.ts";
 import { type TaskView, unsavedEditsText } from "./model.ts";
 import { type Route, currentRoute, replaceRoute, subscribeRoute } from "./route.ts";
 import { openAttachment, saveWithAnchor } from "./download.ts";
@@ -148,6 +148,7 @@ function Ready() {
   // Pending edits are shown against the owner's today ("due today", My Day).
   useEffect(() => editing.refreshContext(), [editing, today]);
   const timeZone = loader.info()?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const myDay = myDayOn(loader.info());
   const [sidebarShown, setSidebarShown] = useState(false);
   const [signOutFailed, setSignOutFailed] = useState(false);
 
@@ -202,6 +203,7 @@ function Ready() {
           selectedTask={task}
           edits={editing.edits}
           notices={editing.notices}
+          myDay={myDay}
           onBack={() => setSidebarShown(true)}
         />
       ) : (
@@ -228,6 +230,7 @@ function Ready() {
             onBack={closeTask}
             onOpenAttachment={onOpenAttachment}
             edits={editing.edits}
+            myDay={myDay}
           />
         ) : (
           <TaskDetail
@@ -238,6 +241,7 @@ function Ready() {
             onBack={closeTask}
             onOpenAttachment={onOpenAttachment}
             edits={editing.edits}
+            myDay={myDay}
             onDeleted={closeTask}
           />
         ))}

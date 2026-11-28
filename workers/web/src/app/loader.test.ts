@@ -3,7 +3,7 @@ import type { FeedChange, FeedPage } from "../sync/feed.ts";
 import { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError, createBffFetch } from "./api.ts";
 import { createSessionClient } from "./session.ts";
-import { changesFetchPage, createLoader, todayIn, watchFocus } from "./loader.ts";
+import { changesFetchPage, createLoader, myDayOn, todayIn, watchFocus } from "./loader.ts";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -205,6 +205,15 @@ describe("createLoader", () => {
     paths.length = 0;
     await Promise.all([loader.reload(), loader.reload()]);
     expect(paths).toHaveLength(1);
+  });
+});
+
+describe("myDayOn", () => {
+  it("is off only when /sync/info says my_day: false", () => {
+    expect(myDayOn({ timezone: "UTC", capabilities: { my_day: false } })).toBe(false);
+    expect(myDayOn({ timezone: "UTC", capabilities: { my_day: true } })).toBe(true);
+    expect(myDayOn({ timezone: "UTC", capabilities: {} })).toBe(true);
+    expect(myDayOn(null)).toBe(true);
   });
 });
 

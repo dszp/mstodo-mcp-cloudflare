@@ -66,6 +66,7 @@ export function TaskDetail({
   onOpenAttachment,
   edits,
   onDeleted,
+  myDay,
   task,
   placeholder,
 }: {
@@ -77,6 +78,8 @@ export function TaskDetail({
   onOpenAttachment: (href: string, name: string) => void;
   edits?: Edits;
   onDeleted?: () => void;
+  /** Whether the server has My Day on (capabilities.my_day); off hides the My Day row. */
+  myDay: boolean;
   task?: MirrorTask;
   placeholder?: ReactNode;
 }) {
@@ -193,7 +196,7 @@ export function TaskDetail({
           {!t.subresources_complete && <p className="muted small">Steps, links and files haven't synced yet.</p>}
         </section>
 
-        <section className="card">
+        {myDay && <section className="card">
           {edits ? (
             <button
               type="button"
@@ -208,7 +211,7 @@ export function TaskDetail({
               <SunIcon /> {inMyDay ? "Added to My Day" : "Not in My Day"}
             </p>
           )}
-        </section>
+        </section>}
 
         <section className="card">
           {edits ? (

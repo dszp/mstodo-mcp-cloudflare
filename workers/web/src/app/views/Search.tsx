@@ -181,6 +181,7 @@ export function SearchDetail({
   onBack,
   onOpenAttachment,
   edits,
+  myDay,
 }: {
   store: MirrorStore;
   bff: BffFetch;
@@ -190,11 +191,12 @@ export function SearchDetail({
   onBack: () => void;
   onOpenAttachment: (href: string, name: string) => void;
   edits: Edits;
+  myDay: boolean;
 }) {
   useStoreKey(store, { task: id });
   const source = searchDetailSource(store, id);
   const [remote, retry] = useRemote(bff, source === "server" ? `tasks/${encodeURIComponent(id)}` : null, parseTaskResponse);
-  const props = { store, id, today, timeZone, onBack, onOpenAttachment };
+  const props = { store, id, today, timeZone, onBack, onOpenAttachment, myDay };
   if (source === "store") return <TaskDetail {...props} edits={edits} onDeleted={onBack} />;
   if (source === "gone") return <TaskDetail {...props} placeholder={<p className="empty">This task no longer exists.</p>} />;
   switch (remote.status) {

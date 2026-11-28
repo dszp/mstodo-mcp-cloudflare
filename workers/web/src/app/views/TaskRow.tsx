@@ -172,14 +172,14 @@ export function TaskCard({
 
   return (
     <div className={`task-card${selected ? " selected" : ""}${done ? " done" : ""}`} data-task={id}>
-      <CompleteButton done={done} onToggle={edits && (() => edits.setCompleted(id, !done))} />
+      <CompleteButton done={done} title={t.title} onToggle={edits && (() => edits.setCompleted(id, !done))} />
       <RouteLink to={{ ...view, task: id }} className="task-link" current={selected}>
         <span className="task-text">
           <span className="task-title">{t.title}</span>
           {parts.length > 0 && <span className="task-meta">{parts}</span>}
         </span>
       </RouteLink>
-      <StarButton on={important} onToggle={edits && (() => edits.setImportant(id, !important))} />
+      <StarButton on={important} title={t.title} onToggle={edits && (() => edits.setImportant(id, !important))} />
     </div>
   );
 }
@@ -188,8 +188,22 @@ export function TaskCard({
 // (a link can't hold a button). The click stops here, so it never also opens
 // the task.
 
-/** A completion circle: a button with `onToggle`, else a picture of the state. */
-export function CompleteButton({ done, onToggle, className = "task-circle" }: { done: boolean; onToggle?: () => void; className?: string }) {
+/**
+ * A completion circle: a button with `onToggle`, else a picture of the state.
+ * In a list, `title` puts the task's title in the button's name, so a screen
+ * reader moving between rows hears which task each one completes.
+ */
+export function CompleteButton({
+  done,
+  onToggle,
+  title,
+  className = "task-circle",
+}: {
+  done: boolean;
+  onToggle?: () => void;
+  title?: string;
+  className?: string;
+}) {
   if (!onToggle) {
     return (
       <span className={className} role="img" aria-label={done ? "Completed" : "Not completed"}>
@@ -201,7 +215,9 @@ export function CompleteButton({ done, onToggle, className = "task-circle" }: { 
     <button
       type="button"
       className={`${className} icon-button`}
-      aria-label={done ? "Mark not complete" : "Mark complete"}
+      aria-label={
+        title === undefined ? (done ? "Mark not complete" : "Mark complete") : done ? `Mark “${title}” not complete` : `Mark “${title}” complete`
+      }
       onClick={(e) => {
         e.stopPropagation();
         onToggle();
@@ -212,8 +228,8 @@ export function CompleteButton({ done, onToggle, className = "task-circle" }: { 
   );
 }
 
-/** The importance star: a button with `onToggle`, else a picture of the state. */
-export function StarButton({ on, onToggle }: { on: boolean; onToggle?: () => void }) {
+/** The importance star: a button with `onToggle`, else a picture of the state. `title` as for CompleteButton. */
+export function StarButton({ on, onToggle, title }: { on: boolean; onToggle?: () => void; title?: string }) {
   if (!onToggle) {
     return (
       <span className={`task-star${on ? " on" : ""}`} role="img" aria-label={on ? "Important" : "Not important"}>
@@ -225,7 +241,9 @@ export function StarButton({ on, onToggle }: { on: boolean; onToggle?: () => voi
     <button
       type="button"
       className={`task-star icon-button${on ? " on" : ""}`}
-      aria-label={on ? "Remove importance" : "Add importance"}
+      aria-label={
+        title === undefined ? (on ? "Remove importance" : "Add importance") : on ? `Remove importance from “${title}”` : `Add importance to “${title}”`
+      }
       onClick={(e) => {
         e.stopPropagation();
         onToggle();

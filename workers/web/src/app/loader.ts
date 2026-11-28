@@ -37,6 +37,11 @@ export interface Loader {
   today(now?: Date): string;
 }
 
+/** Whether My Day can be edited: on unless /sync/info says capabilities.my_day is false. */
+export function myDayOn(info: ServerInfo | null): boolean {
+  return info?.capabilities["my_day"] !== false;
+}
+
 /** The date `now` falls on in `timeZone`, as YYYY-MM-DD. */
 export function todayIn(timeZone: string, now: Date): string {
   // en-CA formats a date as YYYY-MM-DD.
