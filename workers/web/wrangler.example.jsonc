@@ -35,7 +35,10 @@
   "vars": {
     "SERVER_ORIGIN": "<your-server-origin>",
     "WEB_SESSION_MAX_HOURS": "12",
-    "WEB_SESSION_IDLE_MINUTES": "60"
+    "WEB_SESSION_IDLE_MINUTES": "60",
+    // The app icon: "blue" (production) or "teal" (a development deployment,
+    // like the apps' Dev builds). Set it per deployment under "vars".
+    "WEB_ICON": "blue"
   },
 
   "observability": { "enabled": true }

@@ -84,22 +84,26 @@ export function SearchBox({ route, onSubmit }: { route: Route; onSubmit: () => v
 
   return (
     <div className="side-search">
-      <span className="side-search-icon" aria-hidden="true">
-        <SearchIcon />
-      </span>
-      <input
-        ref={input}
-        type="search"
-        className="search-input"
-        placeholder="Search"
-        aria-label="Search tasks"
-        enterKeyHint="search"
-        autoComplete="off"
-        spellCheck={false}
-        value={text}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={onKeyDown}
-      />
+      {/* The app icon; the Worker serves this deployment's colour under the same name. */}
+      <img className="side-logo" src="/favicon.svg" alt="" width={34} height={34} />
+      <div className="side-search-field">
+        <span className="side-search-icon" aria-hidden="true">
+          <SearchIcon />
+        </span>
+        <input
+          ref={input}
+          type="search"
+          className="search-input"
+          placeholder="Search"
+          aria-label="Search tasks"
+          enterKeyHint="search"
+          autoComplete="off"
+          spellCheck={false}
+          value={text}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+        />
+      </div>
     </div>
   );
 }

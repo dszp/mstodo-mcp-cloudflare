@@ -190,8 +190,10 @@ button { font: inherit; color: inherit; }
   background: var(--sidebar-bg);
   border-right: 1px solid var(--separator);
 }
-.side-search { position: relative; flex: none; padding: 12px 12px 0; }
-.side-search-icon { position: absolute; left: 22px; top: 50%; margin-top: 6px; transform: translateY(-50%); color: var(--text-3); display: inline-flex; font-size: 15px; pointer-events: none; }
+.side-search { display: flex; align-items: center; gap: 8px; flex: none; padding: 12px 12px 0; }
+.side-logo { flex: none; width: 34px; height: 34px; }
+.side-search-field { position: relative; flex: 1; min-width: 0; }
+.side-search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-3); display: inline-flex; font-size: 15px; pointer-events: none; }
 .search-input {
   width: 100%;
   box-sizing: border-box;

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Potem A ribbon with icy-blue gradient on teal (development)"><defs>
+  <linearGradient id="background" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1024" y2="1024"><stop stop-color="#00B190" /><stop offset=".52" stop-color="#009680" /><stop offset="1" stop-color="#007B6C" /></linearGradient>
+  <linearGradient id="front" gradientUnits="userSpaceOnUse" x1="700" y1="220" x2="350" y2="780"><stop offset="0" stop-color="#F3FCFF" /><stop offset=".30" stop-color="#DDF3FF" /><stop offset=".66" stop-color="#B5DCFA" /><stop offset="1" stop-color="#8DB8EB" /></linearGradient>
+  <linearGradient id="rear" gradientUnits="userSpaceOnUse" x1="178" y1="600" x2="326" y2="775"><stop stop-color="#DDF3FF" /><stop offset=".55" stop-color="#DDF3FF" /><stop offset="1" stop-color="#5279BD" /></linearGradient>
+  <linearGradient id="seamshade" gradientUnits="userSpaceOnUse" x1="315.0" y1="662" x2="315.0" y2="697"><stop stop-color="#03403A" stop-opacity="0" /><stop offset="1" stop-color="#03403A" stop-opacity=".42" /></linearGradient>
+  <mask id="silhouette" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+  <path d="M 178 600 L 326 760 L 576 260 H 650 C 766 260 820 312 820 382 C 820 462 749 514 649 514 H 485 Q 450 514 434 546 L 423 566" fill="none" stroke="#fff" stroke-width="96" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M 576 260 H650 C766 260 820 312 820 382 C820 462 749 514 649 514 H485 Q450 514 434 546 L423 566 Z" fill="#fff" />
+  <path d="M615 308 H650 C734 308 772 337 772 382 C772 433 718 466 649 466 H543 Q528 466 535 452 L600 322 Q607 308 615 308 Z" fill="#000" />
+  </mask>
+  <clipPath id="rearclip"><path d="M 0 0 H 200 L 315.0 677 L 389.0 744 L 700 1024 H 0 Z" /></clipPath>
+  </defs><rect width="1024" height="1024" rx="224" fill="url(#background)" /><g mask="url(#silhouette)"><rect width="1024" height="1024" fill="url(#front)" /><path d="M 0 0 H 200 L 315.0 677 L 389.0 744 L 700 1024 H 0 Z" fill="url(#rear)" /></g></svg>
