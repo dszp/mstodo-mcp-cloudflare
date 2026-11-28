@@ -69,7 +69,7 @@ type KeyValueStorage = Pick<Storage, "getItem" | "setItem">;
 export interface EditingDeps {
   bff: BffFetch;
   store: MirrorStore;
-  loader: Pick<Loader, "reload" | "today">;
+  loader: Pick<Loader, "pullAfter" | "today">;
   session: Pick<SessionClient, "onSignedOut">;
   /** localStorage, or null when the browser has none. */
   storage: KeyValueStorage | null;
@@ -134,7 +134,8 @@ export function createEditing(deps: EditingDeps): Editing {
 
   const outbox = createOutbox({
     send: (batch) => sendMutations(bff, id, batch),
-    pull: () => loader.reload(),
+    // Not reload(): a pull already in flight may predate the server's write.
+    pull: () => loader.pullAfter(),
     now: deps.now ?? (() => new Date()),
     random,
     schedule: deps.schedule ?? platformSchedule,

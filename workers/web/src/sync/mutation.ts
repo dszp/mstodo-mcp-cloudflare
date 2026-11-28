@@ -45,11 +45,17 @@ export interface Mutation {
   position?: Position;
 }
 
-// §5.3, one result per mutation.
+export type AppliedResult = { id: string; status: "applied"; sid?: string; superseded_fields?: string[] };
+export type RejectedResult = { id: string; status: "rejected"; error: string };
+
+// §5.3, one result per mutation. A `duplicate` carries the result stored when
+// the id was first answered (the server stores only applied and rejected:
+// packages/core/sync/mutations.ts applyOne), so a repeat of a refused edit is
+// still refused.
 export type MutationResult =
-  | { id: string; status: "applied"; sid?: string; superseded_fields?: string[] }
-  | { id: string; status: "duplicate"; sid?: string; superseded_fields?: string[] }
-  | { id: string; status: "rejected"; error: string }
+  | AppliedResult
+  | { id: string; status: "duplicate"; result?: AppliedResult | RejectedResult }
+  | RejectedResult
   | { id: string; status: "failed"; error: string; retry: boolean }
   | { id: string; status: "skipped" };
 

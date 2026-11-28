@@ -208,6 +208,70 @@ describe("createLoader", () => {
   });
 });
 
+describe("pullAfter", () => {
+  // A feed whose incremental pages wait until released, so a pull can be held in flight.
+  function gatedServer() {
+    const gates: (() => void)[] = [];
+    let n = 0;
+    const paths: string[] = [];
+    const fn: BffFetch = async (path) => {
+      paths.push(path);
+      if (path === "sync/info") return json({ server_id: "s", timezone: "UTC", capabilities: {} });
+      const cursor = new URLSearchParams(path.split("?")[1]).get("cursor");
+      if (cursor === null) return json(page([], "0"));
+      await new Promise<void>((r) => gates.push(r));
+      n += 1;
+      return json(page([list(`l${n}`, "Example")], String(n)));
+    };
+    return { fn, paths, gates };
+  }
+  const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  it("waits for a pull already in flight, then runs a fresh one", async () => {
+    const { fn, paths, gates } = gatedServer();
+    const loader = createLoader(fn, new MirrorStore(), LIVE);
+    await loader.load();
+    paths.length = 0;
+    const early = loader.reload();
+    await tick();
+    let done = false;
+    const after = loader.pullAfter().then(() => (done = true));
+    await tick();
+    expect(paths).toHaveLength(1);
+    gates.shift()!();
+    await early;
+    await tick();
+    // The in-flight pull may have started before the server applied the
+    // edit, so pullAfter doesn't count it: a second pull starts.
+    expect(done).toBe(false);
+    expect(paths).toEqual(["sync/changes?scope=active&limit=1000&cursor=0", "sync/changes?scope=active&limit=1000&cursor=1"]);
+    gates.shift()!();
+    await after;
+  });
+
+  it("runs a fresh pull at once when none is in flight, and still pulls after a failed one", async () => {
+    let fail = true;
+    const paths: string[] = [];
+    const fn: BffFetch = async (path) => {
+      paths.push(path);
+      if (path === "sync/info") return json({ server_id: "s", timezone: "UTC", capabilities: {} });
+      if (path.includes("cursor=") && fail) {
+        fail = false;
+        return json({ error: "x" }, 502);
+      }
+      return json(page([], "1"));
+    };
+    const loader = createLoader(fn, new MirrorStore(), LIVE);
+    await loader.load();
+    paths.length = 0;
+    const failing = loader.reload();
+    const after = loader.pullAfter();
+    await expect(failing).rejects.toThrow();
+    await after;
+    expect(paths).toHaveLength(2);
+  });
+});
+
 describe("watchFocus", () => {
   it("reloads on focus at most once every 30 s", () => {
     vi.useFakeTimers();

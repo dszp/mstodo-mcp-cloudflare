@@ -74,7 +74,7 @@ function setup(opts: { answer?: (body: Posted["body"]) => Response | Promise<Res
     return answer(body);
   };
   let today = "2026-11-26";
-  const loader = { today: vi.fn(() => today), reload: vi.fn(async () => {}) };
+  const loader = { today: vi.fn(() => today), pullAfter: vi.fn(async () => {}) };
   const session = fakeSession();
   const storage = opts.storage === undefined ? memoryStorage() : opts.storage;
   let n = 0;
@@ -106,11 +106,11 @@ describe("createEditing: send", () => {
     expect(editing.outbox.pending()).toEqual([]);
   });
 
-  it("pulls after an answered batch", async () => {
+  it("pulls after an answered batch with a pull that starts after the answer", async () => {
     const { editing, loader } = setup();
     editing.edits.rename("t1", "New");
     await editing.outbox.flush();
-    expect(loader.reload).toHaveBeenCalledTimes(1);
+    expect(loader.pullAfter).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -251,7 +251,7 @@ describe("createEditing: overlay", () => {
     const editing = createEditing({
       bff: async () => json({}),
       store,
-      loader: { today: () => "2026-11-26", reload: async () => {} },
+      loader: { today: () => "2026-11-26", pullAfter: async () => {} },
       session: fakeSession(),
       storage: null,
       random: () => "u",

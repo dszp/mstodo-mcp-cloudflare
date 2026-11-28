@@ -31,7 +31,7 @@ const editing = createEditing({ bff, store, loader, session, storage });
 // Closing or reloading the tab while edits wait to be sent asks first: the
 // outbox lives in memory only.
 window.addEventListener("beforeunload", (e) => {
-  if (editing.outbox.pending().length === 0) return;
+  if (editing.outbox.unsent().length === 0) return;
   e.preventDefault();
   e.returnValue = "";
 });

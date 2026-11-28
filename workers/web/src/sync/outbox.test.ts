@@ -18,6 +18,7 @@ function fakeClock() {
         t.live = false;
       };
     },
+    now: () => now,
     // Delays of the timers still waiting, relative to now.
     waiting: () => timers.filter((t) => t.live).map((t) => t.at - now),
     async tick(ms: number) {
@@ -48,6 +49,7 @@ function harness(respond: Responder = (b) => answer(b, "applied")) {
   let pulls = 0;
   let n = 0;
   let responder = respond;
+  let pullFails: () => Error | null = () => null;
   const deps: OutboxDeps = {
     async send(batch) {
       sent.push(batch.map((m) => m.id));
@@ -58,8 +60,11 @@ function harness(respond: Responder = (b) => answer(b, "applied")) {
     },
     async pull() {
       pulls += 1;
+      const e = pullFails();
+      if (e) throw e;
     },
-    now: () => new Date(Date.UTC(2026, 10, 27, 12, 0, 0)),
+    // The device clock follows the virtual one.
+    now: () => new Date(Date.UTC(2026, 10, 27, 12, 0, 0) + clock.now()),
     random: () => `m-${++n}`,
     schedule: clock.schedule,
     isSignedOut: (e) => e instanceof SignedOut,
@@ -74,6 +79,9 @@ function harness(respond: Responder = (b) => answer(b, "applied")) {
     pulls: () => pulls,
     respondWith(r: Responder) {
       responder = r;
+    },
+    pullWith(f: () => Error | null) {
+      pullFails = f;
     },
   };
 }
@@ -241,16 +249,106 @@ describe("outbox", () => {
     expect(h.clock.waiting()).toEqual([1000]);
   });
 
-  it("does not send before the backoff runs out, even for a new edit", async () => {
+  it("a new edit during a backoff gets the normal 300 ms window, resending the head with it", async () => {
     const h = harness(() => new Error("network"));
     h.outbox.enqueue(edit("t1"));
     await h.outbox.flush();
-    h.outbox.enqueue(edit("t2"));
-    await h.clock.tick(999);
-    expect(h.sent).toHaveLength(1);
+    for (let i = 0; i < 4; i++) await h.clock.tick(h.clock.waiting()[0]!);
+    expect(h.clock.waiting()).toEqual([16000]);
     h.respondWith((b) => answer(b, "applied"));
-    await h.clock.tick(1);
-    expect(h.sent).toEqual([["m-1"], ["m-1", "m-2"]]);
+    h.outbox.enqueue(edit("t2"));
+    expect(h.clock.waiting()).toEqual([300]);
+    await h.clock.tick(300);
+    expect(h.sent.at(-1)).toEqual(["m-1", "m-2"]);
+    expect(h.outbox.pending()).toEqual([]);
+  });
+
+  it("a new edit during a backoff that fails again backs off longer, not from the start", async () => {
+    const h = harness(() => new Error("network"));
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    await h.clock.tick(1000); // second failure: 2 s
+    h.outbox.enqueue(edit("t2"));
+    await h.clock.tick(300);
+    expect(h.clock.waiting()).toEqual([4000]);
+  });
+
+  it("gives up on a mutation answered failed with retry the sixth time: onRejected with its last error", async () => {
+    let call = 0;
+    const h = harness((b) => ({
+      cursor: "c",
+      results: b.map((m) => ({ id: m.id, status: "failed" as const, error: `graph_unavailable_${++call}`, retry: true })),
+    }));
+    const rejected: [string, unknown][] = [];
+    h.outbox.onRejected((m, e) => rejected.push([m.id, e]));
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    for (let i = 0; i < 4; i++) await h.clock.tick(h.clock.waiting()[0]!);
+    expect(h.sent).toHaveLength(5);
+    expect(rejected).toEqual([]);
+    await h.clock.tick(h.clock.waiting()[0]!);
+    expect(h.sent).toHaveLength(6);
+    expect(rejected).toEqual([["m-1", { error: "graph_unavailable_6" }]]);
+    expect(h.outbox.pending()).toEqual([]);
+    expect(h.clock.waiting()).toEqual([]);
+  });
+
+  it("gives up on a mutation still answered failed with retry more than 5 minutes after its first failure", async () => {
+    let failNext = true;
+    const h = harness((b) =>
+      failNext
+        ? { cursor: "c", results: b.map((m) => ({ id: m.id, status: "failed" as const, error: "graph_unavailable", retry: true })) }
+        : new Error("network"),
+    );
+    const rejected: [string, unknown][] = [];
+    h.outbox.onRejected((m, e) => rejected.push([m.id, e]));
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    // Thrown sends don't count as failed answers; only time passes.
+    failNext = false;
+    while (h.clock.now() < 5 * 60_000) await h.clock.tick(h.clock.waiting()[0]!);
+    expect(rejected).toEqual([]);
+    failNext = true;
+    await h.clock.tick(h.clock.waiting()[0]!);
+    expect(rejected).toEqual([["m-1", { error: "graph_unavailable" }]]);
+    expect(h.outbox.pending()).toEqual([]);
+  });
+
+  it("a duplicate carrying a stored rejected result is rejected with the stored error", async () => {
+    const h = harness((b) => ({
+      cursor: "c",
+      results: [{ id: b[0]!.id, status: "duplicate", result: { id: b[0]!.id, status: "rejected", error: "deleted" } }],
+    }));
+    const rejected: [string, unknown][] = [];
+    h.outbox.onRejected((m, e) => rejected.push([m.id, e]));
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    expect(rejected).toEqual([["m-1", { error: "deleted" }]]);
+    expect(h.outbox.pending()).toEqual([]);
+  });
+
+  it("reports superseded_fields of an applied result, or of a duplicate's stored applied result", async () => {
+    const h = harness((b) => ({
+      cursor: "c",
+      results: [
+        { id: b[0]!.id, status: "applied", sid: "t1", superseded_fields: ["title"] },
+        { id: b[1]!.id, status: "duplicate", result: { id: b[1]!.id, status: "applied", sid: "t2", superseded_fields: ["due", "importance"] } },
+        { id: b[2]!.id, status: "applied", sid: "t3", superseded_fields: [] },
+        { id: b[3]!.id, status: "duplicate" },
+      ],
+    }));
+    const superseded: [string, string[]][] = [];
+    const rejected: unknown[] = [];
+    h.outbox.onSuperseded((m, fields) => superseded.push([m.id, fields]));
+    h.outbox.onRejected((m) => rejected.push(m));
+    for (const s of ["t1", "t2", "t3", "t4"]) h.outbox.enqueue(edit(s));
+    await h.outbox.flush();
+    expect(superseded).toEqual([
+      ["m-1", ["title"]],
+      ["m-2", ["due", "importance"]],
+    ]);
+    expect(rejected).toEqual([]);
+    expect(h.outbox.pending()).toEqual([]);
   });
 
   it("skipped retried: kept, backed off, and sent again in order", async () => {
@@ -305,7 +403,78 @@ describe("outbox", () => {
     expect(h.pulls()).toBe(0);
   });
 
-  it("keeps going when pull throws", async () => {
+  it("when the pull after an answer fails, keeps the applied edits in pending() and retries the pull after 2 s, then backs off", async () => {
+    const h = harness();
+    let failing = true;
+    h.pullWith(() => (failing ? new Error("pull failed") : null));
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    // Sent and applied, but the mirror hasn't caught up: the overlay keeps it.
+    expect(h.sent).toEqual([["m-1"]]);
+    expect(h.outbox.pending().map((m) => m.id)).toEqual(["m-1"]);
+    expect(h.outbox.unsent()).toEqual([]);
+    expect(h.clock.waiting()).toEqual([2000]);
+    await h.clock.tick(2000);
+    expect(h.pulls()).toBe(2);
+    expect(h.clock.waiting()).toEqual([4000]);
+    failing = false;
+    await h.clock.tick(4000);
+    expect(h.pulls()).toBe(3);
+    expect(h.outbox.pending()).toEqual([]);
+    expect(h.clock.waiting()).toEqual([]);
+    expect(h.sent).toEqual([["m-1"]]); // never resent
+  });
+
+  it("a rejected result leaves pending() even when the pull fails", async () => {
+    const h = harness((b) => ({ cursor: "c", results: [{ id: b[0]!.id, status: "rejected", error: "deleted" }] }));
+    h.pullWith(() => new Error("pull failed"));
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    expect(h.outbox.pending()).toEqual([]);
+  });
+
+  it("a later batch's successful pull also clears edits an earlier failed pull left behind", async () => {
+    const h = harness();
+    let failing = true;
+    h.pullWith(() => (failing ? new Error("pull failed") : null));
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    failing = false;
+    h.outbox.enqueue(edit("t2"));
+    expect(h.outbox.pending().map((m) => m.id)).toEqual(["m-1", "m-2"]);
+    await h.outbox.flush();
+    expect(h.outbox.pending()).toEqual([]);
+    expect(h.clock.waiting()).toEqual([]);
+  });
+
+  it("discard counts only unsent edits, and drops the ones awaiting a pull", async () => {
+    const h = harness();
+    h.pullWith(() => new Error("pull failed"));
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    h.respondWith(() => new Error("network"));
+    h.outbox.enqueue(edit("t2"));
+    await h.outbox.flush();
+    expect(h.outbox.pending().map((m) => m.id)).toEqual(["m-1", "m-2"]);
+    expect(h.outbox.discard()).toBe(1);
+    expect(h.outbox.pending()).toEqual([]);
+    expect(h.clock.waiting()).toEqual([]);
+  });
+
+  it("flush with nothing unsent retries a failed pull at once", async () => {
+    const h = harness();
+    let failing = true;
+    h.pullWith(() => (failing ? new Error("pull failed") : null));
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    failing = false;
+    await h.outbox.flush();
+    expect(h.pulls()).toBe(2);
+    expect(h.outbox.pending()).toEqual([]);
+    expect(h.clock.waiting()).toEqual([]);
+  });
+
+  it("keeps sending when pull throws", async () => {
     const clock = fakeClock();
     let n = 0;
     const sent: number[] = [];
@@ -326,7 +495,8 @@ describe("outbox", () => {
     for (let i = 0; i < 26; i++) outbox.enqueue(edit(`t${i}`));
     await outbox.flush();
     expect(sent).toEqual([25, 1]);
-    expect(outbox.pending()).toEqual([]);
+    expect(outbox.unsent()).toEqual([]);
+    expect(outbox.pending()).toHaveLength(26);
   });
 
   it("subscribe fires on enqueue, removal and discard", async () => {
@@ -336,13 +506,15 @@ describe("outbox", () => {
     h.outbox.enqueue(edit("t1"));
     expect(calls).toBe(1);
     await h.outbox.flush();
-    expect(calls).toBe(2);
+    // Once as the answer takes it out of unsent(), once as the pull takes it
+    // out of pending().
+    expect(calls).toBe(3);
     h.outbox.enqueue(edit("t2"));
     h.outbox.discard();
-    expect(calls).toBe(4);
+    expect(calls).toBe(5);
     off();
     h.outbox.enqueue(edit("t3"));
-    expect(calls).toBe(4);
+    expect(calls).toBe(5);
   });
 
   it("discard returns the count and cancels the timer", async () => {
@@ -383,11 +555,12 @@ describe("outbox", () => {
     const h = harness();
     let once = true;
     h.outbox.subscribe(() => {
-      // One microtask after the queue drains: the run's loop has returned but
-      // the run itself hasn't been cleared yet.
+      // Two microtasks after the pull empties pending(): the run's loop has
+      // returned but the run itself hasn't been cleared yet. (Checked: with
+      // the re-arm in flush's finally removed, this test fails.)
       if (once && h.outbox.pending().length === 0) {
         once = false;
-        void Promise.resolve().then(() => h.outbox.enqueue(edit("t2")));
+        void Promise.resolve().then(() => undefined).then(() => h.outbox.enqueue(edit("t2")));
       }
     });
     h.outbox.enqueue(edit("t1"));

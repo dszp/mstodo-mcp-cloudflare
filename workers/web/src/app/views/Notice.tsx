@@ -12,8 +12,8 @@ const NOTICE_MS = 6_000;
  * holds any, and a notice for each edit the server refused. Screen readers
  * hear the notices (role="status"), not "Saving…".
  */
-export function EditStatus({ outbox, notices }: { outbox: Pick<Outbox, "pending" | "subscribe">; notices: Notices }) {
-  const saving = useSyncExternalStore(outbox.subscribe, () => outbox.pending().length > 0);
+export function EditStatus({ outbox, notices }: { outbox: Pick<Outbox, "unsent" | "subscribe">; notices: Notices }) {
+  const saving = useSyncExternalStore(outbox.subscribe, () => outbox.unsent().length > 0);
   const items = useSyncExternalStore(notices.subscribe, notices.list);
   return (
     <div className="edit-status">
