@@ -13,6 +13,7 @@ import { type Loader, watchFocus } from "./loader.ts";
 import type { TaskView } from "./model.ts";
 import { type Route, currentRoute, replaceRoute, subscribeRoute } from "./route.ts";
 import { openAttachment, saveWithAnchor } from "./download.ts";
+import type { Editing } from "./editing.ts";
 import { type SessionClient, watchSession } from "./session.ts";
 import { useToday } from "./use-today.ts";
 import { SearchDetail, SearchPane } from "./views/Search.tsx";
@@ -25,6 +26,7 @@ export interface AppDeps {
   session: SessionClient;
   loader: Loader;
   bff: BffFetch;
+  editing: Editing;
 }
 
 export const AppContext = createContext<AppDeps | null>(null);
@@ -135,9 +137,11 @@ function useRoute(): Route {
  * list, with a back control on each.
  */
 function Ready() {
-  const { store, session, loader, bff } = useApp();
+  const { store, session, loader, bff, editing } = useApp();
   const route = useRoute();
   const today = useToday(loader);
+  // Pending edits are shown against the owner's today ("due today", My Day).
+  useEffect(() => editing.refreshContext(), [editing, today]);
   const timeZone = loader.info()?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [sidebarShown, setSidebarShown] = useState(false);
   const [signOutFailed, setSignOutFailed] = useState(false);

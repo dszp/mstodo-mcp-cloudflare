@@ -1,4 +1,5 @@
-// Fetches from the BFF's read-only proxy (/bff/api/*, workers/web/src/bff/api.ts).
+// Fetches from the BFF's proxy (/bff/api/*, workers/web/src/bff/api.ts): GETs,
+// and the one write, POST sync/mutations.
 //
 // The proxy never refreshes; near expiry it answers 401
 // session_refresh_needed. This wrapper then refreshes (shared with every other
@@ -10,8 +11,28 @@
 
 import type { SessionClient } from "./session.ts";
 
-/** GET /bff/api/<path>; `path` is the sync API path after /api/v1/, with its query. */
-export type BffFetch = (path: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+/**
+ * GET /bff/api/<path>, or POST with a JSON `body`; `path` is the sync API path
+ * after /api/v1/, with its query. A POST carries X-Potem: 1, which the BFF
+ * requires on every state-changing route; the browser adds Origin itself.
+ */
+export type BffFetch = (
+  path: string,
+  init?: { signal?: AbortSignal; method?: "POST"; body?: string },
+) => Promise<Response>;
+
+const POST_HEADERS = { "x-potem": "1", "content-type": "application/json" };
+
+function requestInit(init: Parameters<BffFetch>[1]): RequestInit | undefined {
+  const out: RequestInit = {};
+  if (init?.signal) out.signal = init.signal;
+  if (init?.method === "POST") {
+    out.method = "POST";
+    out.headers = POST_HEADERS;
+    if (init.body !== undefined) out.body = init.body;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 /** The session ended; the signed-out flow has already run. */
 export class SignedOutError extends Error {
@@ -33,7 +54,11 @@ export function createBffFetch(fetchFn: typeof fetch, session: SessionClient): B
     for (const force of [false, true, null]) {
       if (session.signedOut) throw new SignedOutError();
       const url = `/bff/api/${path}`;
-      const res = await (init?.signal ? fetchFn(url, { signal: init.signal }) : fetchFn(url));
+      // A POST retried after a refresh is sent again unchanged: the BFF
+      // answered 401 before forwarding it, and its mutation ids make a resend
+      // safe anyway (SYNC-API §5.4).
+      const reqInit = requestInit(init);
+      const res = await (reqInit ? fetchFn(url, reqInit) : fetchFn(url));
       // A response that lands after the page signed out (another request's
       // signed_out, or another tab's) must not repopulate the cleared mirror.
       if (session.signedOut) throw new SignedOutError();

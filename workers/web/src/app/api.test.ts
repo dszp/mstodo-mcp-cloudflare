@@ -126,6 +126,60 @@ describe("bffFetch", () => {
     await expect(pending).rejects.toBeInstanceOf(SignedOutError);
   });
 
+  it("a POST sends X-Potem, a JSON content type and the body", async () => {
+    const seen: RequestInit[] = [];
+    const fn = vi.fn(async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+      seen.push(init);
+      return json({ ok: 1 });
+    }) as unknown as typeof fetch;
+    const session = createSessionClient(fn, { store: new MirrorStore(), locks: null, channel: null });
+    const res = await createBffFetch(fn, session)("sync/mutations", { method: "POST", body: '{"a":1}' });
+    expect(res.status).toBe(200);
+    expect(fn).toHaveBeenCalledWith("/bff/api/sync/mutations", expect.anything());
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.method).toBe("POST");
+    expect(seen[0]!.body).toBe('{"a":1}');
+    const headers = new Headers(seen[0]!.headers);
+    expect(headers.get("x-potem")).toBe("1");
+    expect(headers.get("content-type")).toBe("application/json");
+  });
+
+  it("a GET sends no X-Potem header, body or method", async () => {
+    const seen: Array<RequestInit | undefined> = [];
+    const fn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(init);
+      return json({ ok: 1 });
+    }) as unknown as typeof fetch;
+    const session = createSessionClient(fn, { store: new MirrorStore(), locks: null, channel: null });
+    await createBffFetch(fn, session)("sync/info");
+    expect(seen).toEqual([undefined]);
+  });
+
+  it("a POST that needs a refresh is sent again with the same body", async () => {
+    const bodies: unknown[] = [];
+    const log: string[] = [];
+    let i = 0;
+    const fn = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = String(input);
+      log.push(`${init.method ?? "GET"} ${url}`);
+      if (url === "/bff/session/refresh") return new Response(null, { status: 204 });
+      bodies.push(init.body);
+      return i++ === 0 ? refreshNeeded() : json({ ok: 1 });
+    }) as unknown as typeof fetch;
+    const session = createSessionClient(fn, { store: new MirrorStore(), locks: null, channel: null });
+    const res = await createBffFetch(fn, session)("sync/mutations", { method: "POST", body: "[1]" });
+    expect(res.status).toBe(200);
+    expect(log).toEqual(["POST /bff/api/sync/mutations", "POST /bff/session/refresh", "POST /bff/api/sync/mutations"]);
+    expect(bodies).toEqual(["[1]", "[1]"]);
+  });
+
+  it("a POST answered signed_out signs out and throws", async () => {
+    const { bffFetch, log, signedOut } = fakeBff([() => json({ error: "signed_out" }, 401)]);
+    await expect(bffFetch("sync/mutations", { method: "POST", body: "{}" })).rejects.toBeInstanceOf(SignedOutError);
+    expect(signedOut).toHaveBeenCalledTimes(1);
+    expect(log).toEqual(["POST /bff/api/sync/mutations"]);
+  });
+
   it("passes a 401 with another error through", async () => {
     const { bffFetch, signedOut } = fakeBff([() => json({ error: "something_else" }, 401)]);
     expect((await bffFetch("sync/info")).status).toBe(401);

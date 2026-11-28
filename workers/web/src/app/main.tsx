@@ -3,18 +3,30 @@ import "./styles.css";
 import { MirrorStore } from "../sync/store.ts";
 import { App, AppContext, type AppDeps } from "./App.tsx";
 import { createBffFetch } from "./api.ts";
+import { createEditing } from "./editing.ts";
 import { createLoader } from "./loader.ts";
 import { createSessionClient } from "./session.ts";
 import { ErrorBoundary } from "./views/ErrorBoundary.tsx";
 
-// One mirror, session and loader per page. The mirror lives only in memory: a
+// One mirror, session, loader and outbox per page. The mirror lives only in memory: a
 // reload pulls again, and the session's data_key is not used yet.
 const fetchFn: typeof fetch = (input, init) => fetch(input, init);
 const store = new MirrorStore();
 const session = createSessionClient(fetchFn, { store });
 const bff = createBffFetch(fetchFn, session);
 const loader = createLoader(bff, store, session);
-const deps: AppDeps = { store, session, loader, bff };
+// Reading localStorage throws when the browser blocks site data; edits then
+// use a client_id for this page only.
+let storage: Storage | null = null;
+try {
+  storage = window.localStorage;
+} catch {
+  /* no storage */
+}
+// Created before the app renders: its sign-out listener must run before the
+// app's, so the signed-out screen can show how many edits were not sent.
+const editing = createEditing({ bff, store, loader, session, storage });
+const deps: AppDeps = { store, session, loader, bff, editing };
 
 createRoot(document.getElementById("root")!).render(
   <ErrorBoundary onSignOut={() => session.logout()} onReload={() => window.location.reload()}>
