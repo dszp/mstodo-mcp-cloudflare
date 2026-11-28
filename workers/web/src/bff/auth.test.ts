@@ -543,6 +543,9 @@ describe("GET /auth/callback", () => {
     expect(await out.text()).toContain("Cloudflare Access");
     expect(jar.values.has(SESSION_COOKIE)).toBe(false);
     expect(jar.values.has(LOGIN_COOKIE)).toBe(false);
+    // The grant the code redeemed is revoked, not left to lapse.
+    expect(server.grants).toHaveLength(1);
+    expect(server.liveGrants()).toHaveLength(0);
   });
 
   it("shows a 502 page and clears only the login cookie when /token fails", async () => {

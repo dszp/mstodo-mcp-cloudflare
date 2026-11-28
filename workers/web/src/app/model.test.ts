@@ -345,6 +345,12 @@ describe("searchText / searchPath", () => {
     expect(decodeURIComponent(path.slice("search?q=".length))).toBe("a".repeat(256));
   });
 
+  it("replaces a lone surrogate instead of throwing", () => {
+    const path = searchPath("\uD800abc")!;
+    expect(decodeURIComponent(path.slice("search?q=".length))).toBe("\uFFFDabc");
+    expect(searchPath("ab\uDC00")).toBe("search?q=ab%EF%BF%BD");
+  });
+
   it("never splits a character made of two UTF-16 units at the limit", () => {
     // 255 units, then an emoji (2 units) that would straddle the 256th.
     const path = searchPath(`${"a".repeat(255)}😀😀`)!;

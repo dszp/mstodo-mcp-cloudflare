@@ -106,7 +106,9 @@ export async function handleSession(req: Request, cfg: BffConfig): Promise<Respo
       signed_in: true,
       expires_at: sessionEnd(session, cfg),
       idle_minutes: cfg.idleMinutes,
-      refresh_at: session.access_exp - REFRESH_WINDOW_SEC,
+      // The first second sessionState calls "refresh"; a second earlier the
+      // POST would be a no-op 204.
+      refresh_at: session.access_exp - REFRESH_WINDOW_SEC + 1,
       now,
       data_key: session.data_key,
     },

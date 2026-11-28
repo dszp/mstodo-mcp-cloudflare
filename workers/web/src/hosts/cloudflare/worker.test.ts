@@ -68,6 +68,7 @@ describe("config check", () => {
         const res = await call(env, `${WEB}${path}`);
         expect(res.status, path).toBe(503);
         expect(res.headers.get("strict-transport-security"), path).toBe(HSTS);
+        expect(res.headers.get("cross-origin-resource-policy"), path).toBe(path === "/bff/session" ? "same-origin" : null);
         const text = await res.text();
         expect(text, path).toContain(c.name);
         for (const v of Object.values(c.over)) {

@@ -464,7 +464,8 @@ Without a sign-out, the cookie stops working at the session limits (`WEB_SESSION
 after sign-in, or `WEB_SESSION_IDLE_MINUTES` without use), and an open page signs itself out at
 the same moments. The grant on the server outlives the cookie: it lasts until its refresh token
 lapses, 14 days after the session's last refresh (30 days after sign-in if it was never
-refreshed). Sign out to end it at once.
+refreshed), and the server refuses any grant more than 90 days after sign-in. Sign out to end
+it at once.
 
 **With Cloudflare Access on the web hostname**
 

@@ -58,6 +58,11 @@ export interface SessionClient {
   ensureFresh(): Promise<boolean>;
   /** When the person last used this page or another tab, in epoch milliseconds. */
   readonly lastActivity: number;
+  /**
+   * When this page last moved the BFF's idle timer: a signed-in GET
+   * /bff/session or a refresh answered 204. Epoch milliseconds.
+   */
+  readonly lastContact: number;
   /** Records activity now and tells the other tabs. */
   touch(): void;
   /**
@@ -110,6 +115,7 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
   let limits: SessionLimits | null = null;
   let lastActivity = Date.now();
   let lastBroadcast = 0;
+  let lastContact = 0;
 
   const underLock = <T,>(cb: () => Promise<T>): Promise<T> => (locks ? locks.request(LOCK, cb) : cb());
 
@@ -144,7 +150,10 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
   async function post(force: boolean): Promise<boolean> {
     const headers: Record<string, string> = force ? { ...CSRF_HEADER, "x-potem-force": "1" } : CSRF_HEADER;
     const res = await fetchFn("/bff/session/refresh", { method: "POST", headers });
-    if (res.status === 204) return true;
+    if (res.status === 204) {
+      lastContact = Date.now();
+      return true;
+    }
     const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
     if (res.status === 401 && body?.error === "signed_out") {
       endSession(true);
@@ -161,6 +170,7 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
       endSession(true);
       return { signed_in: false };
     }
+    lastContact = Date.now();
     setLimits(info, Date.now());
     return info;
   }
@@ -196,6 +206,10 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
       return lastActivity;
     },
 
+    get lastContact() {
+      return lastContact;
+    },
+
     touch() {
       lastActivity = Date.now();
       if (lastActivity - lastBroadcast < ACTIVITY_BROADCAST_MS) return;
@@ -223,12 +237,21 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
 }
 
 const ACTIVITY_INTERVAL_MS = 60_000;
+const ACTIVITY_EVENTS = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
 /** The soonest a refresh is tried again after one that left refresh_at in the past. */
 const REFRESH_RETRY_MS = 30_000;
 
 type WatchedSession = Pick<
   SessionClient,
-  "current" | "refreshOnce" | "limits" | "onLimits" | "lastActivity" | "touch" | "markSignedOut" | "signedOut"
+  | "current"
+  | "refreshOnce"
+  | "limits"
+  | "onLimits"
+  | "lastActivity"
+  | "lastContact"
+  | "touch"
+  | "markSignedOut"
+  | "signedOut"
 >;
 
 /**
@@ -237,10 +260,12 @@ type WatchedSession = Pick<
  * - Signs out at the session's end or after idle_minutes without activity,
  *   on a timer and again whenever the page becomes visible or comes back from
  *   the back-forward cache (timers stall while a device sleeps). No request.
- * - Refreshes the access token at refresh_at while the person is active, then
- *   reads the session again for the next refresh_at.
- * - Keeps the BFF's idle timer alive: pointer and keyboard input and the page
- *   becoming visible count as activity, and GET /bff/session (the only
+ * - Refreshes the access token at refresh_at, then reads the session again
+ *   for the next refresh_at, but only after activity since the page last
+ *   moved the BFF's idle timer: a refresh moves it too, and an unattended page
+ *   that refreshed would keep the BFF's session alive past the idle limit.
+ * - Keeps the BFF's idle timer alive: pointer, wheel, touch and keyboard input
+ *   and the page becoming visible count as activity, and GET /bff/session (the only
  *   request that moves the BFF's timer) is sent at most once a minute; the
  *   page's own check on load counts as the first.
  *
@@ -276,7 +301,10 @@ export function watchSession(
       session.markSignedOut();
       return;
     }
-    const refreshAt = Math.max(limits.refreshAt, lastRefreshTry + REFRESH_RETRY_MS);
+    // Without activity since the last contact, no refresh: the next activity
+    // event runs this check again.
+    const active = session.lastActivity > session.lastContact;
+    const refreshAt = active ? Math.max(limits.refreshAt, lastRefreshTry + REFRESH_RETRY_MS) : Infinity;
     if (now >= refreshAt && !refreshing) {
       refreshing = true;
       lastRefreshTry = now;
@@ -295,10 +323,11 @@ export function watchSession(
   }
 
   const onActivity = () => {
-    check();
+    check(); // with the old activity time: a deadline that passed meanwhile signs out
     if (session.signedOut) return;
     session.touch();
     checkServer();
+    check(); // re-armed for the new idle deadline, and a refresh that waited on activity
   };
   const onVisible = () => {
     if (env.doc.visibilityState === "visible") onActivity();
@@ -307,8 +336,7 @@ export function watchSession(
     if ((e as PageTransitionEvent).persisted) check();
   };
 
-  env.target.addEventListener("pointerdown", onActivity);
-  env.target.addEventListener("keydown", onActivity);
+  for (const type of ACTIVITY_EVENTS) env.target.addEventListener(type, onActivity, { passive: true });
   env.doc.addEventListener("visibilitychange", onVisible);
   env.win.addEventListener("pageshow", onPageShow);
   const stopLimits = session.onLimits(check);
@@ -317,8 +345,7 @@ export function watchSession(
     stopped = true;
     clearTimeout(timer);
     stopLimits();
-    env.target.removeEventListener("pointerdown", onActivity);
-    env.target.removeEventListener("keydown", onActivity);
+    for (const type of ACTIVITY_EVENTS) env.target.removeEventListener(type, onActivity);
     env.doc.removeEventListener("visibilitychange", onVisible);
     env.win.removeEventListener("pageshow", onPageShow);
   };

@@ -315,6 +315,8 @@ export async function handleCallback(req: Request, cfg: BffConfig): Promise<Resp
   // Sign-in went through /app/signin, so the server is behind Access and every
   // /api/v1 call needs the Access token; a session without one would only fail.
   if (login.access && !nonEmpty(body.cf_access_token)) {
+    // The code is already redeemed: revoke the grant rather than leave it.
+    if (nonEmpty(body.refresh_token)) await revoke(cfg, device, body.refresh_token, "refresh_token");
     return unavailable("The Potem server didn't send the Cloudflare Access token this sign-in needs.");
   }
   const now = cfg.now();

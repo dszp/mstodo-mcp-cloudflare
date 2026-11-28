@@ -425,16 +425,24 @@ describe("watchSession", () => {
     expect(client.signedOut).toBe(true);
   });
 
-  it("refreshes at refresh_at, then reads the session again and re-arms at the new time", async () => {
+  it("refreshes at refresh_at after activity, then reads the session again and re-arms at the new time", async () => {
     const now = LOCAL_START / 1000;
     const s = await setup(signedInInfo({ refresh_at: now + 600, idle_minutes: 120 }));
-    await vi.advanceTimersByTimeAsync(seconds(599));
+    await vi.advanceTimersByTimeAsync(seconds(1));
+    s.target.dispatchEvent(new Event("keydown"));
+    await vi.advanceTimersByTimeAsync(seconds(598));
     expect(s.refreshes()).toBe(0);
     s.answer(signedInInfo({ now: now + 600, refresh_at: now + 1200, idle_minutes: 120 }));
     await vi.advanceTimersByTimeAsync(seconds(1));
     expect(s.refreshes()).toBe(1);
     expect(s.sessionChecks()).toBe(1);
-    await vi.advanceTimersByTimeAsync(seconds(599));
+    // This keydown also sends the minute's session check, which moves the
+    // BFF's timer by itself; the next one is activity after that contact.
+    await vi.advanceTimersByTimeAsync(seconds(1));
+    s.target.dispatchEvent(new Event("keydown"));
+    await vi.advanceTimersByTimeAsync(seconds(1));
+    s.target.dispatchEvent(new Event("keydown"));
+    await vi.advanceTimersByTimeAsync(seconds(597));
     expect(s.refreshes()).toBe(1);
     await vi.advanceTimersByTimeAsync(seconds(1));
     expect(s.refreshes()).toBe(2);
@@ -443,13 +451,57 @@ describe("watchSession", () => {
   it("retries a refresh that didn't move refresh_at after 30 s, not in a loop", async () => {
     const now = LOCAL_START / 1000;
     const s = await setup(signedInInfo({ refresh_at: now + 60, idle_minutes: 120 }));
-    await vi.advanceTimersByTimeAsync(seconds(60));
+    await vi.advanceTimersByTimeAsync(seconds(1));
+    s.target.dispatchEvent(new Event("keydown"));
+    await vi.advanceTimersByTimeAsync(seconds(59));
     expect(s.refreshes()).toBe(1);
-    await vi.advanceTimersByTimeAsync(seconds(29));
+    s.target.dispatchEvent(new Event("keydown")); // sends the minute's session check
+    await vi.advanceTimersByTimeAsync(seconds(1));
+    s.target.dispatchEvent(new Event("keydown"));
+    await vi.advanceTimersByTimeAsync(seconds(28));
     expect(s.refreshes()).toBe(1);
     await vi.advanceTimersByTimeAsync(seconds(1));
     expect(s.refreshes()).toBe(2);
   });
+
+  it("doesn't count activity the minute's session check already carried to the BFF", async () => {
+    const now = LOCAL_START / 1000;
+    const s = await setup(signedInInfo({ refresh_at: now + 120, idle_minutes: 60 }));
+    await vi.advanceTimersByTimeAsync(seconds(60));
+    s.target.dispatchEvent(new Event("keydown")); // the check moves last_seen to now
+    await vi.advanceTimersByTimeAsync(seconds(600));
+    expect(s.sessionChecks()).toBe(1);
+    expect(s.refreshes()).toBe(0);
+  });
+
+  it("an unattended page doesn't refresh or touch the session: it signs out at the idle limit", async () => {
+    const now = LOCAL_START / 1000;
+    const s = await setup(signedInInfo({ refresh_at: now + 59 * 60, idle_minutes: 60 }));
+    const before = s.calls.length;
+    await vi.advanceTimersByTimeAsync(seconds(60 * 60));
+    expect(s.calls.slice(before)).toEqual([]);
+    expect(s.client.signedOut).toBe(true);
+  });
+
+  it("refreshes a due session as soon as activity comes back", async () => {
+    const now = LOCAL_START / 1000;
+    const s = await setup(signedInInfo({ refresh_at: now + 300, idle_minutes: 60 }));
+    await vi.advanceTimersByTimeAsync(seconds(600));
+    expect(s.refreshes()).toBe(0);
+    s.target.dispatchEvent(new Event("pointerdown"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.refreshes()).toBe(1);
+  });
+
+  for (const type of ["wheel", "touchstart"]) {
+    it(`counts ${type} as activity`, async () => {
+      const { client, target } = await setup(signedInInfo({ idle_minutes: 10 }));
+      await vi.advanceTimersByTimeAsync(seconds(9 * 60));
+      target.dispatchEvent(new Event(type));
+      await vi.advanceTimersByTimeAsync(seconds(9 * 60));
+      expect(client.signedOut).toBe(false);
+    });
+  }
 
   it("doesn't refresh a session that went idle first", async () => {
     const now = LOCAL_START / 1000;

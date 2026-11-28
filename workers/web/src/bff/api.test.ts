@@ -102,10 +102,22 @@ describe("GET /bff/session", () => {
       signed_in: true,
       expires_at: START + 12 * 3600,
       idle_minutes: 60,
-      refresh_at: session.access_exp - 60,
+      refresh_at: session.access_exp - 59,
       now: START,
       data_key: session.data_key,
     });
+  });
+
+  it("names the first second at which a refresh rotates, not the no-op one before it", async () => {
+    const jar = await signedIn();
+    const { refresh_at } = (await (await jar.session()).json()) as { refresh_at: number };
+    const before = (await jar.unseal<Session>(SESSION_COOKIE))!.refresh_token;
+    now = refresh_at - 1;
+    await jar.refresh();
+    expect((await jar.unseal<Session>(SESSION_COOKIE))!.refresh_token).toBe(before);
+    now = refresh_at;
+    await jar.refresh();
+    expect((await jar.unseal<Session>(SESSION_COOKIE))!.refresh_token).not.toBe(before);
   });
 
   it("moves refresh_at with the access token after a refresh", async () => {
@@ -114,8 +126,8 @@ describe("GET /bff/session", () => {
     expect((await jar.refresh()).status).toBe(204);
     const session = (await jar.unseal<Session>(SESSION_COOKIE))!;
     const body = (await (await jar.session()).json()) as { refresh_at: number; now: number };
-    expect(body.refresh_at).toBe(session.access_exp - 60);
-    expect(body.refresh_at).toBe(now + 3600 - 60);
+    expect(body.refresh_at).toBe(session.access_exp - 59);
+    expect(body.refresh_at).toBe(now + 3600 - 59);
     expect(body.now).toBe(now);
   });
 

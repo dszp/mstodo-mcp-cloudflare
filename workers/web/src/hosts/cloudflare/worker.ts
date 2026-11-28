@@ -5,7 +5,7 @@
 // place that knows about bindings.
 
 import { route } from "../../bff/router.ts";
-import { HSTS, withSecurityHeaders } from "../../bff/headers.ts";
+import { HSTS, isBffPath, withSecurityHeaders } from "../../bff/headers.ts";
 import { sealer } from "../../bff/seal.ts";
 import { type BffConfig, upstreamVia } from "../../bff/upstream.ts";
 
@@ -86,18 +86,18 @@ async function checkConfig(env: Env): Promise<Checked> {
   };
 }
 
-function misconfigured(variable: string): Response {
+function misconfigured(variable: string, pathname: string): Response {
   // The variable's name only: a value could be the session secret.
-  return new Response(`Service misconfigured: ${variable} is missing or invalid.\n`, {
-    status: 503,
-    headers: {
-      "content-type": "text/plain; charset=utf-8",
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-      "x-robots-tag": "noindex, nofollow",
-      "strict-transport-security": HSTS,
-    },
+  const headers = new Headers({
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "x-robots-tag": "noindex, nofollow",
+    "strict-transport-security": HSTS,
   });
+  // As withSecurityHeaders does for /auth and /bff, which can't run without a config.
+  if (isBffPath(pathname)) headers.set("cross-origin-resource-policy", "same-origin");
+  return new Response(`Service misconfigured: ${variable} is missing or invalid.\n`, { status: 503, headers });
 }
 
 const text = (body: string, status: number, headers: Record<string, string> = {}) =>
@@ -106,7 +106,7 @@ const text = (body: string, status: number, headers: Record<string, string> = {}
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const checked = await checkConfig(env);
-    if (!checked.ok) return misconfigured(checked.variable);
+    if (!checked.ok) return misconfigured(checked.variable, new URL(req.url).pathname);
     const { cfg } = checked;
     const url = new URL(req.url);
 

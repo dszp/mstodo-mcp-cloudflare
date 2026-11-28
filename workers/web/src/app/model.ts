@@ -472,9 +472,16 @@ function cutWhole(text: string, max: number): string {
   return out;
 }
 
+/**
+ * `text` with each lone surrogate replaced by U+FFFD, as
+ * String.prototype.toWellFormed does (ES2024, past this build's ES2022 lib).
+ */
+const wellFormed = (text: string): string =>
+  text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD");
+
 /** The BFF path for "search all history", or null for an empty query. */
 export function searchPath(q: string): string | null {
-  const text = cutWhole(searchText(q), MAX_SEARCH_CHARS);
+  const text = cutWhole(wellFormed(searchText(q)), MAX_SEARCH_CHARS);
   return text === "" ? null : `search?q=${encodeURIComponent(text)}`;
 }
 
