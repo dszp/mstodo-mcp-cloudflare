@@ -5,9 +5,16 @@
 // and logout in auth.ts) write the session cookie with a new record. A proxied
 // /bff/api response never does: the browser sends many of those at once, and
 // one that rewrote the cookie from the record it arrived with would put back
-// the refresh token a refresh racing alongside had just replaced. So the idle
-// timer's last_seen is touched only by GET /bff/session, at most once a
-// minute, and the page calls it on user activity. Likewise the proxy never
+// the refresh token a refresh racing alongside had just replaced.
+//
+// The idle timer's last_seen moves only on user activity: a GET /bff/session
+// carrying X-Potem-Activity: 1 (the page sends it after activity, at most
+// once a minute) touches it, at most once a minute. A plain read and a
+// refresh never do. The page refreshes and reads the session on its own (the
+// poll's session_refresh_needed, the push socket's reauth), and if those
+// moved last_seen, a page nobody uses would keep its session alive forever.
+// A cross-site page can't send the header without a CORS preflight the BFF
+// never answers. Likewise the proxy never
 // refreshes: near expiry it answers 401 session_refresh_needed, and the page
 // sends one POST /bff/session/refresh for all of them. That refresh rotates
 // only a session that is due: two tabs refreshing at once would otherwise
@@ -107,8 +114,8 @@ export async function handleSession(req: Request, cfg: BffConfig): Promise<Respo
   }
   // A session due for refresh still counts as signed in: the page refreshes
   // when the proxy asks it to.
-  const cookies =
-    now - session.last_seen >= TOUCH_INTERVAL_SEC ? [await sessionCookie(s, { ...session, last_seen: now }, cfg)] : [];
+  const touch = req.headers.get("x-potem-activity") === "1" && now - session.last_seen >= TOUCH_INTERVAL_SEC;
+  const cookies = touch ? [await sessionCookie(s, { ...session, last_seen: now }, cfg)] : [];
   // expires_at and the idle limit let the page end the session on its own, even
   // offline; refresh_at lets it refresh before a request has to wait for one.
   // now is the BFF's clock, so the page can compare these times without
@@ -209,7 +216,7 @@ export async function handleRefresh(req: Request, cfg: BffConfig): Promise<Respo
     access_token: result.access_token,
     access_exp: now + result.expires_in,
     refresh_token: result.refresh_token ?? session.refresh_token,
-    last_seen: now,
+    // last_seen carries over: a refresh is not activity (see the top of this file).
   };
   if (!isSession(fresh)) return unavailable();
   return new Response(null, { status: 204, headers: { "set-cookie": await sessionCookie(s, fresh, cfg) } });

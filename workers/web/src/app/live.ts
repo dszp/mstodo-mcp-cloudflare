@@ -6,14 +6,14 @@
 import { type Cancel, type PushState, type SocketLike, createPush } from "../sync/push.ts";
 import { SignedOutError } from "./api.ts";
 import { type Loader, watchVisiblePoll } from "./loader.ts";
-import { type SessionClient, SessionIdleError } from "./session.ts";
+import type { SessionClient } from "./session.ts";
 
 /** A page hidden this long closes its socket; showing it again reconnects. */
 const HIDDEN_CLOSE_MS = 5 * 60_000;
 
 export interface LiveDeps {
   loader: Pick<Loader, "reload" | "pullAfter">;
-  session: Pick<SessionClient, "ensureFresh" | "onSignedOut" | "signedOut" | "onLimits">;
+  session: Pick<SessionClient, "ensureFresh" | "onSignedOut" | "signedOut">;
   doc: EventTarget & { visibilityState: string };
   /** A new socket to /bff/socket. */
   openSocket(): SocketLike;
@@ -35,12 +35,10 @@ export interface LiveDeps {
  *   covered the time before the drop.
  * - A 4001 close means the relay or server wants the session checked:
  *   ensureFresh reads /bff/session and refreshes when the access token is due.
- *   A session that is gone has already run the sign-out flow by then. On a
- *   page nobody has used since it last reached the BFF, ensureFresh refuses
- *   (SessionIdleError) so the page doesn't keep the BFF's session alive on
- *   its own: the socket and the poll park, with no request, until activity
- *   makes watchSession read the session again (onLimits). The page's own
- *   idle sign-out still ends it at idle_minutes.
+ *   A session that is gone has already run the sign-out flow by then. This
+ *   refresh is automatic, so it can't keep an unattended session alive: only
+ *   a session read that reports activity moves the BFF's idle timer
+ *   (bff/api.ts).
  * - Hidden for 5 minutes closes the socket; visible again reconnects, and the
  *   hello pulls.
  * - Sign-out, here or in another tab, stops everything.
@@ -53,7 +51,6 @@ export function watchLive(deps: LiveDeps): () => void {
   let stopPoll: (() => void) | null = null;
   let hiddenTimer: Cancel | null = null;
   let pushRunning = false;
-  let parked = false;
   let pulling = false;
   let dirty = false;
 
@@ -67,8 +64,7 @@ export function watchLive(deps: LiveDeps): () => void {
     loader
       .pullAfter()
       .catch((e: unknown) => {
-        // Sign-out stops everything anyway, and an idle session waits for activity.
-        if (e instanceof SignedOutError || e instanceof SessionIdleError) return;
+        if (e instanceof SignedOutError) return; // sign-out stops everything anyway
         console.warn("pull on push notice failed", e);
       })
       .finally(() => {
@@ -81,7 +77,7 @@ export function watchLive(deps: LiveDeps): () => void {
   };
 
   const onState = (s: PushState) => {
-    if (stopped || parked) return;
+    if (stopped) return;
     if (s === "open") {
       stopPoll?.();
       stopPoll = null;
@@ -97,15 +93,7 @@ export function watchLive(deps: LiveDeps): () => void {
     onHello: pull,
     onChanged: pull,
     onSessionCheck: async () => {
-      let ok: boolean;
-      try {
-        ok = await session.ensureFresh();
-      } catch (e) {
-        if (!(e instanceof SessionIdleError)) throw e; // push backs off
-        park();
-        return "ok"; // push.stop() in park() makes push ignore this answer
-      }
-      if (ok) return "ok";
+      if (await session.ensureFresh()) return "ok";
       stop();
       return "signed_out";
     },
@@ -118,32 +106,12 @@ export function watchLive(deps: LiveDeps): () => void {
     push.start();
   };
 
-  function park() {
-    if (stopped) return;
-    parked = true;
-    hiddenTimer?.();
-    hiddenTimer = null;
-    pushRunning = false;
-    push.stop();
-    stopPoll?.();
-    stopPoll = null;
-  }
-
-  // Fires when a session read or refresh succeeds; while parked, only
-  // activity leads to one (watchSession).
-  const stopLimits = session.onLimits(() => {
-    if (stopped || !parked) return;
-    parked = false;
-    if (doc.visibilityState === "visible") startPush();
-    else stopPoll ??= watchVisiblePoll(loader, doc);
-  });
-
   const onVisibility = () => {
     if (stopped) return;
     if (doc.visibilityState === "visible") {
       hiddenTimer?.();
       hiddenTimer = null;
-      if (!pushRunning && !parked) startPush();
+      if (!pushRunning) startPush();
     } else if (pushRunning && hiddenTimer === null) {
       hiddenTimer = deps.schedule(() => {
         hiddenTimer = null;
@@ -157,7 +125,6 @@ export function watchLive(deps: LiveDeps): () => void {
     if (stopped) return;
     stopped = true;
     stopSignedOut();
-    stopLimits();
     doc.removeEventListener("visibilitychange", onVisibility);
     hiddenTimer?.();
     hiddenTimer = null;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FeedChange, FeedPage } from "../sync/feed.ts";
 import { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError, createBffFetch } from "./api.ts";
-import { SessionIdleError, createSessionClient } from "./session.ts";
+import { createSessionClient } from "./session.ts";
 import { changesFetchPage, createLoader, myDayOn, todayIn, watchFocus, watchVisiblePoll } from "./loader.ts";
 
 const json = (body: unknown, status = 200) =>
@@ -308,19 +308,6 @@ describe("watchVisiblePoll", () => {
     doc.visibilityState = state;
     return doc;
   }
-
-  it("skips a pull the session refused as idle, without a warning", async () => {
-    vi.useFakeTimers();
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const reload = vi.fn(async () => {
-      throw new SessionIdleError();
-    });
-    const stop = watchVisiblePoll({ reload }, fakeDoc("visible"));
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(reload).toHaveBeenCalledTimes(2);
-    expect(warn).not.toHaveBeenCalled();
-    stop();
-  });
 
   it("pulls every 30 s while the page is visible", () => {
     vi.useFakeTimers();

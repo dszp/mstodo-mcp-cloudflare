@@ -7,10 +7,7 @@
 // is refusing an access token the session still counts as valid, most likely
 // a revoked grant, so it forces one rotation and retries once more. A third
 // session_refresh_needed, or signed_out at any point, ends the session. It
-// never loops beyond that. On a page nobody has used since it last reached
-// the BFF, the refresh throws SessionIdleError (session.ts) before any
-// request; it passes through as an ordinary error, not a sign-out, so a poll
-// can't keep the BFF's session alive on its own.
+// never loops beyond that.
 
 import type { SessionClient } from "./session.ts";
 

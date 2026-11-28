@@ -25,25 +25,11 @@
 // /auth/login, which loads a fresh page.
 
 import type { MirrorStore } from "../sync/store.ts";
-import { throttle } from "./throttle.ts";
 
 /** GET /bff/session. Times are epoch seconds on the BFF's clock; `now` is that clock when it answered. */
 export type SessionInfo =
   | { signed_in: false }
   | { signed_in: true; expires_at: number; idle_minutes: number; refresh_at: number; now: number; data_key: string };
-
-/**
- * Nobody has used the page since it last moved the BFF's idle timer, so an
- * automatic refresh or session read would move it again on its own: an
- * unattended page would then keep the BFF's session alive past its idle limit.
- * Thrown before any request. It is not a sign-out; the next activity lifts it.
- */
-export class SessionIdleError extends Error {
-  constructor() {
-    super("no activity since the last session contact");
-    this.name = "SessionIdleError";
-  }
-}
 
 /** The session's deadlines in this device's epoch milliseconds, and the idle limit. */
 export type SessionLimits = { endsAt: number; refreshAt: number; idleMs: number };
@@ -57,26 +43,26 @@ export interface SessionClient {
   /**
    * GET /bff/session, under the same cross-tab lock as a refresh: the BFF can
    * rewrite the cookie (last_seen) while answering it. Signed out runs the
-   * signed-out flow; a server error throws.
+   * signed-out flow; a server error throws. `activity` sends
+   * X-Potem-Activity: 1, the only thing that moves the BFF's idle timer;
+   * only watchSession sends it, after user activity.
    */
-  current(): Promise<SessionInfo>;
+  current(opts?: { activity?: boolean }): Promise<SessionInfo>;
   /** The deadlines from the last signed-in current(), or null before one. */
   limits(): SessionLimits | null;
   /** Calls `cb` whenever limits() changes. Returns an unsubscribe. */
   onLimits(cb: () => void): () => void;
   /**
    * current(), then a refresh when the access token is due. true when the
-   * session is usable. Throws when the BFF can't be reached, and
-   * SessionIdleError, before any request, as refreshOnce does.
+   * session is usable. Throws when the BFF can't be reached.
    */
   ensureFresh(): Promise<boolean>;
-  /** Whether the person used this page or another tab since lastContact. */
-  attended(): boolean;
   /** When the person last used this page or another tab, in epoch milliseconds. */
   readonly lastActivity: number;
   /**
-   * When this page last moved the BFF's idle timer: a signed-in GET
-   * /bff/session or a refresh answered 204. Epoch milliseconds.
+   * When this page last reached the BFF's session routes: a signed-in GET
+   * /bff/session or a refresh answered 204. watchSession refreshes only after
+   * activity since then. Epoch milliseconds.
    */
   readonly lastContact: number;
   /** Records activity now and tells the other tabs. */
@@ -85,10 +71,7 @@ export interface SessionClient {
    * POST /bff/session/refresh, shared by concurrent callers. true when the
    * session is usable (refreshed, or not yet due); false when it is over, after
    * running the signed-out flow. Any other answer (502 upstream_unavailable,
-   * a network error) throws: the session may still be fine. Throws
-   * SessionIdleError, before any request, when !attended(), except within
-   * 30 s of a check that passed on attended(): bffFetch's forced retry and a
-   * 401 that lands after the refresh belong to the same moment of use.
+   * a network error) throws: the session may still be fine.
    */
   refreshOnce(opts?: { force?: boolean }): Promise<boolean>;
   /** POST /auth/logout, then the signed-out flow. Throws, still signed in, when the server refuses. */
@@ -112,9 +95,8 @@ const ACTIVITY_MESSAGE = { type: "activity" } as const;
 /** Activity is told to the other tabs at most this often. */
 const ACTIVITY_BROADCAST_MS = 5_000;
 const LOCK = "potem-refresh";
-/** How long after an attended session check its follow-up requests still count as attended. */
-const ATTENDED_GRACE_MS = 30_000;
 const CSRF_HEADER = { "x-potem": "1" };
+const ACTIVITY_HEADER = { "x-potem-activity": "1" };
 
 function defaultLocks(): LockRequester | null {
   const locks = (globalThis as { navigator?: { locks?: LockManager } }).navigator?.locks;
@@ -137,23 +119,6 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
   let lastActivity = Date.now();
   let lastBroadcast = 0;
   let lastContact = 0;
-  // Until when an attended check's own contacts still count as attended: its
-  // refresh moves lastContact, and the requests already in flight with it (a
-  // 401 that lands after the refresh, bffFetch's forced retry) need one more.
-  // Only a check that passed on attended() sets it, so it never extends itself.
-  let graceUntil = -Infinity;
-
-  // >=: a touch() in the same millisecond as the contact before it (App's
-  // load, right after its session check) counts as after it.
-  const attended = () => lastActivity >= lastContact;
-  const contact = () => {
-    lastContact = Date.now();
-  };
-  /** Throws SessionIdleError unless attended or within an attended check's grace. */
-  const assertAttended = () => {
-    if (attended()) graceUntil = Date.now() + ATTENDED_GRACE_MS;
-    else if (Date.now() >= graceUntil) throw new SessionIdleError();
-  };
 
   const underLock = <T,>(cb: () => Promise<T>): Promise<T> => (locks ? locks.request(LOCK, cb) : cb());
 
@@ -189,7 +154,7 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
     const headers: Record<string, string> = force ? { ...CSRF_HEADER, "x-potem-force": "1" } : CSRF_HEADER;
     const res = await fetchFn("/bff/session/refresh", { method: "POST", headers });
     if (res.status === 204) {
-      contact();
+      lastContact = Date.now();
       return true;
     }
     const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
@@ -200,20 +165,22 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
     throw new Error(`session refresh failed: ${res.status}${typeof body?.error === "string" ? ` ${body.error}` : ""}`);
   }
 
-  async function current(): Promise<SessionInfo> {
-    const res = await underLock(() => fetchFn("/bff/session"));
+  async function current({ activity = false } = {}): Promise<SessionInfo> {
+    const res = await underLock(() =>
+      activity ? fetchFn("/bff/session", { headers: ACTIVITY_HEADER }) : fetchFn("/bff/session"),
+    );
     if (!res.ok) throw new Error(`session check failed: ${res.status}`);
     const info = (await res.json()) as SessionInfo;
     if (info.signed_in !== true) {
       endSession(true);
       return { signed_in: false };
     }
-    contact();
+    lastContact = Date.now();
     setLimits(info, Date.now());
     return info;
   }
 
-  function refresh(force: boolean): Promise<boolean> {
+  function refreshOnce({ force = false } = {}): Promise<boolean> {
     if (signedOut) return Promise.resolve(false);
     let p = inflight.get(force);
     if (!p) {
@@ -223,16 +190,9 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
     return p;
   }
 
-  async function refreshOnce({ force = false } = {}): Promise<boolean> {
-    if (signedOut) return false;
-    assertAttended();
-    return refresh(force);
-  }
-
   return {
     current,
     refreshOnce,
-    attended,
 
     limits: () => limits,
 
@@ -242,12 +202,9 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
     },
 
     async ensureFresh() {
-      if (signedOut) return false;
-      assertAttended();
       const info = await current();
       if (!info.signed_in) return false;
-      // The check above covers this refresh: current() was its own contact.
-      return Date.now() >= limits!.refreshAt ? refresh(false) : true;
+      return Date.now() >= limits!.refreshAt ? refreshOnce() : true;
     },
 
     get lastActivity() {
@@ -312,13 +269,17 @@ type WatchedSession = Pick<
  *   the back-forward cache (timers stall while a device sleeps). No request.
  * - Refreshes the access token at refresh_at, then reads the session again
  *   for the next refresh_at, but only after activity since the page last
- *   moved the BFF's idle timer: a refresh moves it too, and an unattended page
- *   that refreshed would keep the BFF's session alive past the idle limit.
+ *   reached the BFF: an unattended page has no use for a fresh token, and
+ *   skipping the refresh saves the requests. (A refresh doesn't move the
+ *   BFF's idle timer, so one that does run can't keep a session alive.)
  * - Keeps the BFF's idle timer alive: pointer, wheel, touch and keyboard input
  *   and the page becoming visible (250 ms after, see onVisible) count as
- *   activity, and GET /bff/session (the only request that moves the BFF's
- *   timer) is sent at most once a minute; the page's own check on load counts
- *   as the first.
+ *   activity, and a GET /bff/session with X-Potem-Activity: 1 (the only
+ *   request that moves the BFF's timer) reports it. The first activity is
+ *   reported at once; activity within the next minute is reported when that
+ *   minute ends, so the last activity always reaches the BFF within a minute
+ *   and the BFF's idle deadline never falls more than a minute short of the
+ *   page's.
  *
  * Every event checks the deadlines before it counts as activity, so a tab
  * reopened after the idle limit signs out. Returns a function that stops it.
@@ -337,9 +298,22 @@ export function watchSession(
   let refreshing = false;
   let lastRefreshTry = -Infinity;
 
-  const checkServer = throttle(() => {
-    session.current().catch((e: unknown) => console.warn("session check failed", e));
-  }, ACTIVITY_INTERVAL_MS);
+  // Trailing edge: activity inside the minute after a report waits for its
+  // end rather than being dropped.
+  let lastReport = -Infinity;
+  let reportTimer: ReturnType<typeof setTimeout> | undefined;
+  const report = () => {
+    reportTimer = undefined;
+    if (stopped || session.signedOut) return;
+    lastReport = Date.now();
+    session.current({ activity: true }).catch((e: unknown) => console.warn("session check failed", e));
+  };
+  const checkServer = () => {
+    if (reportTimer !== undefined) return;
+    const wait = lastReport + ACTIVITY_INTERVAL_MS - Date.now();
+    if (wait <= 0) report();
+    else reportTimer = setTimeout(report, wait);
+  };
 
   /** Signs out when a deadline has passed, refreshes when one is due, then re-arms. */
   function check(): void {
@@ -404,6 +378,7 @@ export function watchSession(
   return () => {
     stopped = true;
     clearTimeout(timer);
+    clearTimeout(reportTimer);
     clearTimeout(visibleTimer);
     stopLimits();
     for (const type of ACTIVITY_EVENTS) env.target.removeEventListener(type, onActivity);

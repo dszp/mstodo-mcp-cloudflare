@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MirrorStore } from "../sync/store.ts";
-import { type LockRequester, type SessionClient, SessionIdleError, createSessionClient, watchSession } from "./session.ts";
+import { type LockRequester, type SessionClient, createSessionClient, watchSession } from "./session.ts";
 
 type Call = { url: string; method: string; headers: Headers };
 
@@ -74,6 +74,15 @@ describe("createSessionClient", () => {
     expect(await client.current()).toEqual(info);
     expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET /bff/session"]);
     expect(store.lists()).toHaveLength(1);
+  });
+
+  it("current({ activity: true }) sends X-Potem-Activity: 1; current() and ensureFresh() don't", async () => {
+    const { fn, calls } = stubFetch(() => json(signedInInfo()));
+    const client = createSessionClient(fn, { store, locks: null, channel: null });
+    await client.current();
+    await client.ensureFresh();
+    await client.current({ activity: true });
+    expect(calls.map((c) => c.headers.get("x-potem-activity"))).toEqual([null, null, "1"]);
   });
 
   it("current() runs under the potem-refresh lock, so it never crosses a refresh in another tab", async () => {
@@ -184,76 +193,6 @@ describe("createSessionClient", () => {
     await client.refreshOnce();
     await client.refreshOnce();
     expect(calls).toHaveLength(2);
-  });
-
-  describe("unattended", () => {
-    // A page nobody has used since it last moved the BFF's idle timer must not
-    // move it again on its own, or the BFF's idle limit never ends the session.
-    async function unattended() {
-      vi.useFakeTimers();
-      vi.setSystemTime(LOCAL_START);
-      const now = LOCAL_START / 1000;
-      const { fn, calls } = stubFetch((c) =>
-        c.url === "/bff/session" ? json(signedInInfo({ now, refresh_at: now - 1 })) : new Response(null, { status: 204 }),
-      );
-      const client = createSessionClient(fn, { store, locks: null, channel: null });
-      vi.advanceTimersByTime(1000);
-      await client.current(); // the last contact, after the last activity
-      calls.length = 0;
-      return { client, calls };
-    }
-
-    it("attended() is whether there was activity since the last contact", async () => {
-      const { client } = await unattended();
-      expect(client.attended()).toBe(false);
-      client.touch(); // in the same millisecond as the contact: counts as after it
-      expect(client.attended()).toBe(true);
-    });
-
-    it("refreshOnce() throws SessionIdleError without a request, and doesn't sign out", async () => {
-      const { client, calls } = await unattended();
-      await expect(client.refreshOnce()).rejects.toBeInstanceOf(SessionIdleError);
-      expect(calls).toHaveLength(0);
-      expect(client.signedOut).toBe(false);
-    });
-
-    it("refreshOnce({ force: true }) throws SessionIdleError without a request", async () => {
-      const { client, calls } = await unattended();
-      await expect(client.refreshOnce({ force: true })).rejects.toBeInstanceOf(SessionIdleError);
-      expect(calls).toHaveLength(0);
-    });
-
-    it("ensureFresh() throws SessionIdleError without a request", async () => {
-      const { client, calls } = await unattended();
-      await expect(client.ensureFresh()).rejects.toBeInstanceOf(SessionIdleError);
-      expect(calls).toHaveLength(0);
-    });
-
-    it("refreshes again after activity", async () => {
-      const { client, calls } = await unattended();
-      vi.advanceTimersByTime(1);
-      client.touch();
-      expect(await client.ensureFresh()).toBe(true);
-      expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET /bff/session", "POST /bff/session/refresh"]);
-    });
-
-    it("refreshes that follow an attended one within 30 s go ahead (bffFetch's forced retry, a late 401)", async () => {
-      const { client, calls } = await unattended();
-      vi.advanceTimersByTime(1);
-      client.touch();
-      vi.advanceTimersByTime(1);
-      expect(await client.refreshOnce()).toBe(true);
-      expect(client.attended()).toBe(false);
-      expect(await client.refreshOnce({ force: true })).toBe(true);
-      vi.advanceTimersByTime(29_000);
-      expect(await client.refreshOnce()).toBe(true);
-      expect(calls).toHaveLength(3);
-      // The grace runs from the attended check, and those refreshes don't extend it.
-      vi.advanceTimersByTime(1_000);
-      await expect(client.refreshOnce({ force: true })).rejects.toBeInstanceOf(SessionIdleError);
-      await expect(client.refreshOnce()).rejects.toBeInstanceOf(SessionIdleError);
-      expect(calls).toHaveLength(3);
-    });
   });
 
   it("refreshOnce({ force: true }) sends X-Potem-Force: 1 under the lock", async () => {
@@ -410,20 +349,26 @@ describe("watchSession", () => {
   const seconds = (s: number) => s * 1000;
   const pageshow = (persisted: boolean) => Object.assign(new Event("pageshow"), { persisted });
 
-  it("checks the session on activity at most once a minute, counting the check made on load", async () => {
-    const { target, sessionChecks } = await setup();
+  it("reports activity to the BFF at once, then at most once a minute, the last activity at the window's end", async () => {
+    const { target, calls } = await setup();
+    const reports = () => calls.filter((c) => c.headers.get("x-potem-activity") === "1").length;
+    expect(reports()).toBe(0); // the check on load is not activity
     target.dispatchEvent(new Event("pointerdown"));
-    expect(sessionChecks()).toBe(0);
-    vi.advanceTimersByTime(60_000);
-    target.dispatchEvent(new Event("keydown"));
-    expect(sessionChecks()).toBe(1);
+    expect(reports()).toBe(1);
     vi.advanceTimersByTime(30_000);
     target.dispatchEvent(new Event("pointerdown"));
     target.dispatchEvent(new Event("keydown"));
-    expect(sessionChecks()).toBe(1);
-    vi.advanceTimersByTime(30_000);
-    target.dispatchEvent(new Event("pointerdown"));
-    expect(sessionChecks()).toBe(2);
+    expect(reports()).toBe(1);
+    vi.advanceTimersByTime(29_999);
+    expect(reports()).toBe(1);
+    vi.advanceTimersByTime(1);
+    expect(reports()).toBe(2); // the activity at 30 s reaches the BFF at 60 s
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(reports()).toBe(2); // nothing more without activity
+    target.dispatchEvent(new Event("keydown"));
+    expect(reports()).toBe(3);
+    // Every session read the page sends is a report or one of its own checks.
+    expect(calls.filter((c) => c.url === "/bff/session").length).toBe(4);
   });
 
   it("counts the page becoming visible, not hidden, 250 ms after it does", async () => {
@@ -528,21 +473,21 @@ describe("watchSession", () => {
   it("refreshes at refresh_at after activity, then reads the session again and re-arms at the new time", async () => {
     const now = LOCAL_START / 1000;
     const s = await setup(signedInInfo({ refresh_at: now + 600, idle_minutes: 120 }));
-    await vi.advanceTimersByTimeAsync(seconds(1));
-    s.target.dispatchEvent(new Event("keydown"));
-    await vi.advanceTimersByTimeAsync(seconds(598));
+    await vi.advanceTimersByTimeAsync(seconds(550));
+    s.target.dispatchEvent(new Event("keydown")); // reported at once: the BFF has it
+    await vi.advanceTimersByTimeAsync(seconds(40));
+    s.target.dispatchEvent(new Event("keydown")); // not reported yet (the minute isn't over)
+    await vi.advanceTimersByTimeAsync(seconds(9));
     expect(s.refreshes()).toBe(0);
     s.answer(signedInInfo({ now: now + 600, refresh_at: now + 1200, idle_minutes: 120 }));
     await vi.advanceTimersByTimeAsync(seconds(1));
     expect(s.refreshes()).toBe(1);
-    expect(s.sessionChecks()).toBe(1);
-    // This keydown also sends the minute's session check, which moves the
-    // BFF's timer by itself; the next one is activity after that contact.
-    await vi.advanceTimersByTimeAsync(seconds(1));
+    // The same pattern before the new refresh_at refreshes again.
+    await vi.advanceTimersByTimeAsync(seconds(550));
     s.target.dispatchEvent(new Event("keydown"));
-    await vi.advanceTimersByTimeAsync(seconds(1));
+    await vi.advanceTimersByTimeAsync(seconds(40));
     s.target.dispatchEvent(new Event("keydown"));
-    await vi.advanceTimersByTimeAsync(seconds(597));
+    await vi.advanceTimersByTimeAsync(seconds(9));
     expect(s.refreshes()).toBe(1);
     await vi.advanceTimersByTimeAsync(seconds(1));
     expect(s.refreshes()).toBe(2);
@@ -552,13 +497,14 @@ describe("watchSession", () => {
     const now = LOCAL_START / 1000;
     const s = await setup(signedInInfo({ refresh_at: now + 60, idle_minutes: 120 }));
     await vi.advanceTimersByTimeAsync(seconds(1));
-    s.target.dispatchEvent(new Event("keydown"));
-    await vi.advanceTimersByTimeAsync(seconds(59));
+    s.target.dispatchEvent(new Event("keydown")); // reported at once
+    await vi.advanceTimersByTimeAsync(seconds(29));
+    s.target.dispatchEvent(new Event("keydown")); // reported at 61 s
+    await vi.advanceTimersByTimeAsync(seconds(30));
     expect(s.refreshes()).toBe(1);
-    s.target.dispatchEvent(new Event("keydown")); // sends the minute's session check
-    await vi.advanceTimersByTimeAsync(seconds(1));
-    s.target.dispatchEvent(new Event("keydown"));
-    await vi.advanceTimersByTimeAsync(seconds(28));
+    await vi.advanceTimersByTimeAsync(seconds(2));
+    s.target.dispatchEvent(new Event("keydown")); // after the 61 s report
+    await vi.advanceTimersByTimeAsync(seconds(27));
     expect(s.refreshes()).toBe(1);
     await vi.advanceTimersByTimeAsync(seconds(1));
     expect(s.refreshes()).toBe(2);

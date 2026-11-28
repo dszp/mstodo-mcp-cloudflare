@@ -3,7 +3,7 @@ import type { SocketLike } from "../sync/push.ts";
 import { MirrorStore } from "../sync/store.ts";
 import { watchLive } from "./live.ts";
 import { SignedOutError } from "./api.ts";
-import { type SessionClient, SessionIdleError, createSessionClient } from "./session.ts";
+import { type SessionClient, createSessionClient } from "./session.ts";
 
 /** A socket the test drives: it records listeners and the code it was closed with. */
 class FakeSocket implements SocketLike {
@@ -58,7 +58,7 @@ function deferred() {
 
 type SessionAnswer = "signed_in" | "due" | "signed_out";
 
-type LiveSession = Pick<SessionClient, "ensureFresh" | "onSignedOut" | "signedOut" | "onLimits">;
+type LiveSession = Pick<SessionClient, "ensureFresh" | "onSignedOut" | "signedOut">;
 
 function setup(opts: { session?: SessionAnswer; stub?: LiveSession; state?: "visible" | "hidden" } = {}) {
   const sockets: FakeSocket[] = [];
@@ -72,10 +72,12 @@ function setup(opts: { session?: SessionAnswer; stub?: LiveSession; state?: "vis
     }),
   };
   const calls: string[] = [];
+  let activityReports = 0;
   const answer = opts.session ?? "signed_in";
   const fetchFn = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const c = `${init.method ?? "GET"} ${String(input)}`;
     calls.push(c);
+    if (new Headers(init.headers).get("x-potem-activity") === "1") activityReports += 1;
     if (c === "POST /bff/session/refresh") return new Response(null, { status: 204 });
     if (answer === "signed_out") return json({ signed_in: false });
     const now = Math.floor(Date.now() / 1000);
@@ -109,7 +111,20 @@ function setup(opts: { session?: SessionAnswer; stub?: LiveSession; state?: "vis
     log,
   });
   const last = () => sockets[sockets.length - 1]!;
-  return { sockets, last, pulls, loader, session, calls, setVisibility: set, stop, log };
+  return {
+    sockets,
+    last,
+    pulls,
+    loader,
+    session,
+    calls,
+    get activityReports() {
+      return activityReports;
+    },
+    setVisibility: set,
+    stop,
+    log,
+  };
 }
 
 beforeEach(() => {
@@ -245,7 +260,6 @@ describe("watchLive", () => {
     const stub: LiveSession = {
       ensureFresh: vi.fn(async () => false),
       onSignedOut: () => () => {}, // the stub never runs the sign-out flow
-      onLimits: () => () => {},
       signedOut: false,
     };
     const t = setup({ stub });
@@ -258,46 +272,27 @@ describe("watchLive", () => {
     expect(t.loader.reload).not.toHaveBeenCalled();
   });
 
-  it("parks after a 4001 on an unattended page: no request, no socket, no poll, until activity reads the session", async () => {
+  it("refreshes and reconnects after a 4001 on an unattended page, without reporting activity", async () => {
     const t = setup({ session: "due" });
     vi.advanceTimersByTime(1);
-    await t.session.current(); // a contact after the last activity
+    await t.session.current(); // the last contact, after the last activity
     t.calls.length = 0;
     t.last().hello();
-    t.pulls[0]!.resolve();
     t.last().serverClose(4001);
     await vi.advanceTimersByTimeAsync(0);
-    expect(t.calls).toEqual([]);
-    await vi.advanceTimersByTimeAsync(10 * 60_000);
-    expect(t.sockets).toHaveLength(1);
-    expect(t.loader.reload).not.toHaveBeenCalled();
-    // Showing the page again doesn't reconnect by itself while parked.
-    t.setVisibility("hidden");
-    t.setVisibility("visible");
-    expect(t.sockets).toHaveLength(1);
-    // Activity, then a session read (watchSession's), reconnects.
-    vi.advanceTimersByTime(1);
-    t.session.touch();
-    await t.session.current();
+    expect(t.calls).toEqual(["GET /bff/session", "POST /bff/session/refresh"]);
+    expect(t.activityReports).toBe(0);
     expect(t.sockets).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(t.loader.reload).toHaveBeenCalledTimes(1); // connecting: the poll is back
-    t.last().hello();
-    expect(t.loader.pullAfter).toHaveBeenCalledTimes(2);
     t.stop();
   });
 
-  it("doesn't log a pull that ended because the session ended or sat idle", async () => {
+  it("doesn't log a pull that ended because the session ended", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = setup();
-    t.loader.pullAfter
-      .mockImplementationOnce(() => Promise.reject(new SignedOutError()))
-      .mockImplementationOnce(() => Promise.reject(new SessionIdleError()));
+    t.loader.pullAfter.mockImplementationOnce(() => Promise.reject(new SignedOutError()));
     t.last().hello();
     await vi.advanceTimersByTimeAsync(0);
-    t.last().changed();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(t.loader.pullAfter).toHaveBeenCalledTimes(2);
+    expect(t.loader.pullAfter).toHaveBeenCalledTimes(1);
     expect(warn).not.toHaveBeenCalled();
     t.stop();
   });
