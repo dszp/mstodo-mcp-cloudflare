@@ -3,7 +3,7 @@ import type { FeedChange, FeedPage } from "../sync/feed.ts";
 import { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError, createBffFetch } from "./api.ts";
 import { createSessionClient } from "./session.ts";
-import { changesFetchPage, createLoader, myDayOn, todayIn, watchFocus } from "./loader.ts";
+import { changesFetchPage, createLoader, myDayOn, todayIn, watchFocus, watchVisiblePoll } from "./loader.ts";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -298,5 +298,89 @@ describe("watchFocus", () => {
     stop();
     target.dispatchEvent(new Event("focus"));
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("watchVisiblePoll", () => {
+  // A document whose visibility the test controls; the poll listens on it.
+  function fakeDoc(state: "visible" | "hidden") {
+    const doc = new EventTarget() as EventTarget & { visibilityState: string };
+    doc.visibilityState = state;
+    return doc;
+  }
+
+  it("pulls every 30 s while the page is visible", () => {
+    vi.useFakeTimers();
+    const doc = fakeDoc("visible");
+    const reload = vi.fn(async () => {});
+    const stop = watchVisiblePoll({ reload }, doc);
+    vi.advanceTimersByTime(29_999);
+    expect(reload).toHaveBeenCalledTimes(0);
+    vi.advanceTimersByTime(1);
+    expect(reload).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(60_000);
+    expect(reload).toHaveBeenCalledTimes(3);
+    stop();
+    vi.advanceTimersByTime(60_000);
+    expect(reload).toHaveBeenCalledTimes(3);
+  });
+
+  it("doesn't pull while hidden, and pulls when the page is shown after 30 s or more", () => {
+    vi.useFakeTimers();
+    const doc = fakeDoc("visible");
+    const reload = vi.fn(async () => {});
+    const stop = watchVisiblePoll({ reload }, doc);
+    doc.visibilityState = "hidden";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(120_000);
+    expect(reload).toHaveBeenCalledTimes(0);
+    doc.visibilityState = "visible";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    expect(reload).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(30_000);
+    expect(reload).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it("doesn't pull on a quick hide-and-show, and keeps the 30 s rhythm", () => {
+    vi.useFakeTimers();
+    const doc = fakeDoc("visible");
+    const reload = vi.fn(async () => {});
+    const stop = watchVisiblePoll({ reload }, doc);
+    vi.advanceTimersByTime(10_000);
+    doc.visibilityState = "hidden";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(5_000);
+    doc.visibilityState = "visible";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    expect(reload).toHaveBeenCalledTimes(0);
+    vi.advanceTimersByTime(15_000);
+    expect(reload).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("starts paused when the page loads hidden", () => {
+    vi.useFakeTimers();
+    const doc = fakeDoc("hidden");
+    const reload = vi.fn(async () => {});
+    const stop = watchVisiblePoll({ reload }, doc);
+    vi.advanceTimersByTime(90_000);
+    expect(reload).toHaveBeenCalledTimes(0);
+    stop();
+  });
+
+  it("survives a failed pull", async () => {
+    vi.useFakeTimers();
+    const doc = fakeDoc("visible");
+    const reload = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const stop = watchVisiblePoll({ reload }, doc);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(reload).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+    stop();
   });
 });

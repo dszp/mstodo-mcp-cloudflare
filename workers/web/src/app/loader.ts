@@ -149,3 +149,43 @@ export function watchFocus(loader: Pick<Loader, "reload">, target: EventTarget):
   target.addEventListener("focus", onFocus);
   return () => target.removeEventListener("focus", onFocus);
 }
+
+/** How often a visible page pulls on its own, until the server's push reaches the page (milestone 4). */
+const POLL_INTERVAL_MS = 30_000;
+
+/**
+ * Pulls every 30 s while the page is visible, so a change made elsewhere (the
+ * Mac or iPhone app) shows up without a focus change or an edit here. A
+ * hidden page doesn't pull; when it's shown again it pulls at once if 30 s or
+ * more have passed since the last pull, otherwise when the 30 s are up. The
+ * page has just pulled when this starts, so the first pull is 30 s later.
+ * An idle incremental pull is one small request, cheap at any mirror size.
+ */
+export function watchVisiblePoll(
+  loader: Pick<Loader, "reload">,
+  doc: EventTarget & { visibilityState: string },
+): () => void {
+  let last = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const pull = () => {
+    last = Date.now();
+    loader.reload().catch((e: unknown) => console.warn("periodic pull failed", e));
+    timer = setTimeout(pull, POLL_INTERVAL_MS);
+  };
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = undefined;
+    if (doc.visibilityState !== "visible") return;
+    const wait = last + POLL_INTERVAL_MS - Date.now();
+    if (wait <= 0) pull();
+    else timer = setTimeout(pull, wait);
+  };
+
+  doc.addEventListener("visibilitychange", schedule);
+  schedule();
+  return () => {
+    doc.removeEventListener("visibilitychange", schedule);
+    clearTimeout(timer);
+  };
+}

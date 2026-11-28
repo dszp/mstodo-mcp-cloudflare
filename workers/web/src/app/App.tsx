@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError } from "./api.ts";
-import { type Loader, myDayOn, watchFocus } from "./loader.ts";
+import { type Loader, myDayOn, watchFocus, watchVisiblePoll } from "./loader.ts";
 import { type TaskView, unsavedEditsText } from "./model.ts";
 import { type Route, currentRoute, replaceRoute, subscribeRoute } from "./route.ts";
 import { openAttachment, saveWithAnchor } from "./download.ts";
@@ -68,9 +68,11 @@ export function App() {
     if (status !== "ready") return;
     const stopActivity = watchSession(session, { target: window, doc: document, win: window });
     const stopFocus = watchFocus(loader, window);
+    const stopPoll = watchVisiblePoll(loader, document);
     return () => {
       stopActivity();
       stopFocus();
+      stopPoll();
     };
   }, [status, session, loader]);
 
