@@ -32,6 +32,19 @@ export type SessionInfo =
   | { signed_in: false }
   | { signed_in: true; expires_at: number; idle_minutes: number; refresh_at: number; now: number; data_key: string };
 
+/**
+ * Nobody has used the page since it last moved the BFF's idle timer, so an
+ * automatic refresh or session read would move it again on its own: an
+ * unattended page would then keep the BFF's session alive past its idle limit.
+ * Thrown before any request. It is not a sign-out; the next activity lifts it.
+ */
+export class SessionIdleError extends Error {
+  constructor() {
+    super("no activity since the last session contact");
+    this.name = "SessionIdleError";
+  }
+}
+
 /** The session's deadlines in this device's epoch milliseconds, and the idle limit. */
 export type SessionLimits = { endsAt: number; refreshAt: number; idleMs: number };
 
@@ -53,9 +66,12 @@ export interface SessionClient {
   onLimits(cb: () => void): () => void;
   /**
    * current(), then a refresh when the access token is due. true when the
-   * session is usable. Throws when the BFF can't be reached.
+   * session is usable. Throws when the BFF can't be reached, and
+   * SessionIdleError, before any request, as refreshOnce does.
    */
   ensureFresh(): Promise<boolean>;
+  /** Whether the person used this page or another tab since lastContact. */
+  attended(): boolean;
   /** When the person last used this page or another tab, in epoch milliseconds. */
   readonly lastActivity: number;
   /**
@@ -69,7 +85,10 @@ export interface SessionClient {
    * POST /bff/session/refresh, shared by concurrent callers. true when the
    * session is usable (refreshed, or not yet due); false when it is over, after
    * running the signed-out flow. Any other answer (502 upstream_unavailable,
-   * a network error) throws: the session may still be fine.
+   * a network error) throws: the session may still be fine. Throws
+   * SessionIdleError, before any request, when !attended(), except within
+   * 30 s of a check that passed on attended(): bffFetch's forced retry and a
+   * 401 that lands after the refresh belong to the same moment of use.
    */
   refreshOnce(opts?: { force?: boolean }): Promise<boolean>;
   /** POST /auth/logout, then the signed-out flow. Throws, still signed in, when the server refuses. */
@@ -93,6 +112,8 @@ const ACTIVITY_MESSAGE = { type: "activity" } as const;
 /** Activity is told to the other tabs at most this often. */
 const ACTIVITY_BROADCAST_MS = 5_000;
 const LOCK = "potem-refresh";
+/** How long after an attended session check its follow-up requests still count as attended. */
+const ATTENDED_GRACE_MS = 30_000;
 const CSRF_HEADER = { "x-potem": "1" };
 
 function defaultLocks(): LockRequester | null {
@@ -116,6 +137,23 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
   let lastActivity = Date.now();
   let lastBroadcast = 0;
   let lastContact = 0;
+  // Until when an attended check's own contacts still count as attended: its
+  // refresh moves lastContact, and the requests already in flight with it (a
+  // 401 that lands after the refresh, bffFetch's forced retry) need one more.
+  // Only a check that passed on attended() sets it, so it never extends itself.
+  let graceUntil = -Infinity;
+
+  // >=: a touch() in the same millisecond as the contact before it (App's
+  // load, right after its session check) counts as after it.
+  const attended = () => lastActivity >= lastContact;
+  const contact = () => {
+    lastContact = Date.now();
+  };
+  /** Throws SessionIdleError unless attended or within an attended check's grace. */
+  const assertAttended = () => {
+    if (attended()) graceUntil = Date.now() + ATTENDED_GRACE_MS;
+    else if (Date.now() >= graceUntil) throw new SessionIdleError();
+  };
 
   const underLock = <T,>(cb: () => Promise<T>): Promise<T> => (locks ? locks.request(LOCK, cb) : cb());
 
@@ -151,7 +189,7 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
     const headers: Record<string, string> = force ? { ...CSRF_HEADER, "x-potem-force": "1" } : CSRF_HEADER;
     const res = await fetchFn("/bff/session/refresh", { method: "POST", headers });
     if (res.status === 204) {
-      lastContact = Date.now();
+      contact();
       return true;
     }
     const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
@@ -170,12 +208,12 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
       endSession(true);
       return { signed_in: false };
     }
-    lastContact = Date.now();
+    contact();
     setLimits(info, Date.now());
     return info;
   }
 
-  function refreshOnce({ force = false } = {}): Promise<boolean> {
+  function refresh(force: boolean): Promise<boolean> {
     if (signedOut) return Promise.resolve(false);
     let p = inflight.get(force);
     if (!p) {
@@ -185,9 +223,16 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
     return p;
   }
 
+  async function refreshOnce({ force = false } = {}): Promise<boolean> {
+    if (signedOut) return false;
+    assertAttended();
+    return refresh(force);
+  }
+
   return {
     current,
     refreshOnce,
+    attended,
 
     limits: () => limits,
 
@@ -197,9 +242,12 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
     },
 
     async ensureFresh() {
+      if (signedOut) return false;
+      assertAttended();
       const info = await current();
       if (!info.signed_in) return false;
-      return Date.now() >= limits!.refreshAt ? refreshOnce() : true;
+      // The check above covers this refresh: current() was its own contact.
+      return Date.now() >= limits!.refreshAt ? refresh(false) : true;
     },
 
     get lastActivity() {

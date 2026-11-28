@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SocketLike } from "../sync/push.ts";
 import { MirrorStore } from "../sync/store.ts";
 import { watchLive } from "./live.ts";
-import { createSessionClient } from "./session.ts";
+import { SignedOutError } from "./api.ts";
+import { type SessionClient, SessionIdleError, createSessionClient } from "./session.ts";
 
 /** A socket the test drives: it records listeners and the code it was closed with. */
 class FakeSocket implements SocketLike {
@@ -57,7 +58,9 @@ function deferred() {
 
 type SessionAnswer = "signed_in" | "due" | "signed_out";
 
-function setup(opts: { session?: SessionAnswer; state?: "visible" | "hidden" } = {}) {
+type LiveSession = Pick<SessionClient, "ensureFresh" | "onSignedOut" | "signedOut" | "onLimits">;
+
+function setup(opts: { session?: SessionAnswer; stub?: LiveSession; state?: "visible" | "hidden" } = {}) {
   const sockets: FakeSocket[] = [];
   const pulls: ReturnType<typeof deferred>[] = [];
   const loader = {
@@ -91,7 +94,7 @@ function setup(opts: { session?: SessionAnswer; state?: "visible" | "hidden" } =
   const log = vi.fn();
   const stop = watchLive({
     loader,
-    session,
+    session: opts.stub ?? session,
     doc,
     openSocket: () => {
       const s = new FakeSocket();
@@ -113,6 +116,7 @@ beforeEach(() => {
   vi.useFakeTimers();
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -235,6 +239,67 @@ describe("watchLive", () => {
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(t.sockets).toHaveLength(1);
     expect(t.loader.reload).not.toHaveBeenCalled();
+  });
+
+  it("stops, without reconnecting or polling, when the session check answers that the session is over", async () => {
+    const stub: LiveSession = {
+      ensureFresh: vi.fn(async () => false),
+      onSignedOut: () => () => {}, // the stub never runs the sign-out flow
+      onLimits: () => () => {},
+      signedOut: false,
+    };
+    const t = setup({ stub });
+    t.last().hello();
+    t.last().serverClose(4001);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stub.ensureFresh).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(t.sockets).toHaveLength(1);
+    expect(t.loader.reload).not.toHaveBeenCalled();
+  });
+
+  it("parks after a 4001 on an unattended page: no request, no socket, no poll, until activity reads the session", async () => {
+    const t = setup({ session: "due" });
+    vi.advanceTimersByTime(1);
+    await t.session.current(); // a contact after the last activity
+    t.calls.length = 0;
+    t.last().hello();
+    t.pulls[0]!.resolve();
+    t.last().serverClose(4001);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.calls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(t.sockets).toHaveLength(1);
+    expect(t.loader.reload).not.toHaveBeenCalled();
+    // Showing the page again doesn't reconnect by itself while parked.
+    t.setVisibility("hidden");
+    t.setVisibility("visible");
+    expect(t.sockets).toHaveLength(1);
+    // Activity, then a session read (watchSession's), reconnects.
+    vi.advanceTimersByTime(1);
+    t.session.touch();
+    await t.session.current();
+    expect(t.sockets).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(t.loader.reload).toHaveBeenCalledTimes(1); // connecting: the poll is back
+    t.last().hello();
+    expect(t.loader.pullAfter).toHaveBeenCalledTimes(2);
+    t.stop();
+  });
+
+  it("doesn't log a pull that ended because the session ended or sat idle", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = setup();
+    t.loader.pullAfter
+      .mockImplementationOnce(() => Promise.reject(new SignedOutError()))
+      .mockImplementationOnce(() => Promise.reject(new SessionIdleError()));
+    t.last().hello();
+    await vi.advanceTimersByTimeAsync(0);
+    t.last().changed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.loader.pullAfter).toHaveBeenCalledTimes(2);
+    expect(warn).not.toHaveBeenCalled();
+    t.stop();
   });
 
   it("refreshes a session that is due after a 4001, then reconnects", async () => {

@@ -6,7 +6,7 @@ import { type FetchPage, pullAll } from "../sync/pull.ts";
 import type { FeedPage } from "../sync/feed.ts";
 import type { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError } from "./api.ts";
-import type { SessionClient } from "./session.ts";
+import { type SessionClient, SessionIdleError } from "./session.ts";
 import { throttle } from "./throttle.ts";
 
 /** Active scope: open tasks and recent completions. 1000 is the feed's largest page. */
@@ -144,7 +144,9 @@ export function createLoader(bffFetch: BffFetch, store: MirrorStore, session: Pi
  */
 export function watchFocus(loader: Pick<Loader, "reload">, target: EventTarget): () => void {
   const onFocus = throttle(() => {
-    loader.reload().catch((e: unknown) => console.warn("pull on focus failed", e));
+    loader.reload().catch((e: unknown) => {
+      if (!(e instanceof SessionIdleError)) console.warn("pull on focus failed", e);
+    });
   }, FOCUS_INTERVAL_MS);
   target.addEventListener("focus", onFocus);
   return () => target.removeEventListener("focus", onFocus);
@@ -172,7 +174,11 @@ export function watchVisiblePoll(
 
   const pull = () => {
     last = Date.now();
-    loader.reload().catch((e: unknown) => console.warn("periodic pull failed", e));
+    // An idle session refuses the refresh this pull needed; the poll goes on,
+    // and a pull after the next activity gets through.
+    loader.reload().catch((e: unknown) => {
+      if (!(e instanceof SessionIdleError)) console.warn("periodic pull failed", e);
+    });
     timer = setTimeout(pull, POLL_INTERVAL_MS);
   };
   const schedule = () => {

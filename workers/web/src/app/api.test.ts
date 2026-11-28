@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MirrorStore } from "../sync/store.ts";
 import { SignedOutError, createBffFetch, withTimeout } from "./api.ts";
-import { createSessionClient } from "./session.ts";
+import { SessionIdleError, createSessionClient } from "./session.ts";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -20,6 +20,10 @@ function fakeBff(apiAnswers: Array<() => Response>) {
     const headers = new Headers(init.headers);
     log.push(`${method} ${url}${headers.get("x-potem-force") === "1" ? " force" : ""}`);
     if (url === "/bff/session/refresh") return new Response(null, { status: 204 });
+    if (url === "/bff/session") {
+      const now = Math.floor(Date.now() / 1000);
+      return json({ signed_in: true, expires_at: now + 3600, idle_minutes: 60, refresh_at: now + 1800, now, data_key: "k" });
+    }
     const answer = apiAnswers[Math.min(i++, apiAnswers.length - 1)];
     return answer();
   }) as unknown as typeof fetch;
@@ -83,6 +87,19 @@ describe("bffFetch", () => {
       "GET /bff/api/sync/info",
     ]);
     expect(signedOut).not.toHaveBeenCalled();
+  });
+
+  it("on session_refresh_needed for an unattended page, throws SessionIdleError without a refresh or a sign-out", async () => {
+    const { bffFetch, log, signedOut, session, store } = fakeBff([refreshNeeded]);
+    await new Promise((r) => setTimeout(r, 2));
+    await session.current(); // a contact after the last activity
+    log.length = 0;
+    expect(session.attended()).toBe(false);
+    await expect(bffFetch("sync/changes")).rejects.toBeInstanceOf(SessionIdleError);
+    expect(log).toEqual(["GET /bff/api/sync/changes"]);
+    expect(signedOut).not.toHaveBeenCalled();
+    expect(session.signedOut).toBe(false);
+    expect(store.lists()).toHaveLength(1);
   });
 
   it("after session_refresh_needed three times, signs out and stops", async () => {

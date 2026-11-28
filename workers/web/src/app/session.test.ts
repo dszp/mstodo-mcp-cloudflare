@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MirrorStore } from "../sync/store.ts";
-import { type LockRequester, type SessionClient, createSessionClient, watchSession } from "./session.ts";
+import { type LockRequester, type SessionClient, SessionIdleError, createSessionClient, watchSession } from "./session.ts";
 
 type Call = { url: string; method: string; headers: Headers };
 
@@ -184,6 +184,76 @@ describe("createSessionClient", () => {
     await client.refreshOnce();
     await client.refreshOnce();
     expect(calls).toHaveLength(2);
+  });
+
+  describe("unattended", () => {
+    // A page nobody has used since it last moved the BFF's idle timer must not
+    // move it again on its own, or the BFF's idle limit never ends the session.
+    async function unattended() {
+      vi.useFakeTimers();
+      vi.setSystemTime(LOCAL_START);
+      const now = LOCAL_START / 1000;
+      const { fn, calls } = stubFetch((c) =>
+        c.url === "/bff/session" ? json(signedInInfo({ now, refresh_at: now - 1 })) : new Response(null, { status: 204 }),
+      );
+      const client = createSessionClient(fn, { store, locks: null, channel: null });
+      vi.advanceTimersByTime(1000);
+      await client.current(); // the last contact, after the last activity
+      calls.length = 0;
+      return { client, calls };
+    }
+
+    it("attended() is whether there was activity since the last contact", async () => {
+      const { client } = await unattended();
+      expect(client.attended()).toBe(false);
+      client.touch(); // in the same millisecond as the contact: counts as after it
+      expect(client.attended()).toBe(true);
+    });
+
+    it("refreshOnce() throws SessionIdleError without a request, and doesn't sign out", async () => {
+      const { client, calls } = await unattended();
+      await expect(client.refreshOnce()).rejects.toBeInstanceOf(SessionIdleError);
+      expect(calls).toHaveLength(0);
+      expect(client.signedOut).toBe(false);
+    });
+
+    it("refreshOnce({ force: true }) throws SessionIdleError without a request", async () => {
+      const { client, calls } = await unattended();
+      await expect(client.refreshOnce({ force: true })).rejects.toBeInstanceOf(SessionIdleError);
+      expect(calls).toHaveLength(0);
+    });
+
+    it("ensureFresh() throws SessionIdleError without a request", async () => {
+      const { client, calls } = await unattended();
+      await expect(client.ensureFresh()).rejects.toBeInstanceOf(SessionIdleError);
+      expect(calls).toHaveLength(0);
+    });
+
+    it("refreshes again after activity", async () => {
+      const { client, calls } = await unattended();
+      vi.advanceTimersByTime(1);
+      client.touch();
+      expect(await client.ensureFresh()).toBe(true);
+      expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET /bff/session", "POST /bff/session/refresh"]);
+    });
+
+    it("refreshes that follow an attended one within 30 s go ahead (bffFetch's forced retry, a late 401)", async () => {
+      const { client, calls } = await unattended();
+      vi.advanceTimersByTime(1);
+      client.touch();
+      vi.advanceTimersByTime(1);
+      expect(await client.refreshOnce()).toBe(true);
+      expect(client.attended()).toBe(false);
+      expect(await client.refreshOnce({ force: true })).toBe(true);
+      vi.advanceTimersByTime(29_000);
+      expect(await client.refreshOnce()).toBe(true);
+      expect(calls).toHaveLength(3);
+      // The grace runs from the attended check, and those refreshes don't extend it.
+      vi.advanceTimersByTime(1_000);
+      await expect(client.refreshOnce({ force: true })).rejects.toBeInstanceOf(SessionIdleError);
+      await expect(client.refreshOnce()).rejects.toBeInstanceOf(SessionIdleError);
+      expect(calls).toHaveLength(3);
+    });
   });
 
   it("refreshOnce({ force: true }) sends X-Potem-Force: 1 under the lock", async () => {

@@ -52,6 +52,11 @@ export function App() {
     try {
       const info = await session.current();
       if (!info.signed_in) return; // onSignedOut has set the status
+      // Opening the page and pressing Try again are activity: without this,
+      // the check just made would leave the session unattended (session.ts)
+      // and a load that needs a refresh would fail. watchSession isn't
+      // running yet to record it.
+      session.touch();
       await loader.load();
       if (!session.signedOut) setStatus("ready");
     } catch (e) {
