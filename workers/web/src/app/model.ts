@@ -128,14 +128,65 @@ export function reminderFromInput(value: string, timeZone: string): string | nul
   const wall = Date.UTC(y, mo - 1, d, h, mi);
   const check = new Date(wall);
   if (check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d || h > 23 || mi > 59) return null;
-  // Two passes: the offset at a first guess, then the offset at the result.
-  // In a gap the second pass lands on a different wall time, so the first
-  // guess (the later clock time) is kept.
-  const first = wall - zoneOffsetMs(wall, timeZone);
-  let ms = first;
-  const second = wall - zoneOffsetMs(first, timeZone);
-  if (second !== first && second + zoneOffsetMs(second, timeZone) === wall) ms = second;
+  // The zone's offsets a day either side of the wall time bracket any change
+  // that day. Each gives a candidate instant; a candidate is real when it
+  // reads back as the same wall time. Both real: the repeated hour, so the
+  // first. Neither: the gap, so the offset from before the change, which
+  // lands on the same clock time after it.
+  const before = zoneOffsetMs(wall - DAY_MS, timeZone);
+  const after = zoneOffsetMs(wall + DAY_MS, timeZone);
+  const real = [wall - before, wall - after].filter((c) => c + zoneOffsetMs(c, timeZone) === wall);
+  const ms = real.length > 0 ? Math.min(...real) : wall - before;
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+// ---------------------------------------------------------------- edit checks
+
+// What an edit box holds when it closes, compared with what it opened with,
+// so opening a field and leaving it unchanged never sends an edit.
+
+const oneLine = (text: string) => text.replace(/\s*\n\s*/g, " ").trim();
+
+/** The title to save from a rename box: on one line and trimmed; null when blank or unchanged. */
+export function titleEdit(original: string, typed: string): string | null {
+  const t = oneLine(typed);
+  return t === "" || t === oneLine(original) ? null : t;
+}
+
+/**
+ * The note to save from a note box, or null when unchanged. A textarea turns
+ * CRLF and CR into LF, so the original is compared after the same change.
+ */
+export function noteEdit(original: string, typed: string): string | null {
+  return typed === original.replace(/\r\n?/g, "\n") ? null : typed;
+}
+
+/**
+ * Whether a date or datetime-local value is whole enough to save. While a
+ * year is typed digit by digit, Chrome reports years like 0002 as complete.
+ */
+const wholeDate = (v: string) => /^\d{4}-\d{2}-\d{2}/.test(v) && Number(v.slice(0, 4)) >= 1900;
+
+export type DateCommit = { kind: "none" } | { kind: "clear" } | { kind: "set"; value: string };
+
+/**
+ * What closing a date input saves. `current` is the saved value (as `read`
+ * returns it) or null; `read` turns the input's value into that form, or null.
+ * An empty input (the native clear) clears; a partial or unreadable one, or
+ * one equal to `current`, saves nothing.
+ */
+export function dateInputCommit(draft: string, current: string | null, read: (v: string) => string | null): DateCommit {
+  if (draft === "") return current === null ? { kind: "none" } : { kind: "clear" };
+  const value = wholeDate(draft) ? read(draft) : null;
+  if (value === null || value === current) return { kind: "none" };
+  return { kind: "set", value };
+}
+
+/** The id to move focus to after `removed` leaves `ids`: the next, else the previous, else null. */
+export function neighborAfterRemoval(ids: readonly string[], removed: string): string | null {
+  const i = ids.indexOf(removed);
+  if (i === -1) return null;
+  return ids[i + 1] ?? ids[i - 1] ?? null;
 }
 
 // ---------------------------------------------------------------- notices
@@ -168,6 +219,7 @@ export function noticeText(op: Op, error: string): string {
   if (error === "deleted") reason = action.includes(subject) ? "it was deleted elsewhere" : `the ${subject} was deleted elsewhere`;
   else if (error === "list_excluded") reason = "that list doesn't sync";
   else if (error === "too_large") reason = "the edit is too large to send";
+  else if (error === "no_default_list") reason = "no default list yet";
   else reason = "the server refused it";
   return `Couldn't ${action}: ${reason}.`;
 }

@@ -2,7 +2,16 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { MirrorStore } from "../../sync/store.ts";
 import type { Edits } from "../edits.ts";
-import { type Accent, type TaskRow as Row, type TaskView, accentOf, splitListName, taskRows } from "../model.ts";
+import type { Notices } from "../editing.ts";
+import {
+  type Accent,
+  type TaskRow as Row,
+  type TaskView,
+  accentOf,
+  neighborAfterRemoval,
+  splitListName,
+  taskRows,
+} from "../model.ts";
 import { replaceRoute } from "../route.ts";
 import { useStoreKey } from "../use-store.ts";
 import { AddTask } from "./AddTask.tsx";
@@ -45,6 +54,7 @@ export function TaskList({
   timeZone,
   selectedTask,
   edits,
+  notices,
   onBack,
 }: {
   store: MirrorStore;
@@ -53,6 +63,7 @@ export function TaskList({
   timeZone: string;
   selectedTask: string | null;
   edits: Edits;
+  notices: Pick<Notices, "add">;
   onBack: () => void;
 }) {
   const tasksV = useStoreKey(store, "tasks");
@@ -122,6 +133,27 @@ export function TaskList({
     return () => window.removeEventListener("keydown", onKey);
   }, [store, edits, selectedTask]);
 
+  // After the open task is deleted (here or in the detail pane, which then
+  // closes), focus goes to the next row, else the previous, else the list:
+  // the deleted row's link is gone and focus would fall to the page. The rows
+  // are remembered from while the task was still shown, since the store can
+  // drop it a render before the route closes it.
+  const taskIds = useMemo(() => rows.flatMap((r) => (r.kind === "task" ? [r.id] : [])), [rows]);
+  const lastSelected = useRef(selectedTask);
+  const lastIds = useRef(taskIds);
+  useEffect(() => {
+    const was = lastSelected.current;
+    lastSelected.current = selectedTask;
+    if (selectedTask !== null && store.task(selectedTask) !== undefined) {
+      lastIds.current = taskIds;
+      return;
+    }
+    if (was === null || selectedTask !== null || store.task(was) !== undefined) return;
+    const next = neighborAfterRemoval(lastIds.current, was);
+    const link = next === null ? null : scroller.current?.querySelector<HTMLElement>(`[data-task="${CSS.escape(next)}"] .task-link`);
+    (link ?? scroller.current)?.focus();
+  }, [store, selectedTask, taskIds]);
+
   const deleteTask = (id: string) => {
     setConfirmDelete(null);
     edits.remove(id);
@@ -158,7 +190,7 @@ export function TaskList({
         <h1 className={`list-title${accent ? ` accent-${accent}` : ""}`}>{title}</h1>
       </header>
       {completedCount !== null && completedCount > 0 && <CompletedSummary count={completedCount} />}
-      <div className="task-scroll" ref={scroller}>
+      <div className="task-scroll" ref={scroller} tabIndex={-1}>
         {rows.length === 0 ? (
           <p className="empty">{view.view === "smart" ? EMPTY[view.list] : "No tasks."}</p>
         ) : (
@@ -183,9 +215,13 @@ export function TaskList({
           onAdd={(title) => {
             try {
               edits.addTask(title, view);
+              return true;
             } catch (e) {
-              // Only before the lists load: a smart list adds to the default list.
+              // Only before the lists load: a smart list adds to the default
+              // list. The box keeps the text so it can be added again.
               console.error("adding the task failed", e);
+              notices.add({ op: "task.create", sid: "", error: "no_default_list" });
+              return false;
             }
           }}
         />

@@ -10,7 +10,11 @@ import {
   dateLabel,
   describeRecurrence,
   linkify,
+  dateInputCommit,
   moveTargets,
+  neighborAfterRemoval,
+  noteEdit,
+  titleEdit,
   msUntilNextDay,
   noticeText,
   reminderFromInput,
@@ -503,6 +507,29 @@ describe("reminder input", () => {
     expect(reminderFromInput("2026-11-01T02:00", NY)).toBe("2026-11-01T07:00:00Z");
   });
 
+  const BERLIN = "Europe/Berlin";
+
+  it("Berlin: moves a time the spring-forward gap skips to the same time after it", () => {
+    // 2026-03-29 02:30 doesn't exist in Berlin; read as 03:30 CEST (01:30Z).
+    expect(reminderFromInput("2026-03-29T02:30", BERLIN)).toBe("2026-03-29T01:30:00Z");
+    expect(reminderFromInput("2026-03-29T01:59", BERLIN)).toBe("2026-03-29T00:59:00Z");
+    expect(reminderFromInput("2026-03-29T03:00", BERLIN)).toBe("2026-03-29T01:00:00Z");
+  });
+
+  it("Berlin: reads a time the fall-back hour repeats as its first occurrence", () => {
+    // 2026-10-25 02:30 happens twice in Berlin: CEST (00:30Z), then CET (01:30Z).
+    expect(reminderFromInput("2026-10-25T02:30", BERLIN)).toBe("2026-10-25T00:30:00Z");
+    expect(reminderFromInput("2026-10-25T03:00", BERLIN)).toBe("2026-10-25T02:00:00Z");
+  });
+
+  it("Berlin: round-trips across a year of days", () => {
+    for (let d = 0; d < 365; d++) {
+      const day = new Date(Date.UTC(2026, 0, 1) + d * 86_400_000).toISOString().slice(0, 10);
+      const value = `${day}T12:15`;
+      expect(reminderInputValue(reminderFromInput(value, BERLIN)!, BERLIN), value).toBe(value);
+    }
+  });
+
   it("is null for an empty or malformed value", () => {
     expect(reminderFromInput("", NY)).toBeNull();
     expect(reminderFromInput("2026-11-26", NY)).toBeNull();
@@ -519,6 +546,10 @@ describe("noticeText", () => {
       "Couldn't confirm the new task: it may have been added twice. Check the list.",
     );
     expect(noticeText("task.delete", "too_large")).toBe("Couldn't delete the task: the edit is too large to send.");
+  });
+
+  it("says why an add failed before the lists loaded", () => {
+    expect(noticeText("task.create", "no_default_list")).toBe("Couldn't add the task: no default list yet.");
   });
 
   it("reads an unknown or refused error as the server refusing it", () => {
@@ -562,5 +593,74 @@ describe("unsavedEditsText", () => {
   it("is null when nothing was dropped", () => {
     expect(unsavedEditsText(0)).toBeNull();
     expect(unsavedEditsText(null)).toBeNull();
+  });
+});
+
+describe("titleEdit", () => {
+  it("is the new title on one line, trimmed", () => {
+    expect(titleEdit("Old", "  New\n title ")).toBe("New title");
+  });
+
+  it("is null when nothing changed once both are put on one line and trimmed", () => {
+    expect(titleEdit("  Padded title ", "  Padded title ")).toBeNull();
+    expect(titleEdit("Two\nlines", "Two lines")).toBeNull();
+    expect(titleEdit("Same", "Same")).toBeNull();
+  });
+
+  it("is null for a blank title", () => {
+    expect(titleEdit("Old", "  \n ")).toBeNull();
+  });
+});
+
+describe("noteEdit", () => {
+  it("is null when the box holds the note unchanged, CRLF included", () => {
+    expect(noteEdit("one\r\ntwo\rthree", "one\ntwo\nthree")).toBeNull();
+    expect(noteEdit("", "")).toBeNull();
+  });
+
+  it("is the box's text when it changed", () => {
+    expect(noteEdit("one\r\ntwo", "one\ntwo!")).toBe("one\ntwo!");
+    expect(noteEdit("text", "")).toBe("");
+  });
+});
+
+describe("dateInputCommit", () => {
+  const asIs = (v: string) => v;
+
+  it("sets a whole date that differs", () => {
+    expect(dateInputCommit("2026-12-03", "2026-12-01", asIs)).toEqual({ kind: "set", value: "2026-12-03" });
+    expect(dateInputCommit("2026-12-03", null, asIs)).toEqual({ kind: "set", value: "2026-12-03" });
+  });
+
+  it("does nothing for the same value", () => {
+    expect(dateInputCommit("2026-12-03", "2026-12-03", asIs)).toEqual({ kind: "none" });
+  });
+
+  it("clears on an empty value (the native clear), unless already empty", () => {
+    expect(dateInputCommit("", "2026-12-03", asIs)).toEqual({ kind: "clear" });
+    expect(dateInputCommit("", null, asIs)).toEqual({ kind: "none" });
+  });
+
+  it("does nothing for a year still being typed or a value the reader refuses", () => {
+    expect(dateInputCommit("0002-12-03", "2026-12-03", asIs)).toEqual({ kind: "none" });
+    expect(dateInputCommit("2026-12-03T10:00", null, () => null)).toEqual({ kind: "none" });
+  });
+
+  it("compares what the reader makes of the value", () => {
+    const read = (v: string) => `${v}:00Z`;
+    expect(dateInputCommit("2026-12-03T10:00", "2026-12-03T10:00:00Z", read)).toEqual({ kind: "none" });
+    expect(dateInputCommit("2026-12-03T11:00", "2026-12-03T10:00:00Z", read)).toEqual({ kind: "set", value: "2026-12-03T11:00:00Z" });
+  });
+});
+
+describe("neighborAfterRemoval", () => {
+  it("is the next id, else the previous, else null", () => {
+    expect(neighborAfterRemoval(["a", "b", "c"], "b")).toBe("c");
+    expect(neighborAfterRemoval(["a", "b", "c"], "c")).toBe("b");
+    expect(neighborAfterRemoval(["a"], "a")).toBeNull();
+  });
+
+  it("is null for an id that isn't there", () => {
+    expect(neighborAfterRemoval(["a", "b"], "x")).toBeNull();
   });
 });

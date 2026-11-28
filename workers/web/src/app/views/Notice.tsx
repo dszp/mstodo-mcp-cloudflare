@@ -10,16 +10,19 @@ const NOTICE_MS = 6_000;
 /**
  * The corner of the page that reports on edits: "Saving…" while the outbox
  * holds any, and a notice for each edit the server refused. Screen readers
- * hear both (aria-live="polite").
+ * hear the notices (role="status"), not "Saving…".
  */
 export function EditStatus({ outbox, notices }: { outbox: Pick<Outbox, "pending" | "subscribe">; notices: Notices }) {
   const saving = useSyncExternalStore(outbox.subscribe, () => outbox.pending().length > 0);
   const items = useSyncExternalStore(notices.subscribe, notices.list);
   return (
-    <div className="edit-status" aria-live="polite">
-      {items.map((n) => (
-        <NoticeItem key={n.id} notice={n} onDismiss={() => notices.dismiss(n.id)} />
-      ))}
+    <div className="edit-status">
+      <div className="notices" role="status" aria-live="polite">
+        {items.map((n) => (
+          <NoticeItem key={n.id} notice={n} onDismiss={() => notices.dismiss(n.id)} />
+        ))}
+      </div>
+      {/* Outside the live region: a screen reader shouldn't announce every save. */}
       {saving && <p className="saving">Saving…</p>}
     </div>
   );

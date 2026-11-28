@@ -5,14 +5,14 @@ import { PlusIcon } from "./icons.tsx";
  * The "Add a task" box at the bottom of a list, and the "Next step" box of a
  * task. Enter adds and empties the box, keeping focus in it for the next one.
  * `onAdd` gets the text as typed; the edit action trims it and ignores a
- * blank one.
+ * blank one. When `onAdd` returns false the add failed and the text stays.
  */
 export function AddTask({
   onAdd,
   inputRef,
   placeholder = "Add a task",
 }: {
-  onAdd: (title: string) => void;
+  onAdd: (title: string) => boolean;
   inputRef?: Ref<HTMLInputElement>;
   placeholder?: string;
 }) {
@@ -23,8 +23,7 @@ export function AddTask({
       onSubmit={(e) => {
         e.preventDefault();
         if (text.trim() === "") return;
-        onAdd(text);
-        setText("");
+        if (onAdd(text)) setText("");
       }}
     >
       <PlusIcon className="add-icon" />

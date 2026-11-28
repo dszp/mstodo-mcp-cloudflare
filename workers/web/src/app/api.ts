@@ -90,7 +90,26 @@ export function withTimeout(
 ): typeof fetch {
   return (input, init) => {
     const timeout = timeoutSignal(ms);
-    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    const signal = init?.signal ? anySignal([init.signal, timeout]) : timeout;
     return fetchFn(input, { ...init, signal });
   };
+}
+
+/**
+ * A signal that aborts when any of `signals` does, with that signal's reason.
+ * AbortSignal.any where the browser has it; Safari added it only in 17.4, so
+ * older browsers get a controller the signals abort.
+ */
+function anySignal(signals: AbortSignal[]): AbortSignal {
+  const native = (AbortSignal as { any?: (s: AbortSignal[]) => AbortSignal }).any;
+  if (typeof native === "function") return native.call(AbortSignal, signals);
+  const ctl = new AbortController();
+  for (const s of signals) {
+    if (s.aborted) {
+      ctl.abort(s.reason);
+      break;
+    }
+    s.addEventListener("abort", () => ctl.abort(s.reason), { once: true, signal: ctl.signal });
+  }
+  return ctl.signal;
 }

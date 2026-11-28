@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
+import { titleEdit } from "../model.ts";
 
 /**
  * Text that edits in place: a button showing `value`; pressed, it becomes a
  * text box. Enter or leaving the box saves; Escape puts the text back. Saving
  * calls `onCommit` once, with the text on one line and trimmed, and only when
- * it changed and isn't blank: each edit re-filters the whole mirror (the
- * overlay), so nothing is sent per keystroke.
+ * it isn't blank and differs from `value` put the same way (titleEdit), so
+ * opening and leaving the box sends nothing. Each edit re-filters the whole
+ * mirror (the overlay), so nothing is sent per keystroke.
  */
 export function EditableText({
   value,
@@ -38,8 +40,8 @@ export function EditableText({
     finished.current = true;
     refocus.current = fromKey;
     setEditing(false);
-    const t = text.replace(/\s*\n\s*/g, " ").trim();
-    if (save && t !== "" && t !== value) onCommit(t);
+    const next = save ? titleEdit(value, text) : null;
+    if (next !== null) onCommit(next);
   };
 
   if (!editing) {

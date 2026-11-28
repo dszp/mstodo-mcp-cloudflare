@@ -171,7 +171,7 @@ export function TaskCard({
   }
 
   return (
-    <div className={`task-card${selected ? " selected" : ""}${done ? " done" : ""}`}>
+    <div className={`task-card${selected ? " selected" : ""}${done ? " done" : ""}`} data-task={id}>
       <CompleteButton done={done} onToggle={edits && (() => edits.setCompleted(id, !done))} />
       <RouteLink to={{ ...view, task: id }} className="task-link" current={selected}>
         <span className="task-text">

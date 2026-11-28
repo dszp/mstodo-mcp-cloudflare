@@ -319,3 +319,11 @@ describe("createEditing: notices", () => {
     expect(seen).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("createEditing: page notices", () => {
+  it("add shows a notice the page raised itself", () => {
+    const { editing } = setup();
+    editing.notices.add({ op: "task.create", sid: "", error: "no_default_list" });
+    expect(editing.notices.list()).toEqual([{ id: expect.any(Number), op: "task.create", sid: "", error: "no_default_list" }]);
+  });
+});

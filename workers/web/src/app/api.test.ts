@@ -207,6 +207,8 @@ describe("withTimeout", () => {
     const fn = vi.fn((_input: RequestInfo | URL, init: RequestInit = {}) => {
       seen.push(init);
       return new Promise<Response>((_resolve, reject) => {
+        // As fetch does: an already-aborted signal rejects at once.
+        if (init.signal?.aborted) reject(init.signal.reason);
         init.signal?.addEventListener("abort", () => reject(init.signal!.reason));
       });
     }) as unknown as typeof fetch;
@@ -241,6 +243,33 @@ describe("withTimeout", () => {
     const pending = withTimeout(fn, undefined, t.timeoutSignal)("/bff/api/search?q=a", { signal: ctl.signal });
     ctl.abort();
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("without AbortSignal.any (Safari before 17.4), either signal still aborts the request", async () => {
+    const original = AbortSignal.any;
+    Object.defineProperty(AbortSignal, "any", { value: undefined, configurable: true, writable: true });
+    try {
+      const t = manualTimeout();
+      const { fn } = hangingFetch();
+      const ctl = new AbortController();
+      const byCaller = withTimeout(fn, undefined, t.timeoutSignal)("/a", { signal: ctl.signal });
+      ctl.abort();
+      await expect(byCaller).rejects.toMatchObject({ name: "AbortError" });
+
+      const t2 = manualTimeout();
+      const byTimeout = withTimeout(fn, undefined, t2.timeoutSignal)("/b", { signal: new AbortController().signal });
+      t2.fire();
+      await expect(byTimeout).rejects.toMatchObject({ name: "TimeoutError" });
+
+      // A signal already aborted aborts at once.
+      const done = new AbortController();
+      done.abort();
+      await expect(withTimeout(fn, undefined, manualTimeout().timeoutSignal)("/c", { signal: done.signal })).rejects.toMatchObject({
+        name: "AbortError",
+      });
+    } finally {
+      Object.defineProperty(AbortSignal, "any", { value: original, configurable: true, writable: true });
+    }
   });
 
   it("keeps the request's method, headers and body", async () => {

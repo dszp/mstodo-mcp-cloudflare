@@ -42,12 +42,14 @@ export interface Notice {
   id: number;
   op: Op;
   sid: string;
-  /** The §5.3 error, or the outbox's "refused" / "too_large". */
+  /** The §5.3 error, the outbox's "refused" / "too_large", or the page's "no_default_list". */
   error: string;
 }
 
 export interface Notices {
   list(): readonly Notice[];
+  /** Shows a notice for an edit the page itself couldn't make (e.g. no default list to add to). */
+  add(n: Omit<Notice, "id">): void;
   subscribe(fn: () => void): () => void;
   dismiss(id: number): void;
 }
@@ -94,7 +96,7 @@ function clientId(storage: KeyValueStorage | null, random: () => string): string
   return id;
 }
 
-function createNotices(): Notices & { add(n: Omit<Notice, "id">): void } {
+function createNotices(): Notices {
   let items: readonly Notice[] = [];
   let next = 1;
   const watchers = new Set<() => void>();
@@ -174,7 +176,7 @@ export function createEditing(deps: EditingDeps): Editing {
   return {
     outbox,
     edits: createEdits(guarded, store, loader, random),
-    notices: { list: notices.list, subscribe: notices.subscribe, dismiss: notices.dismiss },
+    notices,
     refreshContext,
     discarded: () => discarded,
   };

@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { MirrorStore, MirrorTask } from "../../sync/store.ts";
 import type { Edits } from "../edits.ts";
 import {
@@ -8,7 +8,10 @@ import {
   dateLabel,
   describeRecurrence,
   instantLabel,
+  dateInputCommit,
   moveTargets,
+  neighborAfterRemoval,
+  noteEdit,
   noteText,
   orderedSteps,
   reminderFromInput,
@@ -80,6 +83,19 @@ export function TaskDetail({
   useStoreKey(store, { task: id });
   const listsV = useStoreKey(store, "lists");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // After a step is deleted, focus goes to the next step (else the previous),
+  // or the add-step box: the deleted step's button is gone, and focus would
+  // otherwise fall to the page.
+  const stepFocus = useRef<string | null>(null);
+  const stepList = useRef<HTMLUListElement>(null);
+  const addStepBox = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const target = stepFocus.current;
+    if (target === null) return;
+    stepFocus.current = null;
+    const row = target === "" ? null : stepList.current?.querySelector<HTMLElement>(`[data-step="${CSS.escape(target)}"] .editable`);
+    (row ?? addStepBox.current)?.focus();
+  });
   const t = task ?? (placeholder === undefined ? store.task(id) : undefined);
   // Lists only: the tree's task counts aren't shown here.
   const targets = useMemo(() => (edits && t ? moveTargets(sidebarTree(store), t.list_id) : []), [store, listsV, edits, t?.list_id]);
@@ -121,23 +137,19 @@ export function TaskDetail({
         <section className="card">
           <div className="detail-title-row">
             <CompleteButton done={done} onToggle={edits && (() => edits.setCompleted(t.id, !done))} />
-            {edits ? (
-              <EditableText
-                key={t.id}
-                className={`detail-title${done ? " done" : ""}`}
-                value={t.title}
-                label="Rename task"
-                onCommit={(title) => edits.rename(t.id, title)}
-              />
-            ) : (
-              <h2 className={`detail-title${done ? " done" : ""}`}>{t.title}</h2>
-            )}
+            <h2 className={`detail-title${done ? " done" : ""}`}>
+              {edits ? (
+                <EditableText key={t.id} value={t.title} label="Rename task" onCommit={(title) => edits.rename(t.id, title)} />
+              ) : (
+                t.title
+              )}
+            </h2>
             <StarButton on={important} onToggle={edits && (() => edits.setImportant(t.id, !important))} />
           </div>
           {steps.length > 0 && (
-            <ul className="steps">
+            <ul className="steps" ref={stepList}>
               {steps.map((s) => (
-                <li key={s.id} className={s.checked ? "done" : undefined}>
+                <li key={s.id} data-step={s.id} className={s.checked ? "done" : undefined}>
                   <CompleteButton done={s.checked} onToggle={edits && (() => edits.setStepChecked(s.id, !s.checked))} />
                   {edits ? (
                     <>
@@ -151,7 +163,10 @@ export function TaskDetail({
                         type="button"
                         className="icon-button step-delete"
                         aria-label={`Delete step: ${s.title ?? ""}`}
-                        onClick={() => edits.removeStep(s.id)}
+                        onClick={() => {
+                          stepFocus.current = neighborAfterRemoval(steps.map((x) => x.id), s.id) ?? "";
+                          edits.removeStep(s.id);
+                        }}
                       >
                         <XIcon />
                       </button>
@@ -165,7 +180,14 @@ export function TaskDetail({
           )}
           {edits && (
             <div className="step-add">
-              <AddTask placeholder={steps.length > 0 ? "Next step" : "Add step"} onAdd={(title) => edits.addStep(t.id, title)} />
+              <AddTask
+                inputRef={addStepBox}
+                placeholder={steps.length > 0 ? "Next step" : "Add step"}
+                onAdd={(title) => {
+                  edits.addStep(t.id, title);
+                  return true;
+                }}
+              />
             </div>
           )}
           {!t.subresources_complete && <p className="muted small">Steps, links and files haven't synced yet.</p>}
@@ -333,18 +355,26 @@ export function TaskDetail({
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 /**
- * Whether a date input's value is a whole date to save. While a year is typed
- * digit by digit, Chrome reports years like 0002 and 0020 as complete values;
- * those wait for the rest of the year.
+ * A date or datetime-local input that saves when it is left or on Enter,
+ * never while a value is typed: `dateInputCommit` decides what to save, and
+ * an empty input (the native clear) clears. A draft it won't save is put back
+ * to the saved value. `read` turns the input's value into the saved form.
  */
-const wholeDate = (v: string) => /^\d{4}-\d{2}-\d{2}/.test(v) && Number(v.slice(0, 4)) >= 1900;
-
-/**
- * The reminder: a datetime-local input in the browser's zone, and Clear. A complete value is saved as a UTC instant when it changes.
- */
-function ReminderRow({ at, onChange }: { at: string | null; onChange: (instant: string | null) => void }) {
-  const zone = browserZone();
-  const shown = at === null ? "" : reminderInputValue(at, zone);
+function DateInput({
+  type,
+  label,
+  current,
+  shown,
+  read,
+  onChange,
+}: {
+  type: "date" | "datetime-local";
+  label: string;
+  current: string | null;
+  shown: string;
+  read: (v: string) => string | null;
+  onChange: (value: string | null) => void;
+}) {
   const [draft, setDraft] = useState(shown);
   const [prev, setPrev] = useState(shown);
   if (prev !== shown) {
@@ -352,22 +382,48 @@ function ReminderRow({ at, onChange }: { at: string | null; onChange: (instant: 
     setPrev(shown);
     setDraft(shown);
   }
+  const commit = (value: string) => {
+    const c = dateInputCommit(value, current, read);
+    if (c.kind === "set") onChange(c.value);
+    else if (c.kind === "clear") onChange(null);
+    else setDraft(shown);
+  };
+  return (
+    <input
+      type={type}
+      className="date-input"
+      aria-label={label}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={(e) => commit(e.currentTarget.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit(e.currentTarget.value);
+        }
+      }}
+    />
+  );
+}
+
+/** The reminder: a datetime-local input in the browser's zone, and Clear. */
+function ReminderRow({ at, onChange }: { at: string | null; onChange: (instant: string | null) => void }) {
+  const zone = browserZone();
+  // Compared as the input reads it, so a stored instant with seconds or
+  // milliseconds doesn't count as a change.
+  const current = at === null ? null : reminderFromInput(reminderInputValue(at, zone), zone);
   return (
     <div className={`detail-line${at !== null ? " set" : ""}`}>
       <BellIcon />
       {/* The input shows the time; the label only names the row. */}
       <span className="line-label">Remind me</span>
-      <input
+      <DateInput
         type="datetime-local"
-        className="date-input"
-        aria-label="Reminder"
-        value={draft}
-        onChange={(e) => {
-          const v = e.target.value;
-          setDraft(v);
-          const instant = wholeDate(v) ? reminderFromInput(v, zone) : null;
-          if (instant !== null && instant !== at) onChange(instant);
-        }}
+        label="Reminder"
+        current={current}
+        shown={at === null ? "" : reminderInputValue(at, zone)}
+        read={(v) => reminderFromInput(v, zone)}
+        onChange={onChange}
       />
       {at !== null && (
         <button type="button" className="icon-button" aria-label="Clear reminder" onClick={() => onChange(null)}>
@@ -390,28 +446,11 @@ function DueRow({
   tone: string | null;
   onChange: (date: string | null) => void;
 }) {
-  const shown = due ?? "";
-  const [draft, setDraft] = useState(shown);
-  const [prev, setPrev] = useState(shown);
-  if (prev !== shown) {
-    setPrev(shown);
-    setDraft(shown);
-  }
   return (
     <div className={`detail-line${label ? ` set due-${tone}` : ""}`}>
       <CalendarIcon />
       <span className="line-label">{label ?? "Due date"}</span>
-      <input
-        type="date"
-        className="date-input"
-        aria-label="Due date"
-        value={draft}
-        onChange={(e) => {
-          const v = e.target.value;
-          setDraft(v);
-          if (wholeDate(v) && v !== due) onChange(v);
-        }}
-      />
+      <DateInput type="date" label="Due date" current={due} shown={due ?? ""} read={(v) => v} onChange={onChange} />
       {due !== null && (
         <button type="button" className="icon-button" aria-label="Clear due date" onClick={() => onChange(null)}>
           <XIcon />
@@ -435,7 +474,8 @@ function NoteEditor({ text, onSave }: { text: string; onSave: (text: string) => 
     if (finished.current) return;
     finished.current = true;
     setEditing(false);
-    if (save && value !== text) onSave(value);
+    const next = save ? noteEdit(text, value) : null;
+    if (next !== null) onSave(next);
   };
   const start = () => {
     finished.current = false;

@@ -201,6 +201,7 @@ function Ready() {
           timeZone={timeZone}
           selectedTask={task}
           edits={editing.edits}
+          notices={editing.notices}
           onBack={() => setSidebarShown(true)}
         />
       ) : (
