@@ -5,7 +5,7 @@
 // place that knows about bindings.
 
 import { route } from "../../bff/router.ts";
-import { withSecurityHeaders } from "../../bff/headers.ts";
+import { HSTS, withSecurityHeaders } from "../../bff/headers.ts";
 import { sealer } from "../../bff/seal.ts";
 import { type BffConfig, upstreamVia } from "../../bff/upstream.ts";
 
@@ -95,6 +95,7 @@ function misconfigured(variable: string): Response {
       "cache-control": "no-store",
       "x-content-type-options": "nosniff",
       "x-robots-tag": "noindex, nofollow",
+      "strict-transport-security": HSTS,
     },
   });
 }

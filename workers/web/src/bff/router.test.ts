@@ -40,6 +40,8 @@ function expectSecurityHeaders(res: Response, label: string, noStore: boolean, c
   expect(res.headers.get("x-content-type-options"), label).toBe("nosniff");
   expect(res.headers.get("referrer-policy"), label).toBe("no-referrer");
   expect(res.headers.get("x-robots-tag"), label).toBe("noindex, nofollow");
+  // This host only: no includeSubDomains or preload.
+  expect(res.headers.get("strict-transport-security"), label).toBe("max-age=31536000");
   if (noStore) expect(res.headers.get("cache-control"), label).toBe("no-store");
   // Every /auth and /bff response (noStore marks those) is same-origin only.
   expect(res.headers.get("cross-origin-resource-policy"), label).toBe(noStore ? "same-origin" : null);

@@ -399,7 +399,9 @@ server's sync API.
 
 - A deployed server (steps 1 to 9 above), reachable over https. The web Worker needs its origin.
 - A hostname for the web Worker, for example `todo-web.example.com`, on a zone in your Cloudflare
-  account. The cookies are bound to that exact host, so use one hostname only.
+  account. The cookies are bound to that exact host, so use one hostname only. The Worker sends
+  `Strict-Transport-Security: max-age=31536000` for that host only (no `includeSubDomains` or
+  `preload`), so browsers that have visited it refuse plain http to it for a year.
 - Optional: put Cloudflare Access in front of that hostname as a second gate. Add a bypass
   policy for `/robots.txt` so crawlers see the Worker's `Disallow: /`.
 

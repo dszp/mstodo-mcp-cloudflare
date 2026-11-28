@@ -23,6 +23,13 @@ const csp = (serverOrigin: string) =>
     `form-action 'self' ${serverOrigin}`,
   ].join("; ");
 
+/**
+ * One year of HTTPS-only for this host. No includeSubDomains or preload: the
+ * web hostname shares a zone with other hosts, and this must cover only the
+ * web Worker's own host.
+ */
+export const HSTS = "max-age=31536000";
+
 const API_CSP = "sandbox; default-src 'none'; frame-ancestors 'none'";
 
 /**
@@ -39,6 +46,7 @@ export function withSecurityHeaders(res: Response, cfg: BffConfig, pathname: str
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-robots-tag", "noindex, nofollow");
+  headers.set("strict-transport-security", HSTS);
   if (isBffPath(pathname)) {
     headers.set("cache-control", "no-store");
     // Session state and API data: no other origin may load them as a resource.

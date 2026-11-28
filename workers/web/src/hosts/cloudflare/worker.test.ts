@@ -9,6 +9,8 @@ const SECRET = "test-secret-test-secret-test-secret-0123";
 const CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; " +
   `frame-ancestors 'none'; base-uri 'none'; form-action 'self' ${SERVER}`;
+/** HSTS for the web host only: no includeSubDomains or preload (the zone holds other hosts). */
+const HSTS = "max-age=31536000";
 
 const ROBOTS = readFileSync(new URL("../../../public/robots.txt", import.meta.url), "utf8");
 
@@ -65,6 +67,7 @@ describe("config check", () => {
       for (const path of ["/", "/bff/session", "/robots.txt"]) {
         const res = await call(env, `${WEB}${path}`);
         expect(res.status, path).toBe(503);
+        expect(res.headers.get("strict-transport-security"), path).toBe(HSTS);
         const text = await res.text();
         expect(text, path).toContain(c.name);
         for (const v of Object.values(c.over)) {
@@ -91,6 +94,7 @@ describe("host check", () => {
       expect(res.status, url).toBe(421);
       expect(res.headers.get("content-type"), url).toContain("text/plain");
       expect(res.headers.get("content-security-policy"), url).toBe(CSP);
+      expect(res.headers.get("strict-transport-security"), url).toBe(HSTS);
     }
     expect(assets.calls).toHaveLength(0);
   });
@@ -111,6 +115,7 @@ describe("assets", () => {
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(res.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(res.headers.get("strict-transport-security")).toBe(HSTS);
     expect(res.headers.get("cache-control")).toBeNull();
   });
 
@@ -128,6 +133,7 @@ describe("assets", () => {
       expect(res.status, method).toBe(405);
       expect(res.headers.get("allow"), method).toBe("GET, HEAD");
       expect(res.headers.get("content-security-policy"), method).toBe(CSP);
+      expect(res.headers.get("strict-transport-security"), method).toBe(HSTS);
     }
     expect(assets.calls).toHaveLength(0);
   });
