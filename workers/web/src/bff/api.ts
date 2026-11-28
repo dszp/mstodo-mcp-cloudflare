@@ -12,7 +12,8 @@
 // sends one POST /bff/session/refresh for all of them. That refresh rotates
 // only a session that is due: two tabs refreshing at once would otherwise
 // rotate twice from the same token, and if the first response's cookie landed
-// last it would hold a token that is neither current nor previous.
+// last it would hold a token that is neither current nor previous. A forced
+// refresh (X-Potem-Force: 1) skips the due check; see handleRefresh.
 //
 // "oauth-provider.js" below is node_modules/@cloudflare/workers-oauth-provider/
 // dist/oauth-provider.js (1.2.3).
@@ -148,8 +149,13 @@ export async function handleRefresh(req: Request, cfg: BffConfig): Promise<Respo
   const session = await readSession(req, s);
   const state = session ? sessionState(session, cfg.now(), limits(cfg)) : "expired";
   if (!session || state === "expired") return signedOut(req);
-  // Not due yet, most likely another tab's refresh already landed: nothing to do.
-  if (state === "valid") return new Response(null, { status: 204 });
+  // Not due yet, most likely another tab's refresh already landed: nothing to
+  // do. X-Potem-Force rotates anyway: the page sends it when the server keeps
+  // refusing an access token the session still counts as valid (a revoked
+  // grant, or one the server's epoch check now refuses), which a refresh that
+  // waits for access_exp would never fix. The page sends it at most once per
+  // failing request, under the same cross-tab lock as any refresh.
+  if (state === "valid" && req.headers.get("x-potem-force") !== "1") return new Response(null, { status: 204 });
   const device = await readDevice(req, s, cfg);
   if (!device) return signedOut(req);
 

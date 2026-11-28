@@ -185,6 +185,38 @@ describe("POST /bff/session/refresh", () => {
     expect(server.tokenRequests.length).toBe(before);
   });
 
+  it("rotates a session that isn't due when X-Potem-Force is sent", async () => {
+    const jar = await signedIn();
+    const old = (await jar.unseal<Session>(SESSION_COOKIE))!;
+    const before = server.tokenRequests.length;
+    now += 60;
+    const res = await jar.refresh({ "x-potem": "1", "x-potem-force": "1", origin: WEB });
+    expect(res.status).toBe(204);
+    expect(sessionCookies(res)).toHaveLength(1);
+    expect(server.tokenRequests.length - before).toBe(1);
+    const fresh = (await jar.unseal<Session>(SESSION_COOKIE))!;
+    expect(fresh.access_token).not.toBe(old.access_token);
+    expect(fresh.refresh_token).not.toBe(old.refresh_token);
+  });
+
+  it("still signs out an expired session when X-Potem-Force is sent", async () => {
+    const jar = await signedIn();
+    const before = server.tokenRequests.length;
+    now += 13 * 3600;
+    const res = await jar.refresh({ "x-potem": "1", "x-potem-force": "1", origin: WEB });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "signed_out" });
+    expect(server.tokenRequests.length).toBe(before);
+  });
+
+  it("still refuses a forced refresh without X-Potem and the web Origin", async () => {
+    const jar = await signedIn();
+    const before = server.tokenRequests.length;
+    expect((await jar.refresh({ "x-potem-force": "1", origin: WEB })).status).toBe(403);
+    expect((await jar.refresh({ "x-potem": "1", "x-potem-force": "1", origin: "https://evil.example.com" })).status).toBe(403);
+    expect(server.tokenRequests.length).toBe(before);
+  });
+
   it("refuses a request without X-Potem and the web Origin", async () => {
     const jar = await signedIn();
     const before = server.tokenRequests.length;
