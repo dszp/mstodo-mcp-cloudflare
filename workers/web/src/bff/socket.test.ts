@@ -129,6 +129,13 @@ describe("authorizeSocket", () => {
     }
   });
 
+  it("checks Origin before the session: a foreign Origin with a bad session cookie gets 403, no Set-Cookie", async () => {
+    const res = await refused(await socketRequest({ origin: "https://evil.example.com", cookie: `${SESSION_COOKIE}=garbage` }, null));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "forbidden" });
+    expect(res.headers.getSetCookie()).toEqual([]);
+  });
+
   it("refuses a missing Origin with 403", async () => {
     const res = await refused(await socketRequest({ origin: null }));
     expect(res.status).toBe(403);

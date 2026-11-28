@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import worker, { type Env } from "./worker.ts";
+import { SESSION_COOKIE } from "../../bff/cookies.ts";
+import { sealer } from "../../bff/seal.ts";
+import type { Session } from "../../bff/session.ts";
+import type { RelaySocket, SocketRuntime } from "./socket-relay.ts";
+import worker, { type Env, handleRequest } from "./worker.ts";
 
 const WEB = "https://web.example.com";
 const SERVER = "https://server.example.com";
@@ -225,5 +229,94 @@ describe("app icon", () => {
     await call(env, `${WEB}/robots.txt`);
     await call(env, `${WEB}/favicon.svg.map`);
     expect(assets.calls.map((r) => new URL(r.url).pathname)).toEqual(["/robots.txt", "/favicon.svg.map"]);
+  });
+});
+
+describe("push socket", () => {
+  // Only what the routing needs: the relay itself is tested in socket-relay.test.ts.
+  const fakeSocket = (): RelaySocket & { closes: number[] } => {
+    const closes: number[] = [];
+    return { closes, accept() {}, send() {}, close: (code: number) => void closes.push(code), addEventListener() {} };
+  };
+
+  function fakeRuntime() {
+    const client = fakeSocket();
+    const browser = fakeSocket();
+    const runtime: SocketRuntime = { pair: () => [client, browser], upgraded: () => new Response("upgraded") };
+    return { runtime, client, browser };
+  }
+
+  async function sessionCookie(): Promise<string> {
+    const now = Math.floor(Date.now() / 1000);
+    const session: Session = {
+      access_token: "access-1",
+      access_exp: now + 3600,
+      refresh_token: "refresh-1",
+      data_key: "data-key-1",
+      created_at: now - 60,
+      last_seen: now - 60,
+    };
+    return `${SESSION_COOKIE}=${await (await sealer(SECRET)).seal(SESSION_COOKIE, session)}`;
+  }
+
+  function fakeServer() {
+    const calls: Request[] = [];
+    const up = fakeSocket();
+    return { calls, up, fetch: async (req: Request) => (calls.push(req), { status: 101, webSocket: up }) as unknown as Response };
+  }
+
+  it("refuses a foreign Origin without reaching the server or ASSETS", async () => {
+    const globalFetch = vi.fn(async () => new Response(null, { status: 500 }));
+    vi.stubGlobal("fetch", globalFetch);
+    const server = fakeServer();
+    const { env, assets } = fakeEnv({ SERVER: server });
+    const { runtime, browser } = fakeRuntime();
+    const headers = { origin: "https://evil.example.com", upgrade: "websocket", cookie: await sessionCookie() };
+    for (const res of [
+      await handleRequest(new Request(`${WEB}/bff/socket`, { headers }), env, runtime),
+      await call(env, `${WEB}/bff/socket`, { headers }),
+    ]) {
+      expect(res.status).toBe(403);
+      expect(res.headers.getSetCookie()).toEqual([]);
+    }
+    expect(server.calls).toHaveLength(0);
+    expect(globalFetch).not.toHaveBeenCalled();
+    expect(assets.calls).toHaveLength(0);
+    expect(browser.closes).toEqual([]);
+  });
+
+  it("relays a valid session's upgrade to the server's socket with only the authorized headers", async () => {
+    const server = fakeServer();
+    const { env, assets } = fakeEnv({ SERVER: server });
+    const { runtime } = fakeRuntime();
+    const req = new Request(`${WEB}/bff/socket`, {
+      headers: { origin: WEB, upgrade: "websocket", cookie: await sessionCookie(), "sec-websocket-protocol": "chat" },
+    });
+    const res = await handleRequest(req, env, runtime);
+    expect(await res.text()).toBe("upgraded");
+    expect(server.calls).toHaveLength(1);
+    expect(server.calls[0].url).toBe(`${SERVER}/api/v1/sync/socket`);
+    expect([...server.calls[0].headers]).toEqual([
+      ["authorization", "Bearer access-1"],
+      ["upgrade", "websocket"],
+    ]);
+    expect(assets.calls).toHaveLength(0);
+  });
+
+  it("uses global fetch for the socket when no binding is set", async () => {
+    const server = fakeServer();
+    vi.stubGlobal("fetch", server.fetch);
+    const { env } = fakeEnv();
+    const req = new Request(`${WEB}/bff/socket`, { headers: { origin: WEB, upgrade: "websocket", cookie: await sessionCookie() } });
+    await handleRequest(req, env, fakeRuntime().runtime);
+    expect(server.calls.map((r) => r.url)).toEqual([`${SERVER}/api/v1/sync/socket`]);
+  });
+
+  it("answers a non-upgrade request to /bff/socket without the relay", async () => {
+    const { env, assets } = fakeEnv();
+    const res = await call(env, `${WEB}/bff/socket`);
+    expect(res.status).toBe(426);
+    expect(res.headers.get("content-security-policy")).toBe(CSP);
+    expect(assets.calls).toHaveLength(0);
   });
 });
