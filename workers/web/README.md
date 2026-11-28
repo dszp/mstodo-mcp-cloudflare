@@ -1,7 +1,7 @@
 # Potem web client
 
 A web app for Potem that reads and edits tasks, served by its own Cloudflare Worker. Setup and deployment are in
-the repository's [DEPLOYMENT.md](../../DEPLOYMENT.md#web-client); the API it reads is
+the repository's [DEPLOYMENT.md](../../DEPLOYMENT.md#web-client); the API it reads and writes is
 [docs/SYNC-API.md](../../docs/SYNC-API.md).
 
 | Folder | Holds |

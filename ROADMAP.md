@@ -555,8 +555,8 @@ is built: a Worker (`workers/web/src/hosts/cloudflare`), a backend-for-frontend 
 server as an OAuth client and proxies an allowlist of `GET` requests (`workers/web/src/bff`), and a
 React app with the sidebar, smart lists, lists, task detail and search (`workers/web/src/app`), plus
 a `web` deployment kind. Deploying it is a separate step; see DEPLOYMENT.md, "Web client". Milestone 3a (task
-edits) is built: titles, notes, dates, importance, steps, completion and My Day, sent as sync
-mutations through an outbox. Next, 3b: lists and groups, drag reorder, uploads and the repeat
+edits) is built: adding, deleting and moving tasks between lists, and titles, notes, due dates,
+reminders, importance, steps, completion and My Day, sent as sync mutations through an outbox. Next, 3b: lists and groups, drag reorder, uploads and the repeat
 editor; then push updates, a persistent mirror with an installable PWA, and a Node host.
 
 **Dated updates above an HTML note (web client, later idea from the owner).** A task whose note
