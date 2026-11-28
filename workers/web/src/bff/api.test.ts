@@ -149,19 +149,28 @@ describe("GET /bff/session", () => {
     expect((await jar.unseal<Session>(SESSION_COOKIE))!.last_seen).toBe(START);
   });
 
-  it("with X-Potem-Activity, touches last_seen at most once a minute", async () => {
+  it("with X-Potem-Activity, touches last_seen at most once every 30 s", async () => {
     const jar = await signedIn();
-    now += 30;
+    now += 29;
     expect(sessionCookies(await jar.session(true))).toHaveLength(0);
-    now += 30;
+    now += 1;
     const res = await jar.session(true);
     const lines = sessionCookies(res);
     expect(lines).toHaveLength(1);
     // The cookie lives until the session's absolute end, not maxHours from now.
-    expect(lines[0]).toContain(`Max-Age=${12 * 3600 - 60}`);
+    expect(lines[0]).toContain(`Max-Age=${12 * 3600 - 30}`);
     const session = (await jar.unseal<Session>(SESSION_COOKIE))!;
-    expect(session.last_seen).toBe(START + 60);
+    expect(session.last_seen).toBe(START + 30);
     expect(session.created_at).toBe(START);
+  });
+
+  it("never drops the page's once-a-minute report, even one that lands a second early", async () => {
+    const jar = await signedIn();
+    for (let i = 1; i <= 3; i++) {
+      now += 59;
+      expect(sessionCookies(await jar.session(true)), `report ${i}`).toHaveLength(1);
+      expect((await jar.unseal<Session>(SESSION_COOKIE))!.last_seen, `report ${i}`).toBe(START + 59 * i);
+    }
   });
 
   it("still answers signed_in when the access token is due for refresh", async () => {

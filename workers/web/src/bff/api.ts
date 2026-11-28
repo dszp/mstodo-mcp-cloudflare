@@ -9,18 +9,20 @@
 //
 // The idle timer's last_seen moves only on user activity: a GET /bff/session
 // carrying X-Potem-Activity: 1 (the page sends it after activity, at most
-// once a minute) touches it, at most once a minute. A plain read and a
+// once a minute) touches it, at most once every 30 s. A plain read and a
 // refresh never do. The page refreshes and reads the session on its own (the
 // poll's session_refresh_needed, the push socket's reauth), and if those
 // moved last_seen, a page nobody uses would keep its session alive forever.
 // A cross-site page can't send the header without a CORS preflight the BFF
-// never answers. Likewise the proxy never
-// refreshes: near expiry it answers 401 session_refresh_needed, and the page
-// sends one POST /bff/session/refresh for all of them. That refresh rotates
-// only a session that is due: two tabs refreshing at once would otherwise
-// rotate twice from the same token, and if the first response's cookie landed
-// last it would hold a token that is neither current nor previous. A forced
-// refresh (X-Potem-Force: 1) skips the due check; see handleRefresh.
+// never answers.
+//
+// Likewise the proxy never refreshes: near expiry it answers 401
+// session_refresh_needed, and the page sends one POST /bff/session/refresh
+// for all of them. That refresh rotates only a session that is due: two tabs
+// refreshing at once would otherwise rotate twice from the same token, and if
+// the first response's cookie landed last it would hold a token that is
+// neither current nor previous. A forced refresh (X-Potem-Force: 1) skips the
+// due check; see handleRefresh.
 //
 // "oauth-provider.js" below is node_modules/@cloudflare/workers-oauth-provider/
 // dist/oauth-provider.js (1.2.3).
@@ -32,8 +34,12 @@ import { type Device, REFRESH_WINDOW_SEC, type Session, isSession, sessionState 
 import { type BffConfig, basicAuth } from "./upstream.ts";
 
 const API_PREFIX = "/bff/api/";
-/** last_seen is rewritten when it is at least this old. */
-const TOUCH_INTERVAL_SEC = 60;
+/**
+ * last_seen is rewritten when it is at least this old. Half the page's
+ * once-a-minute report interval, so a report that lands a little early by the
+ * BFF's clock is never dropped.
+ */
+const TOUCH_INTERVAL_SEC = 30;
 const REFRESH_RETRY_DELAY_MS = 1000;
 /** The response headers a proxied response keeps. Set-Cookie is never among them. */
 const PASSED_HEADERS = ["content-type", "content-disposition", "content-length", "etag", "last-modified"];
