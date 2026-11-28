@@ -356,15 +356,44 @@ describe("watchSession", () => {
     expect(sessionChecks()).toBe(2);
   });
 
-  it("counts the page becoming visible, not hidden", async () => {
+  it("counts the page becoming visible, not hidden, 250 ms after it does", async () => {
     const { doc, sessionChecks } = await setup();
     vi.advanceTimersByTime(60_000);
     doc.visibilityState = "hidden";
     doc.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(250);
     expect(sessionChecks()).toBe(0);
     doc.visibilityState = "visible";
     doc.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(249);
+    expect(sessionChecks()).toBe(0);
+    vi.advanceTimersByTime(1);
     expect(sessionChecks()).toBe(1);
+  });
+
+  it("on becoming visible, waits 250 ms so another tab's queued activity counts first", async () => {
+    // A frozen tab hears the other tabs' activity only after it wakes; the
+    // messages arrive just after visibilitychange.
+    const ch = Object.assign(new EventTarget(), { postMessage: () => {} }) as unknown as BroadcastChannel;
+    const { client, doc } = await setup(signedInInfo({ idle_minutes: 10 }), ch);
+    doc.visibilityState = "hidden";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    vi.setSystemTime(LOCAL_START + seconds(11 * 60));
+    doc.visibilityState = "visible";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    ch.dispatchEvent(new MessageEvent("message", { data: { type: "activity" } }));
+    vi.advanceTimersByTime(250);
+    expect(client.signedOut).toBe(false);
+  });
+
+  it("a page hidden again within the 250 ms doesn't count as visible", async () => {
+    const { doc, sessionChecks } = await setup();
+    vi.advanceTimersByTime(60_000);
+    doc.visibilityState = "visible";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    doc.visibilityState = "hidden";
+    vi.advanceTimersByTime(250);
+    expect(sessionChecks()).toBe(0);
   });
 
   it("signs out at expires_at without asking the BFF, however active the page is", async () => {
@@ -412,6 +441,7 @@ describe("watchSession", () => {
     vi.setSystemTime(LOCAL_START + seconds(11 * 60));
     doc.visibilityState = "visible";
     doc.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(250);
     expect(client.signedOut).toBe(true);
     expect(sessionChecks()).toBe(0);
   });

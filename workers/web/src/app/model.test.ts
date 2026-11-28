@@ -10,7 +10,11 @@ import {
   dateLabel,
   describeRecurrence,
   linkify,
+  moveTargets,
   msUntilNextDay,
+  noticeText,
+  reminderFromInput,
+  reminderInputValue,
   noteText,
   olderTasks,
   searchDetailSource,
@@ -22,6 +26,7 @@ import {
   searchText,
   sidebarTree,
   taskRows,
+  unsavedEditsText,
 } from "./model.ts";
 import { LinkedText } from "./views/LinkedText.tsx";
 
@@ -455,5 +460,107 @@ describe("searchDetailSource", () => {
 
   it("is the server for a task the mirror doesn't hold", () => {
     expect(searchDetailSource(storeOf(), "x")).toBe("server");
+  });
+});
+
+describe("reminder input", () => {
+  const NY = "America/New_York";
+
+  it("shows an instant as the zone's wall time, to the minute", () => {
+    expect(reminderInputValue("2026-11-26T19:00:00Z", NY)).toBe("2026-11-26T14:00");
+    expect(reminderInputValue("2026-07-01T03:30:45.123Z", NY)).toBe("2026-06-30T23:30");
+    expect(reminderInputValue("2026-11-26T19:00:00Z", "UTC")).toBe("2026-11-26T19:00");
+  });
+
+  it("shows nothing for an unreadable instant", () => {
+    expect(reminderInputValue("soon", NY)).toBe("");
+  });
+
+  it("reads the zone's wall time back as a UTC instant", () => {
+    expect(reminderFromInput("2026-11-26T14:00", NY)).toBe("2026-11-26T19:00:00Z");
+    expect(reminderFromInput("2026-06-30T23:30", NY)).toBe("2026-07-01T03:30:00Z");
+    expect(reminderFromInput("2026-11-26T14:00", "Asia/Kolkata")).toBe("2026-11-26T08:30:00Z");
+  });
+
+  it("round-trips across a year of days, both sides of each DST change", () => {
+    for (let d = 0; d < 365; d++) {
+      const day = new Date(Date.UTC(2026, 0, 1) + d * 86_400_000).toISOString().slice(0, 10);
+      const value = `${day}T12:15`;
+      expect(reminderInputValue(reminderFromInput(value, NY)!, NY), value).toBe(value);
+    }
+  });
+
+  it("moves a time the spring-forward gap skips to the same time after it", () => {
+    // 2026-03-08 02:30 doesn't exist in New York; browsers read it as 03:30 EDT.
+    expect(reminderFromInput("2026-03-08T02:30", NY)).toBe("2026-03-08T07:30:00Z");
+    expect(reminderFromInput("2026-03-08T01:59", NY)).toBe("2026-03-08T06:59:00Z");
+    expect(reminderFromInput("2026-03-08T03:00", NY)).toBe("2026-03-08T07:00:00Z");
+  });
+
+  it("reads a time the fall-back hour repeats as its first occurrence", () => {
+    // 2026-11-01 01:30 happens twice in New York: EDT (05:30Z), then EST (06:30Z).
+    expect(reminderFromInput("2026-11-01T01:30", NY)).toBe("2026-11-01T05:30:00Z");
+    expect(reminderFromInput("2026-11-01T02:00", NY)).toBe("2026-11-01T07:00:00Z");
+  });
+
+  it("is null for an empty or malformed value", () => {
+    expect(reminderFromInput("", NY)).toBeNull();
+    expect(reminderFromInput("2026-11-26", NY)).toBeNull();
+    expect(reminderFromInput("2026-13-01T10:00", NY)).toBeNull();
+  });
+});
+
+describe("noticeText", () => {
+  it("names the action and the reason for each rejected error", () => {
+    expect(noticeText("task.update", "deleted")).toBe("Couldn't save: the task was deleted elsewhere.");
+    expect(noticeText("step.update", "deleted")).toBe("Couldn't save the step: it was deleted elsewhere.");
+    expect(noticeText("task.move", "list_excluded")).toBe("Couldn't move the task: that list doesn't sync.");
+    expect(noticeText("task.create", "ambiguous_create")).toBe(
+      "Couldn't confirm the new task: it may have been added twice. Check the list.",
+    );
+    expect(noticeText("task.delete", "too_large")).toBe("Couldn't delete the task: the edit is too large to send.");
+  });
+
+  it("reads an unknown or refused error as the server refusing it", () => {
+    expect(noticeText("myday.add", "refused")).toBe("Couldn't add the task to My Day: the server refused it.");
+    expect(noticeText("task.update", "invalid_field:title")).toBe("Couldn't save: the server refused it.");
+    expect(noticeText("step.create", "graph_403")).toBe("Couldn't add the step: the server refused it.");
+    expect(noticeText("list.create", "something_new")).toBe("Couldn't save: the server refused it.");
+  });
+});
+
+describe("moveTargets", () => {
+  const s = storeOf(
+    group("G1", { name: "Group one", sort_key: "2026-11-23T00:00:00Z" }),
+    group("G-empty", { name: "Empty", sort_key: "2026-11-22T00:00:00Z" }),
+    list("DEF", { name: "Tasks", wellknown: "defaultList" }),
+    list("TOP", { name: "Top", sort_key: "2026-11-24T00:00:00Z" }),
+    list("IN-1", { name: "🛒 Shopping", group_id: "G1", sort_key: "2026-11-02T00:00:00Z" }),
+    list("IN-2", { name: "Errands", group_id: "G1", sort_key: "2026-11-01T00:00:00Z" }),
+    list("REF", { name: "Archive", sync: "reference" }),
+  );
+
+  it("offers every non-reference list but the task's own, grouped as in the sidebar", () => {
+    expect(moveTargets(sidebarTree(s), "TOP")).toEqual([
+      { kind: "list", id: "DEF", label: "Tasks" },
+      { kind: "group", id: "G1", label: "Group one", lists: [{ id: "IN-1", label: "🛒 Shopping" }, { id: "IN-2", label: "Errands" }] },
+    ]);
+  });
+
+  it("leaves out a group whose only list is the task's own", () => {
+    const only = storeOf(group("G", { name: "G", sort_key: null }), list("A", { name: "A", group_id: "G" }), list("B", { name: "B" }));
+    expect(moveTargets(sidebarTree(only), "A")).toEqual([{ kind: "list", id: "B", label: "B" }]);
+  });
+});
+
+describe("unsavedEditsText", () => {
+  it("counts the edits sign-out dropped, singular for one", () => {
+    expect(unsavedEditsText(1)).toBe("1 edit wasn't saved.");
+    expect(unsavedEditsText(3)).toBe("3 edits weren't saved.");
+  });
+
+  it("is null when nothing was dropped", () => {
+    expect(unsavedEditsText(0)).toBeNull();
+    expect(unsavedEditsText(null)).toBeNull();
   });
 });

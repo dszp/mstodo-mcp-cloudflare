@@ -71,3 +71,26 @@ export function createBffFetch(fetchFn: typeof fetch, session: SessionClient): B
     throw new SignedOutError();
   };
 }
+
+/** How long any one request to the BFF may take, answer and body included. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * `fetchFn` with every request aborted after `ms` (a TimeoutError), on top of
+ * any signal the caller passed. main.tsx wraps the page's one fetch with it,
+ * so it covers bffFetch and the session's own requests: GET /bff/session and
+ * the refresh run under the cross-tab lock, and a request that never answers
+ * would hold that lock, and every other tab's refresh, forever. The timer
+ * also covers reading the body, so callers read it at once (they do).
+ */
+export function withTimeout(
+  fetchFn: typeof fetch,
+  ms = REQUEST_TIMEOUT_MS,
+  timeoutSignal: (ms: number) => AbortSignal = (n) => AbortSignal.timeout(n),
+): typeof fetch {
+  return (input, init) => {
+    const timeout = timeoutSignal(ms);
+    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    return fetchFn(input, { ...init, signal });
+  };
+}

@@ -10,13 +10,14 @@ import {
 import type { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError } from "./api.ts";
 import { type Loader, watchFocus } from "./loader.ts";
-import type { TaskView } from "./model.ts";
+import { type TaskView, unsavedEditsText } from "./model.ts";
 import { type Route, currentRoute, replaceRoute, subscribeRoute } from "./route.ts";
 import { openAttachment, saveWithAnchor } from "./download.ts";
 import type { Editing } from "./editing.ts";
 import { type SessionClient, watchSession } from "./session.ts";
 import { useToday } from "./use-today.ts";
 import { SearchDetail, SearchPane } from "./views/Search.tsx";
+import { EditStatus } from "./views/Notice.tsx";
 import { Sidebar } from "./views/Sidebar.tsx";
 import { TaskDetail } from "./views/TaskDetail.tsx";
 import { TaskList } from "./views/TaskList.tsx";
@@ -116,10 +117,14 @@ function LoadFailed({ onRetry, onSignOut }: { onRetry: () => void; onSignOut: ()
 }
 
 function SignedOut() {
+  const { editing } = useApp();
   const returnTo = window.location.pathname + window.location.search;
+  // Sign-out drops edits the server hadn't received (editing.ts).
+  const unsaved = unsavedEditsText(editing.discarded());
   return (
     <main className="status-page">
       <h1>Potem</h1>
+      {unsaved && <p>{unsaved}</p>}
       <a href={`/auth/login?${new URLSearchParams({ return_to: returnTo })}`}>Sign in</a>
     </main>
   );
@@ -195,6 +200,7 @@ function Ready() {
           today={today}
           timeZone={timeZone}
           selectedTask={task}
+          edits={editing.edits}
           onBack={() => setSidebarShown(true)}
         />
       ) : (
@@ -205,6 +211,7 @@ function Ready() {
             route={route}
             today={today}
             timeZone={timeZone}
+            edits={editing.edits}
             onBack={() => setSidebarShown(true)}
           />
         )
@@ -219,6 +226,7 @@ function Ready() {
             timeZone={timeZone}
             onBack={closeTask}
             onOpenAttachment={onOpenAttachment}
+            edits={editing.edits}
           />
         ) : (
           <TaskDetail
@@ -228,8 +236,11 @@ function Ready() {
             timeZone={timeZone}
             onBack={closeTask}
             onOpenAttachment={onOpenAttachment}
+            edits={editing.edits}
+            onDeleted={closeTask}
           />
         ))}
+      <EditStatus outbox={editing.outbox} notices={editing.notices} />
     </div>
   );
 }

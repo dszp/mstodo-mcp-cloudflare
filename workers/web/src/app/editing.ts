@@ -21,10 +21,14 @@ export class MutationsHttpError extends Error {
   }
 }
 
-// The BFF refuses these before forwarding (400 bad JSON, 413 over 256 KiB,
-// 415 wrong content type), and the server's 400 is a body it can't parse:
-// the same request can never succeed, so the outbox splits the batch instead.
-const PERMANENT = new Set([400, 413, 415]);
+// The BFF refuses these before forwarding (400 bad JSON, 403 a missing
+// X-Potem or an Origin other than WEB_ORIGIN, 413 over 256 KiB, 415 wrong
+// content type), and the server's 400 is a body it can't parse: the same
+// request can never succeed, so the outbox splits the batch instead. A 403
+// means the deployment is misconfigured; as permanent it surfaces as a notice
+// rather than retrying unseen. A timeout (bffFetch's 30 s) is not here: it
+// throws a TimeoutError and the outbox retries it.
+const PERMANENT = new Set([400, 403, 413, 415]);
 
 /** Posts one batch. Resolves with the §5.3 body; throws on any other answer. */
 export async function sendMutations(bff: BffFetch, clientId: string, batch: readonly Mutation[]): Promise<SendResult> {
@@ -160,13 +164,16 @@ export function createEditing(deps: EditingDeps): Editing {
   session.onSignedOut(() => {
     discarded = outbox.discard();
   });
+  // After sign-out an edit has nowhere to go (the store is sealed and the
+  // outbox stopped); queuing it would only miscount what was lost.
+  const guarded = { enqueue: (m: Parameters<Outbox["enqueue"]>[0]) => (discarded === null ? outbox.enqueue(m) : null) };
 
   const notices = createNotices();
   outbox.onRejected((m, r) => notices.add({ op: m.op, sid: m.sid, error: r.error }));
 
   return {
     outbox,
-    edits: createEdits(outbox, store, loader, random),
+    edits: createEdits(guarded, store, loader, random),
     notices: { list: notices.list, subscribe: notices.subscribe, dismiss: notices.dismiss },
     refreshContext,
     discarded: () => discarded,

@@ -162,7 +162,7 @@ describe("createEditing: client_id", () => {
 });
 
 describe("createEditing: errors", () => {
-  it.each([400, 413, 415])("HTTP %i is permanent: the single refused edit leaves through a notice", async (status) => {
+  it.each([400, 403, 413, 415])("HTTP %i is permanent: the single refused edit leaves through a notice", async (status) => {
     const { editing } = setup({ answer: () => json({ error: "bad" }, status) });
     editing.edits.rename("t1", "A");
     await editing.outbox.flush();
@@ -174,6 +174,18 @@ describe("createEditing: errors", () => {
 
   it.each([500, 502, 429])("HTTP %i is not permanent: the edit stays queued", async (status) => {
     const { editing } = setup({ answer: () => json({}, status) });
+    editing.edits.rename("t1", "A");
+    await editing.outbox.flush();
+    expect(editing.outbox.pending()).toHaveLength(1);
+    expect(editing.notices.list()).toEqual([]);
+  });
+
+  it("a request that timed out is retried: the edit stays queued, with no notice", async () => {
+    const { editing } = setup({
+      answer: () => {
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      },
+    });
     editing.edits.rename("t1", "A");
     await editing.outbox.flush();
     expect(editing.outbox.pending()).toHaveLength(1);
@@ -270,6 +282,17 @@ describe("createEditing: sign-out", () => {
     session.onSignedOut(() => (seen = editing.discarded()));
     session.end();
     expect(seen).toBe(1);
+  });
+
+  it("ignores edits made after sign-out: nothing is queued or sent", async () => {
+    const { editing, session, posted } = setup();
+    session.end();
+    editing.edits.rename("t1", "A");
+    editing.edits.setMyDay("t1", true);
+    expect(editing.outbox.pending()).toEqual([]);
+    await editing.outbox.flush();
+    expect(posted).toEqual([]);
+    expect(editing.discarded()).toBe(0);
   });
 
   it("counts zero when nothing was pending", () => {

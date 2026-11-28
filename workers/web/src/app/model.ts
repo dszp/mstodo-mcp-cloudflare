@@ -7,6 +7,7 @@
 // docs/SYNC-API.md sections 4.2, 4.10 and 10.4.
 
 import type { FeedTask, SmartList } from "../sync/feed.ts";
+import type { Op } from "../sync/mutation.ts";
 
 type FeedStep = FeedTask["steps"][number];
 import { bodyText } from "../sync/plain-text.ts";
@@ -85,6 +86,96 @@ export function msUntilNextDay(timeZone: string, now: Date): number {
   const part = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
   const elapsed = ((part("hour") * 60 + part("minute")) * 60 + part("second")) * 1000 + now.getUTCMilliseconds();
   return Math.min(MAX_WAIT_MS, Math.max(1000, DAY_MS - elapsed + 1000));
+}
+
+// ---------------------------------------------------------------- reminder input
+
+// <input type="datetime-local"> holds a wall time with no zone. The reminder
+// is edited in the browser's zone (the caller passes it) and stored as a UTC
+// instant (SYNC-API 4.2).
+
+/** The zone's offset from UTC at `ms`, in milliseconds (east positive). */
+function zoneOffsetMs(ms: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric",
+    hour: "numeric", minute: "numeric", second: "numeric",
+  }).formatToParts(new Date(ms));
+  const part = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
+  const wall = Date.UTC(part("year"), part("month") - 1, part("day"), part("hour"), part("minute"), part("second"));
+  return wall - Math.floor(ms / 1000) * 1000;
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** An instant as a datetime-local value ("YYYY-MM-DDTHH:mm") in `timeZone`; "" when unreadable. */
+export function reminderInputValue(instant: string, timeZone: string): string {
+  const ms = Date.parse(instant);
+  if (Number.isNaN(ms)) return "";
+  const d = new Date(ms + zoneOffsetMs(ms, timeZone));
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}T${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+}
+
+/**
+ * A datetime-local value read in `timeZone`, as a UTC instant
+ * ("2026-11-26T19:00:00Z"); null when empty or malformed. A wall time the
+ * spring-forward gap skips reads as the same clock time after the change, as
+ * browsers do; one the fall-back hour repeats reads as its first occurrence.
+ */
+export function reminderFromInput(value: string, timeZone: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (!m) return null;
+  const [y, mo, d, h, mi] = [m[1], m[2], m[3], m[4], m[5]].map(Number) as [number, number, number, number, number];
+  const wall = Date.UTC(y, mo - 1, d, h, mi);
+  const check = new Date(wall);
+  if (check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d || h > 23 || mi > 59) return null;
+  // Two passes: the offset at a first guess, then the offset at the result.
+  // In a gap the second pass lands on a different wall time, so the first
+  // guess (the later clock time) is kept.
+  const first = wall - zoneOffsetMs(wall, timeZone);
+  let ms = first;
+  const second = wall - zoneOffsetMs(first, timeZone);
+  if (second !== first && second + zoneOffsetMs(second, timeZone) === wall) ms = second;
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+// ---------------------------------------------------------------- notices
+
+// What a refused edit was, for the notice: the words after "Couldn't".
+const NOTICE_ACTIONS: Partial<Record<Op, string>> = {
+  "task.create": "add the task",
+  "task.update": "save",
+  "task.delete": "delete the task",
+  "task.move": "move the task",
+  "myday.add": "add the task to My Day",
+  "myday.remove": "remove the task from My Day",
+  "step.create": "add the step",
+  "step.update": "save the step",
+  "step.delete": "delete the step",
+};
+
+/**
+ * The notice for an edit the server refused (SYNC-API 5.3 `rejected`, a
+ * `failed` that won't be retried, or the outbox's "refused"/"too_large"):
+ * the action, then the reason in plain words.
+ */
+export function noticeText(op: Op, error: string): string {
+  const action = NOTICE_ACTIONS[op] ?? "save";
+  const subject = op.startsWith("step.") ? "step" : "task";
+  if (error === "ambiguous_create") {
+    return `Couldn't confirm the new ${subject}: it may have been added twice. Check the list.`;
+  }
+  let reason: string;
+  if (error === "deleted") reason = action.includes(subject) ? "it was deleted elsewhere" : `the ${subject} was deleted elsewhere`;
+  else if (error === "list_excluded") reason = "that list doesn't sync";
+  else if (error === "too_large") reason = "the edit is too large to send";
+  else reason = "the server refused it";
+  return `Couldn't ${action}: ${reason}.`;
+}
+
+/** The signed-out screen's line for edits sign-out dropped; null when none were. */
+export function unsavedEditsText(count: number | null): string | null {
+  if (count === null || count <= 0) return null;
+  return count === 1 ? "1 edit wasn't saved." : `${count} edits weren't saved.`;
 }
 
 // ---------------------------------------------------------------- order keys
@@ -204,6 +295,29 @@ export function sidebarTree(store: MirrorStore): SidebarTree {
     top: [...defaults.map((l): SidebarEntry => ({ kind: "list", list: item(l) })), ...top.map((t) => t.entry())],
     reference: lists.filter((l) => l.sync === "reference").sort(byOrder).map(item),
   };
+}
+
+export type MoveTarget =
+  | { kind: "list"; id: string; label: string }
+  | { kind: "group"; id: string; label: string; lists: { id: string; label: string }[] };
+
+/**
+ * The lists a task can move to, for "Move to list": the sidebar's lists and
+ * groups in its order, without reference lists (they don't sync tasks to
+ * edit) and without the task's own list. A group left empty is dropped.
+ */
+export function moveTargets(tree: SidebarTree, currentListId: string | null): MoveTarget[] {
+  const label = (l: SidebarListItem) => (l.emoji !== null ? `${l.emoji} ${l.name}` : l.name);
+  const out: MoveTarget[] = [];
+  for (const e of tree.top) {
+    if (e.kind === "list") {
+      if (e.list.id !== currentListId) out.push({ kind: "list", id: e.list.id, label: label(e.list) });
+      continue;
+    }
+    const lists = e.lists.filter((l) => l.id !== currentListId).map((l) => ({ id: l.id, label: label(l) }));
+    if (lists.length > 0) out.push({ kind: "group", id: e.id, label: e.name, lists });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- task rows

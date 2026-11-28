@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { MirrorStore } from "../sync/store.ts";
-import { SignedOutError, createBffFetch } from "./api.ts";
+import { SignedOutError, createBffFetch, withTimeout } from "./api.ts";
 import { createSessionClient } from "./session.ts";
 
 const json = (body: unknown, status = 200) =>
@@ -184,5 +184,75 @@ describe("bffFetch", () => {
     const { bffFetch, signedOut } = fakeBff([() => json({ error: "something_else" }, 401)]);
     expect((await bffFetch("sync/info")).status).toBe(401);
     expect(signedOut).not.toHaveBeenCalled();
+  });
+});
+
+describe("withTimeout", () => {
+  /** A timeout signal the test fires by hand, recording the delay it was made with. */
+  function manualTimeout() {
+    const made: number[] = [];
+    const controllers: AbortController[] = [];
+    const timeoutSignal = (ms: number) => {
+      made.push(ms);
+      const c = new AbortController();
+      controllers.push(c);
+      return c.signal;
+    };
+    const fire = () => controllers.at(-1)!.abort(new DOMException("The operation timed out.", "TimeoutError"));
+    return { made, timeoutSignal, fire };
+  }
+  /** A fetch that never answers on its own; it rejects with the signal's reason when aborted. */
+  function hangingFetch() {
+    const seen: RequestInit[] = [];
+    const fn = vi.fn((_input: RequestInfo | URL, init: RequestInit = {}) => {
+      seen.push(init);
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    }) as unknown as typeof fetch;
+    return { fn, seen };
+  }
+
+  it("gives every request a 30 s timeout, and a hung request rejects with TimeoutError when it fires", async () => {
+    const t = manualTimeout();
+    const { fn } = hangingFetch();
+    const timed = withTimeout(fn, undefined, t.timeoutSignal);
+    const pending = timed("/bff/session");
+    expect(t.made).toEqual([30_000]);
+    t.fire();
+    await expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+  });
+
+  it("a timeout reaches bffFetch's caller as a TimeoutError (retryable, not a sign-out)", async () => {
+    const t = manualTimeout();
+    const { fn } = hangingFetch();
+    const timed = withTimeout(fn, undefined, t.timeoutSignal);
+    const session = createSessionClient(timed, { store: new MirrorStore(), locks: null, channel: null });
+    const pending = createBffFetch(timed, session)("sync/mutations", { method: "POST", body: "{}" });
+    t.fire();
+    await expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(session.signedOut).toBe(false);
+  });
+
+  it("still aborts when the caller's signal does", async () => {
+    const t = manualTimeout();
+    const { fn } = hangingFetch();
+    const ctl = new AbortController();
+    const pending = withTimeout(fn, undefined, t.timeoutSignal)("/bff/api/search?q=a", { signal: ctl.signal });
+    ctl.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("keeps the request's method, headers and body", async () => {
+    const t = manualTimeout();
+    const seen: RequestInit[] = [];
+    const fn = vi.fn(async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+      seen.push(init);
+      return json({ ok: 1 });
+    }) as unknown as typeof fetch;
+    await withTimeout(fn, 5, t.timeoutSignal)("/x", { method: "POST", headers: { "x-potem": "1" }, body: "b" });
+    expect(t.made).toEqual([5]);
+    expect(seen[0]).toMatchObject({ method: "POST", headers: { "x-potem": "1" }, body: "b" });
+    expect(seen[0]!.signal).toBeInstanceOf(AbortSignal);
   });
 });

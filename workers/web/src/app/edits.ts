@@ -36,7 +36,8 @@ export interface Edits {
   removeStep(stepSid: string): void;
 }
 
-type Enqueue = Pick<Outbox, "enqueue">;
+// The outbox, or a wrapper that drops the edit (after sign-out).
+type Enqueue = { enqueue(m: Parameters<Outbox["enqueue"]>[0]): unknown };
 type Store = Pick<MirrorStore, "task" | "baseTask" | "lists">;
 
 /** The sid of the list whose wellknown is defaultList, or null before the lists load. */

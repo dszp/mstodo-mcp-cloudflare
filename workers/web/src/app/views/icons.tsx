@@ -132,3 +132,24 @@ export const SearchIcon = (p: P) => (
     <path d="m20 20-4.2-4.2" />
   </Svg>
 );
+
+export const XIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
+  </Svg>
+);
+export const PlusIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M12 5v14M5 12h14" />
+  </Svg>
+);
+export const TrashIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M4.5 7h15M10 4h4M6.5 7l1 12.5a1.5 1.5 0 0 0 1.5 1.5h6a1.5 1.5 0 0 0 1.5-1.5l1-12.5M10 11v6M14 11v6" />
+  </Svg>
+);
+export const PencilIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M15.5 5.5l3 3L8 19H5v-3zM13.5 7.5l3 3" />
+  </Svg>
+);
