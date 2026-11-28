@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { caretFromClick, focusAt } from "../caret.ts";
 import { EditSession } from "../edit-session.ts";
 import { titleEdit } from "../model.ts";
 
@@ -44,6 +45,13 @@ export function EditableText({
   const session = useEditSession(titleEdit, onCommit);
   const refocus = useRef(false);
   const button = useRef<HTMLButtonElement>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
+  // Where the click landed in the text, so the caret goes there (null: the end).
+  const caret = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (editing && box.current) focusAt(box.current, caret.current);
+  }, [editing]);
 
   useEffect(() => {
     if (!editing && refocus.current) {
@@ -68,7 +76,8 @@ export function EditableText({
         type="button"
         className={`editable${className ? ` ${className}` : ""}`}
         aria-label={`${label}: ${value}`}
-        onClick={() => {
+        onClick={(e) => {
+          caret.current = caretFromClick(e.nativeEvent, e.currentTarget);
           session.open(value);
           setEditing(true);
         }}
@@ -83,8 +92,7 @@ export function EditableText({
       aria-label={label}
       defaultValue={value}
       rows={1}
-      autoFocus
-      onFocus={(e) => e.currentTarget.select()}
+      ref={box}
       onChange={(e) => session.type(e.currentTarget.value)}
       onKeyDown={(e) => {
         if (e.key === "Enter" && !e.nativeEvent.isComposing) {
