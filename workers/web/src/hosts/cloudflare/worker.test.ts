@@ -11,7 +11,8 @@ const SERVER = "https://server.example.com";
 const SECRET = "test-secret-test-secret-test-secret-0123";
 
 const CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; " +
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+  "connect-src 'self' wss://web.example.com; " +
   `frame-ancestors 'none'; base-uri 'none'; form-action 'self' ${SERVER}`;
 /** HSTS for the web host only: no includeSubDomains or preload (the zone holds other hosts). */
 const HSTS = "max-age=31536000";

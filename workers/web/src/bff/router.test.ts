@@ -9,7 +9,8 @@ const SERVER = "https://server.example.com";
 const SECRET = "test-secret-test-secret-test-secret-0123";
 
 const CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; " +
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+  "connect-src 'self' wss://web.example.com; " +
   `frame-ancestors 'none'; base-uri 'none'; form-action 'self' ${SERVER}`;
 
 let server: TestServer;
@@ -170,6 +171,11 @@ describe("withSecurityHeaders", () => {
       expectSecurityHeaders(res, String(status), true, API_CSP);
       expect(res.headers.get("cross-origin-resource-policy")).toBe("same-origin");
     }
+  });
+
+  it("allows the push socket's own origin in connect-src: ws:// for a loopback http web origin", () => {
+    const res = withSecurityHeaders(new Response(""), { ...cfg, webOrigin: "http://localhost:8787" }, "/index.html");
+    expect(res.headers.get("content-security-policy")).toContain("connect-src 'self' ws://localhost:8787;");
   });
 
   it("adds every header to an asset response, without no-store, and keeps its own headers", async () => {
