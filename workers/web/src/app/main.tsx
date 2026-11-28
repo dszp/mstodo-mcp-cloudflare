@@ -3,6 +3,7 @@ import "./styles.css";
 import { MirrorStore } from "../sync/store.ts";
 import { App, AppContext, type AppDeps } from "./App.tsx";
 import { createBffFetch, withTimeout } from "./api.ts";
+import { dirtyEditors } from "./edit-session.ts";
 import { createEditing } from "./editing.ts";
 import { createLoader } from "./loader.ts";
 import { createSessionClient } from "./session.ts";
@@ -28,10 +29,11 @@ try {
 // Created before the app renders: its sign-out listener must run before the
 // app's, so the signed-out screen can show how many edits were not sent.
 const editing = createEditing({ bff, store, loader, session, storage });
-// Closing or reloading the tab while edits wait to be sent asks first: the
-// outbox lives in memory only.
+// Closing or reloading the tab while edits wait to be sent, or while an edit
+// box holds a change it hasn't saved, asks first: the outbox lives in memory
+// only, and unloading doesn't unmount the boxes, so they can't save.
 window.addEventListener("beforeunload", (e) => {
-  if (editing.outbox.unsent().length === 0) return;
+  if (editing.outbox.unsent().length === 0 && !dirtyEditors.any()) return;
   e.preventDefault();
   e.returnValue = "";
 });

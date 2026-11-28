@@ -172,11 +172,17 @@ export type DateCommit = { kind: "none" } | { kind: "clear" } | { kind: "set"; v
 /**
  * What closing a date input saves. `current` is the saved value (as `read`
  * returns it) or null; `read` turns the input's value into that form, or null.
- * An empty input (the native clear) clears; a partial or unreadable one, or
- * one equal to `current`, saves nothing.
+ * An empty input (the native clear) clears, unless `badInput` (the input's
+ * validity.badInput) says the browser is holding a partly cleared value; a
+ * partial or unreadable one, or one equal to `current`, saves nothing.
  */
-export function dateInputCommit(draft: string, current: string | null, read: (v: string) => string | null): DateCommit {
-  if (draft === "") return current === null ? { kind: "none" } : { kind: "clear" };
+export function dateInputCommit(
+  draft: string,
+  current: string | null,
+  read: (v: string) => string | null,
+  badInput = false,
+): DateCommit {
+  if (draft === "") return current === null || badInput ? { kind: "none" } : { kind: "clear" };
   const value = wholeDate(draft) ? read(draft) : null;
   if (value === null || value === current) return { kind: "none" };
   return { kind: "set", value };

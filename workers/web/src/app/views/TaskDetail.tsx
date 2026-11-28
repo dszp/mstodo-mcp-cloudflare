@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { MirrorStore, MirrorTask } from "../../sync/store.ts";
+import { DateEntry } from "../edit-session.ts";
 import type { Edits } from "../edits.ts";
 import {
   accentOf,
@@ -8,7 +9,6 @@ import {
   dateLabel,
   describeRecurrence,
   instantLabel,
-  dateInputCommit,
   moveTargets,
   neighborAfterRemoval,
   noteEdit,
@@ -24,7 +24,7 @@ import {
 import { useStoreKey } from "../use-store.ts";
 import { AddTask } from "./AddTask.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
-import { EditableText } from "./EditableText.tsx";
+import { EditableText, useEditSession } from "./EditableText.tsx";
 import {
   BackIcon,
   BellIcon,
@@ -355,9 +355,10 @@ export function TaskDetail({
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 /**
- * A date or datetime-local input that saves when it is left or on Enter,
- * never while a value is typed: `dateInputCommit` decides what to save, and
- * an empty input (the native clear) clears. A draft it won't save is put back
+ * A date or datetime-local input. A whole, changed value saves 600 ms after
+ * it is picked or typed, and at once when the input is left, on Enter, or
+ * when it unmounts (DateEntry); an emptied field (the native clear) clears on
+ * leave or Enter, while a partly cleared one (validity.badInput) is put back
  * to the saved value. `read` turns the input's value into the saved form.
  */
 function DateInput({
@@ -382,11 +383,15 @@ function DateInput({
     setPrev(shown);
     setDraft(shown);
   }
-  const commit = (value: string) => {
-    const c = dateInputCommit(value, current, read);
-    if (c.kind === "set") onChange(c.value);
-    else if (c.kind === "clear") onChange(null);
-    else setDraft(shown);
+  const entry = useRef<DateEntry | null>(null);
+  entry.current ??= new DateEntry(platformSchedule);
+  entry.current.sync(current, read, onChange);
+  useEffect(() => {
+    const e = entry.current!;
+    return () => e.close();
+  }, []);
+  const commit = () => {
+    if (!entry.current!.commit()) setDraft(shown);
   };
   return (
     <input
@@ -394,17 +399,25 @@ function DateInput({
       className="date-input"
       aria-label={label}
       value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={(e) => commit(e.currentTarget.value)}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        entry.current!.change(e.target.value, e.target.validity.badInput);
+      }}
+      onBlur={commit}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          commit(e.currentTarget.value);
+          commit();
         }
       }}
     />
   );
 }
+
+const platformSchedule = (fn: () => void, ms: number) => {
+  const t = setTimeout(fn, ms);
+  return () => clearTimeout(t);
+};
 
 /** The reminder: a datetime-local input in the browser's zone, and Clear. */
 function ReminderRow({ at, onChange }: { at: string | null; onChange: (instant: string | null) => void }) {
@@ -463,22 +476,22 @@ function DueRow({
 /**
  * A plain-text note. It shows as text (with its links) until pressed; then a
  * text box. Leaving the box or Ctrl/Cmd-Enter saves it; Escape puts back the
- * note as it was. Nothing is sent while typing.
+ * note as it was. Nothing is sent while typing. The save compares with the
+ * note the box opened with, and unmounting with the box open saves too
+ * (EditSession).
  */
 function NoteEditor({ text, onSave }: { text: string; onSave: (text: string) => void }) {
   const [editing, setEditing] = useState(false);
+  const session = useEditSession(noteEdit, onSave);
   // Ctrl/Cmd-Enter and Escape end the edit, then the box unmounts and may
-  // blur: this keeps that blur from saving again.
-  const finished = useRef(false);
-  const finish = (save: boolean, value: string) => {
-    if (finished.current) return;
-    finished.current = true;
+  // blur: the session saves only on the first finish.
+  const finish = (save: boolean, value?: string) => {
+    if (!session.isOpen) return;
     setEditing(false);
-    const next = save ? noteEdit(text, value) : null;
-    if (next !== null) onSave(next);
+    session.finish(save, value);
   };
   const start = () => {
-    finished.current = false;
+    session.open(text);
     setEditing(true);
   };
 
@@ -497,9 +510,10 @@ function NoteEditor({ text, onSave }: { text: string; onSave: (text: string) => 
               finish(true, e.currentTarget.value);
             } else if (e.key === "Escape") {
               e.preventDefault();
-              finish(false, "");
+              finish(false);
             }
           }}
+          onChange={(e) => session.type(e.currentTarget.value)}
           onBlur={(e) => finish(true, e.currentTarget.value)}
         />
       </section>

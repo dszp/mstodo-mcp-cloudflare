@@ -1,13 +1,32 @@
 import { useEffect, useRef, useState } from "react";
+import { EditSession } from "../edit-session.ts";
 import { titleEdit } from "../model.ts";
 
 /**
+ * An EditSession for one box, kept across renders: it saves what was typed
+ * when the component unmounts with the box open (EditSession explains why it
+ * compares with the text the box opened with).
+ */
+export function useEditSession(decide: (original: string, typed: string) => string | null, onCommit: (text: string) => void): EditSession {
+  const session = useRef<EditSession | null>(null);
+  session.current ??= new EditSession(decide);
+  session.current.onCommit = onCommit;
+  useEffect(() => {
+    const s = session.current!;
+    return () => s.close();
+  }, []);
+  return session.current;
+}
+
+/**
  * Text that edits in place: a button showing `value`; pressed, it becomes a
- * text box. Enter or leaving the box saves; Escape puts the text back. Saving
- * calls `onCommit` once, with the text on one line and trimmed, and only when
- * it isn't blank and differs from `value` put the same way (titleEdit), so
- * opening and leaving the box sends nothing. Each edit re-filters the whole
- * mirror (the overlay), so nothing is sent per keystroke.
+ * text box. Enter or leaving the box saves; Escape puts the text back.
+ * Saving calls `onCommit` once, with the text on one line and trimmed, and
+ * only when it isn't blank and differs from the text the box opened with
+ * (titleEdit), so opening and leaving the box sends nothing, even if the
+ * title changed elsewhere meanwhile. Unmounting with the box open saves too.
+ * Each edit re-filters the whole mirror (the overlay), so nothing is sent per
+ * keystroke.
  */
 export function EditableText({
   value,
@@ -22,9 +41,7 @@ export function EditableText({
   className?: string;
 }) {
   const [editing, setEditing] = useState(false);
-  // Enter and Escape end the edit, then the box unmounts and may blur:
-  // `finished` keeps that blur from saving a second time.
-  const finished = useRef(false);
+  const session = useEditSession(titleEdit, onCommit);
   const refocus = useRef(false);
   const button = useRef<HTMLButtonElement>(null);
 
@@ -35,13 +52,13 @@ export function EditableText({
     }
   }, [editing]);
 
-  const finish = (save: boolean, text: string, fromKey: boolean) => {
-    if (finished.current) return;
-    finished.current = true;
+  // Enter and Escape end the edit, then the box unmounts and may blur: the
+  // session saves only on the first finish.
+  const finish = (save: boolean, text: string | undefined, fromKey: boolean) => {
+    if (!session.isOpen) return;
     refocus.current = fromKey;
     setEditing(false);
-    const next = save ? titleEdit(value, text) : null;
-    if (next !== null) onCommit(next);
+    session.finish(save, text);
   };
 
   if (!editing) {
@@ -52,7 +69,7 @@ export function EditableText({
         className={`editable${className ? ` ${className}` : ""}`}
         aria-label={`${label}: ${value}`}
         onClick={() => {
-          finished.current = false;
+          session.open(value);
           setEditing(true);
         }}
       >
@@ -68,13 +85,14 @@ export function EditableText({
       rows={1}
       autoFocus
       onFocus={(e) => e.currentTarget.select()}
+      onChange={(e) => session.type(e.currentTarget.value)}
       onKeyDown={(e) => {
         if (e.key === "Enter" && !e.nativeEvent.isComposing) {
           e.preventDefault();
           finish(true, e.currentTarget.value, true);
         } else if (e.key === "Escape") {
           e.preventDefault();
-          finish(false, "", true);
+          finish(false, undefined, true);
         }
       }}
       onBlur={(e) => finish(true, e.currentTarget.value, false)}
