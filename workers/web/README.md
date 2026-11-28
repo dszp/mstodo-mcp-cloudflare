@@ -1,13 +1,13 @@
 # Potem web client
 
-A read-only web app for Potem, served by its own Cloudflare Worker. Setup and deployment are in
+A web app for Potem that reads and edits tasks, served by its own Cloudflare Worker. Setup and deployment are in
 the repository's [DEPLOYMENT.md](../../DEPLOYMENT.md#web-client); the API it reads is
 [docs/SYNC-API.md](../../docs/SYNC-API.md).
 
 | Folder | Holds |
 |---|---|
 | `src/sync` | The sync engine: in-memory mirror, change-feed pull, smart lists, local search. No DOM or framework. |
-| `src/bff` | The backend-for-frontend: sealed cookies, OAuth sign-in, the session endpoints and the read-only API proxy. Host-independent. |
+| `src/bff` | The backend-for-frontend: sealed cookies, OAuth sign-in, the session endpoints and the API proxy: reads, and the one write route, `POST sync/mutations`. Host-independent. |
 | `src/hosts/cloudflare` | The Worker: reads the bindings, checks the configuration, routes to the BFF or the assets. |
 | `src/app` | The React app. |
 | `spike` | An earlier demo that renders a synthetic feed (`pnpm run web:spike`). |
@@ -27,7 +27,7 @@ pnpm exec tsc --noEmit -p workers/web/tsconfig.engine.json   # typecheck the eng
 ```
 
 `web:dev` and `vite preview` answer `/bff/*` and `/auth/*` from a fake BFF
-(`src/app/dev/fake-bff.ts`) with made-up data, so they need no server and no sign-in. Use
+(`src/app/dev/fake-bff.ts`) with made-up data, so they need no server and no sign-in. The fake BFF applies edits too, so you can edit tasks locally. Use
 `vite preview` to check the production build (`http://127.0.0.1:4173`).
 
 The real Worker and BFF don't run locally against a server: the Worker answers `421` to any

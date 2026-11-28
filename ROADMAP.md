@@ -554,8 +554,18 @@ in `workers/web/spike` that renders a synthetic feed. The web client's milestone
 is built: a Worker (`workers/web/src/hosts/cloudflare`), a backend-for-frontend that signs in to the
 server as an OAuth client and proxies an allowlist of `GET` requests (`workers/web/src/bff`), and a
 React app with the sidebar, smart lists, lists, task detail and search (`workers/web/src/app`), plus
-a `web` deployment kind. Deploying it is a separate step; see DEPLOYMENT.md, "Web client". Next:
-edits (milestone 3), push updates, a persistent mirror with an installable PWA, and a Node host.
+a `web` deployment kind. Deploying it is a separate step; see DEPLOYMENT.md, "Web client". Milestone 3a (task
+edits) is built: titles, notes, dates, importance, steps, completion and My Day, sent as sync
+mutations through an outbox. Next, 3b: lists and groups, drag reorder, uploads and the repeat
+editor; then push updates, a persistent mirror with an installable PWA, and a Node host.
+
+**Dated updates above an HTML note (web client, later idea from the owner).** A task whose note
+is HTML, such as a flagged email, is read-only in the web client. This adds a plain-text section
+above the HTML for dated updates and leaves the HTML itself untouched. The client sends an
+`html` body made of a marked block of escaped text followed by the original HTML, unchanged.
+Risk: the body is one field and the newest whole value wins (SYNC-API section 6), so the client
+must build it from the freshest copy of the body, and an edit made elsewhere at the same time
+can be overwritten.
 
 **Search text out of URLs (web client, later).** Today the search text is part of the page URL
 (`/search?q=…`) and of the request the page sends (`/bff/api/search?q=…`). So it stays in the

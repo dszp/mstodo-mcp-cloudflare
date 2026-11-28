@@ -385,10 +385,14 @@ team ID) and `APPLE_BUNDLE_IDS` (comma-separated bundle IDs). Unset, the path is
 ## Web client
 
 The web client is a second Worker, `workers/web`, that serves the Potem web app and signs in to
-your server on your behalf. It is read-only: it shows lists, tasks, task detail and search, and
-changes nothing on the server. The browser never holds a Microsoft or server token. The Worker
-keeps the tokens in a sealed, HttpOnly cookie and forwards a fixed set of `GET` requests to the
-server's sync API.
+your server on your behalf. It shows lists, tasks, task detail and search, and edits tasks: titles,
+notes, dates, importance, steps, completion and My Day. Edits go to the server's sync API
+through one `POST` route, `/bff/api/sync/mutations`, and the page asks before you close a tab
+with unsent edits. Signing out discards unsent edits. A task whose note is HTML is read-only in
+the web client; edit it in the app. The browser never holds a Microsoft or server token. The Worker
+keeps the tokens in a sealed, HttpOnly cookie and forwards a fixed set of `GET` requests, and
+that one `POST`, to the server's sync API. Editing needs no new variable, secret or binding: a
+web deployment that already works edits after you deploy this version.
 
 **Before you start**
 

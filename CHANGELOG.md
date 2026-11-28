@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The web client edits tasks** (milestone 3a): titles, notes, dates, importance, steps,
+  completion and My Day. Edits queue in an outbox and go to the server as sync mutations through
+  `POST /bff/api/sync/mutations`, the BFF's one write route. A task with an HTML note stays
+  read-only.
 - **Web client Worker, read-only** (`workers/web`): a backend-for-frontend that signs in to the
   server as its own OAuth client (tokens stay in a sealed cookie) and proxies an allowlist of
   `GET` requests, and a React app with smart lists, lists, task detail and search. Setup is in
