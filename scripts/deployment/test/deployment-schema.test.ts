@@ -66,6 +66,7 @@ describe("parseDeploymentFile", () => {
     const d = parseDeploymentFile(src, "f", "t");
     expect(d).toEqual({
       name: "t",
+      kind: "server",
       account_id: ACCOUNT,
       worker_name: "potem-test",
       base_url: "https://todo.example.test",
@@ -114,6 +115,63 @@ describe("parseDeploymentFile", () => {
       expect(r.message).not.toContain("\n");
     });
   }
+
+  describe("kind", () => {
+    const web = {
+      account_id: ACCOUNT,
+      worker_name: "potem-web-test",
+      base_url: "https://web.example.test",
+      workers_dev: false,
+      preview_urls: false,
+      vars: { SERVER_ORIGIN: "https://todo.example.test" },
+    };
+
+    it("defaults to server and accepts kind: server", () => {
+      expect(parse(valid).kind).toBe("server");
+      expect(parse({ ...valid, kind: "server" }).kind).toBe("server");
+    });
+
+    it("accepts kind: web with no kv or r2, and returns them empty", () => {
+      const d = parse({ ...web, kind: "web" });
+      expect(d.kind).toBe("web");
+      expect(d.kv).toEqual({});
+      expect(d.r2).toEqual({});
+      expect(d.server_service).toBeUndefined();
+    });
+
+    it("accepts empty kv and r2 objects for web", () => {
+      expect(parse({ ...web, kind: "web", kv: {}, r2: {} }).kind).toBe("web");
+    });
+
+    it("keeps server_service for web", () => {
+      expect(parse({ ...web, kind: "web", server_service: "potem-server" }).server_service).toBe("potem-server");
+    });
+
+    const refusals: [string, object, string][] = [
+      ["a kind that is neither server nor web", { ...valid, kind: "other" }, "kind"],
+      ["a non-string kind", { ...valid, kind: 1 }, "kind"],
+      ["a kv entry on a web file", { ...web, kind: "web", kv: { OAUTH_KV: "kv-id" } }, "kv"],
+      ["an r2 entry on a web file", { ...web, kind: "web", r2: { BLOBS: null } }, "r2"],
+      ["server_service on a server file", { ...valid, server_service: "potem-server" }, "server_service"],
+      ["a server_service equal to worker_name", { ...web, kind: "web", server_service: "potem-web-test" }, "server_service"],
+      ["a server_service that is not a Worker name", { ...web, kind: "web", server_service: "Not A Name" }, "server_service"],
+      ["a web file without SERVER_ORIGIN", { ...web, kind: "web", vars: {} }, "vars.SERVER_ORIGIN"],
+      ["a web file without vars", { ...web, kind: "web", vars: undefined }, "vars.SERVER_ORIGIN"],
+      ["a SERVER_ORIGIN that is not an https origin", { ...web, kind: "web", vars: { SERVER_ORIGIN: "http://todo.example.test" } }, "vars.SERVER_ORIGIN"],
+      ["a SERVER_ORIGIN with a path", { ...web, kind: "web", vars: { SERVER_ORIGIN: "https://todo.example.test/app" } }, "vars.SERVER_ORIGIN"],
+      ["a SERVER_ORIGIN with a trailing slash", { ...web, kind: "web", vars: { SERVER_ORIGIN: "https://todo.example.test/" } }, "vars.SERVER_ORIGIN"],
+      ["a SERVER_ORIGIN with a port", { ...web, kind: "web", vars: { SERVER_ORIGIN: "https://todo.example.test:8443" } }, "vars.SERVER_ORIGIN"],
+      ["WEB_ORIGIN in vars", { ...web, kind: "web", vars: { ...web.vars, WEB_ORIGIN: "https://web.example.test" } }, "vars.WEB_ORIGIN"],
+      ["a missing kv on a server file", { ...without("kv"), kind: "server" }, "kv"],
+    ];
+    for (const [label, input, field] of refusals) {
+      it(`refuses ${label}`, () => {
+        const r = refusal(() => parse(input));
+        expect(r.field).toBe(field);
+        expect(r.message).toContain(field);
+      });
+    }
+  });
 
   it("refuses a file that is not an object", () => {
     expect(refusal(() => parseDeploymentFile("[]", "f", "t")).field).toBe("(root)");

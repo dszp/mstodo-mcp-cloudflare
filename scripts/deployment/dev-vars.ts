@@ -1,6 +1,6 @@
 import { chmodSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { DeploymentRefusal, deploymentPaths } from "./schema.ts";
+import { DeploymentRefusal, deploymentPaths, type DeploymentKind } from "./schema.ts";
 import type { Runner } from "./runner.ts";
 
 // Keep in sync with .dev.vars.example.
@@ -11,6 +11,11 @@ export const SECRET_NAMES: readonly string[] = [
   "OWNER_EMAIL",
   "OWNER_OBJECT_ID",
 ];
+
+// The web client Worker has one secret: the key its session cookies are sealed with.
+const WEB_SECRET_NAMES: readonly string[] = ["WEB_SESSION_SECRET"];
+
+export const secretNames = (kind: DeploymentKind): readonly string[] => (kind === "web" ? WEB_SECRET_NAMES : SECRET_NAMES);
 
 // Value after the first `=` on the first line that starts with `NAME=`. CRLF is
 // tolerated and one pair of matching surrounding quotes is stripped, matching

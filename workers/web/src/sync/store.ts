@@ -20,12 +20,20 @@ export class MirrorStore {
   #groupArr: readonly MirrorGroup[] | null = null;
   #versions = new Map<string, number>();
   #subs = new Map<string, Set<() => void>>();
+  #sealed = false;
 
   static #k(key: StoreKey): string {
     return typeof key === "string" ? key : `task:${key.task}`;
   }
 
-  applyPage(changes: readonly FeedChange[]): void {
+  /**
+   * Applies one page. Returns false, changing nothing, once the store is
+   * sealed: a page still in flight when the session ended is dropped quietly
+   * rather than thrown, because whoever sealed the store has already shown
+   * the signed-out state and the page's caller has nothing useful to do.
+   */
+  applyPage(changes: readonly FeedChange[]): boolean {
+    if (this.#sealed) return false;
     const dirty = new Set<string>();
     for (const c of changes) {
       switch (c.kind) {
@@ -54,6 +62,17 @@ export class MirrorStore {
       }
     }
     this.#notify(dirty);
+    return true;
+  }
+
+  /**
+   * Refuses every later page; clear() still works. The page seals the store
+   * when the session ends, so a response that lands afterwards can't refill
+   * it. There is no unseal: signing in again is a navigation to /auth/login,
+   * which loads a fresh page with a fresh store.
+   */
+  seal(): void {
+    this.#sealed = true;
   }
 
   clear(): void {

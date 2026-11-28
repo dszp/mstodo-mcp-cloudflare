@@ -18,6 +18,7 @@ const ACCOUNT = "0123456789abcdef0123456789abcdef";
 const OTHER_ACCOUNT = "fedcba9876543210fedcba9876543210";
 const dep = (over: Partial<DeploymentFile> = {}): DeploymentFile => ({
   name: "alpha",
+  kind: "server",
   account_id: ACCOUNT,
   worker_name: "example-alpha",
   base_url: "https://example-alpha.acct.workers.dev",
@@ -128,6 +129,19 @@ describe("checkBaseUrl", () => {
 describe("checkCrossFiles", () => {
   it("passes for two distinct deployments", () => {
     expect(() => checkCrossFiles(dep(), others(beta()))).not.toThrow();
+  });
+
+  it("refuses a web deployment that shares a base_url with a server deployment", () => {
+    const web = dep({ kind: "web", kv: {}, r2: {}, worker_name: "example-alpha-web" });
+    const r = refusal(() => checkCrossFiles(web, others(beta({ base_url: web.base_url }))));
+    expect(r.field).toBe("base_url");
+  });
+
+  it("lets two web deployments with no bindings coexist", () => {
+    const web = (over: Partial<DeploymentFile>) => dep({ kind: "web", kv: {}, r2: {}, ...over });
+    expect(() =>
+      checkCrossFiles(web({}), others(web({ name: "beta", worker_name: "example-beta", base_url: "https://example-beta.acct.workers.dev" }))),
+    ).not.toThrow();
   });
 
   it("skips the deployment itself", () => {

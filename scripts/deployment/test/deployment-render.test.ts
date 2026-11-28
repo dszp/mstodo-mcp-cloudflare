@@ -9,7 +9,17 @@ import {
   parseJsonc,
   type DeploymentFile,
 } from "../schema.ts";
-import { findPlaceholders, loadAndRender, removeRender, renderConfig, writeRender, type WranglerConfig } from "../render.ts";
+import {
+  SERVER_EXAMPLE,
+  WEB_EXAMPLE,
+  exampleFor,
+  findPlaceholders,
+  loadAndRender,
+  removeRender,
+  renderConfig,
+  writeRender,
+  type WranglerConfig,
+} from "../render.ts";
 
 const repoRoot = new URL("../../../", import.meta.url).pathname.replace(/\/$/, "");
 const exampleText = readFileSync(join(repoRoot, "workers/server/wrangler.example.jsonc"), "utf8");
@@ -160,6 +170,101 @@ describe("findPlaceholders", () => {
     expect(found).toContain("account_id");
     expect(found).toContain("kv_namespaces[0].id");
     expect(found).toContain("kv_namespaces[1].id");
+  });
+});
+
+const webExampleText = readFileSync(join(repoRoot, "workers/web/wrangler.example.jsonc"), "utf8");
+const webExample = () => parseJsonc(webExampleText, "workers/web/wrangler.example.jsonc") as WranglerConfig;
+const webDep = (over: Partial<DeploymentFile> = {}): DeploymentFile => ({
+  name: "fixture",
+  kind: "web",
+  account_id: "0123456789abcdef0123456789abcdef",
+  worker_name: "example-potem-web",
+  base_url: "https://example-potem-web.example.workers.dev",
+  workers_dev: true,
+  preview_urls: false,
+  custom_domains: [],
+  kv: {},
+  r2: {},
+  vars: { SERVER_ORIGIN: "https://example-potem.example.workers.dev" },
+  ...over,
+});
+const renderWeb = (dep: DeploymentFile = webDep()) => renderConfig(webExample(), dep, opts);
+
+describe("exampleFor", () => {
+  it("names the example each kind renders from", () => {
+    expect(exampleFor("server")).toBe(SERVER_EXAMPLE);
+    expect(exampleFor("web")).toBe(WEB_EXAMPLE);
+    expect(WEB_EXAMPLE).toBe("workers/web/wrangler.example.jsonc");
+  });
+});
+
+describe("renderConfig for a web deployment", () => {
+  it("resolves main and assets.directory against the web example's directory", () => {
+    const out = renderWeb();
+    expect(resolve(opts.renderDir, out.main as string)).toBe(join(repoRoot, "workers/web/src/hosts/cloudflare/worker.ts"));
+    const assets = out.assets as Record<string, unknown>;
+    expect(resolve(opts.renderDir, assets.directory as string)).toBe(join(repoRoot, "workers/web/dist"));
+    expect(assets.binding).toBe("ASSETS");
+    expect(assets.run_worker_first).toBe(true);
+  });
+
+  it("points $schema at wrangler's schema from the render directory", () => {
+    const out = renderWeb();
+    expect(resolve(opts.renderDir, out.$schema as string)).toBe(join(repoRoot, "node_modules/wrangler/config-schema.json"));
+  });
+
+  it("sets WEB_ORIGIN from base_url and leaves no SERVICE_BASE_URL", () => {
+    const vars = renderWeb().vars as Record<string, string>;
+    expect(vars.WEB_ORIGIN).toBe("https://example-potem-web.example.workers.dev");
+    expect("SERVICE_BASE_URL" in vars).toBe(false);
+    expect(vars.SERVER_ORIGIN).toBe("https://example-potem.example.workers.dev");
+    expect(vars.WEB_SESSION_MAX_HOURS).toBe("12");
+  });
+
+  it("carries the identity fields and no KV or R2 bindings", () => {
+    const out = renderWeb();
+    expect(out.name).toBe("example-potem-web");
+    expect(out.account_id).toBe("0123456789abcdef0123456789abcdef");
+    expect("kv_namespaces" in out).toBe(false);
+    expect("r2_buckets" in out).toBe(false);
+  });
+
+  it("renders services only when server_service is set", () => {
+    expect("services" in renderWeb()).toBe(false);
+    expect(renderWeb(webDep({ server_service: "example-potem" })).services).toEqual([
+      { binding: "SERVER", service: "example-potem" },
+    ]);
+  });
+
+  it("keeps the build command, which wrangler runs from the repository root", () => {
+    expect((renderWeb().build as Record<string, unknown>).command).toBe("npm run web:build");
+  });
+
+  it("refuses a kv or r2 entry the web example has no binding for", () => {
+    expect(refusal(() => renderWeb(webDep({ kv: { OAUTH_KV: "id" } }))).field).toBe("kv.OAUTH_KV");
+    expect(refusal(() => renderWeb(webDep({ r2: { BLOBS: null } }))).field).toBe("r2.BLOBS");
+  });
+
+  it("leaves SERVER_ORIGIN as a placeholder when the deployment forgot it", () => {
+    const out = renderWeb(webDep({ vars: {} }));
+    expect(findPlaceholders(out)).toEqual(["vars.SERVER_ORIGIN"]);
+  });
+});
+
+describe("loadAndRender by kind", () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    for (const d of roots.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  it("reads the web example for a web deployment and refuses a forgotten SERVER_ORIGIN", () => {
+    const root = mkdtempSync(join(tmpdir(), "potem-render-web-"));
+    roots.push(root);
+    mkdirSync(join(root, "workers/web"), { recursive: true });
+    writeFileSync(join(root, "workers/web/wrangler.example.jsonc"), webExampleText);
+    expect(loadAndRender(root, webDep({ name: "scratch" })).name).toBe("example-potem-web");
+    const r = refusal(() => loadAndRender(root, webDep({ name: "scratch", vars: {} })));
+    expect(r.field).toBe("vars.SERVER_ORIGIN");
   });
 });
 

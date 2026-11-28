@@ -1,0 +1,25 @@
+import { createRoot } from "react-dom/client";
+import "./styles.css";
+import { MirrorStore } from "../sync/store.ts";
+import { App, AppContext, type AppDeps } from "./App.tsx";
+import { createBffFetch } from "./api.ts";
+import { createLoader } from "./loader.ts";
+import { createSessionClient } from "./session.ts";
+import { ErrorBoundary } from "./views/ErrorBoundary.tsx";
+
+// One mirror, session and loader per page. The mirror lives only in memory: a
+// reload pulls again, and the session's data_key is not used yet.
+const fetchFn: typeof fetch = (input, init) => fetch(input, init);
+const store = new MirrorStore();
+const session = createSessionClient(fetchFn, { store });
+const bff = createBffFetch(fetchFn, session);
+const loader = createLoader(bff, store, session);
+const deps: AppDeps = { store, session, loader, bff };
+
+createRoot(document.getElementById("root")!).render(
+  <ErrorBoundary onSignOut={() => session.logout()} onReload={() => window.location.reload()}>
+    <AppContext.Provider value={deps}>
+      <App />
+    </AppContext.Provider>
+  </ErrorBoundary>,
+);

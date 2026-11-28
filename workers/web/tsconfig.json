@@ -6,5 +6,5 @@
     "types": [],
     "paths": { "@potem/core/*": ["../../packages/core/*"] }
   },
-  "include": ["src/**/*", "spike/**/*"]
+  "include": ["src/**/*", "spike/**/*", "build.test.ts", "vite.config.ts"]
 }

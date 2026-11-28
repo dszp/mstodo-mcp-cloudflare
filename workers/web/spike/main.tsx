@@ -31,8 +31,9 @@ async function main(): Promise<void> {
   const realApply = store.applyPage.bind(store);
   store.applyPage = (changes) => {
     const t0 = performance.now();
-    realApply(changes);
+    const applied = realApply(changes);
     applyMs += performance.now() - t0;
+    return applied;
   };
 
   // One-task change through applyPage, for the render-count probe.

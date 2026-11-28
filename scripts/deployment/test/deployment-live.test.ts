@@ -19,6 +19,7 @@ const TOKEN = "tok-SECRET-0123456789";
 
 const dep = (over: Partial<DeploymentFile> = {}): DeploymentFile => ({
   name: "alpha",
+  kind: "server",
   account_id: ACCOUNT,
   worker_name: "example-alpha",
   base_url: "https://example-alpha.acct.workers.dev",
@@ -78,6 +79,22 @@ describe("checkLiveWorker", () => {
       const r = await refusalOf(checkLiveWorker(api, dep(), { adopt: false }));
       expect(r.field).toBe("kv.OAUTH_KV");
       await expect(checkLiveWorker(api, dep(), { adopt: true })).resolves.toBeUndefined();
+    }
+  });
+
+  it("passes a web deployment whose live Worker has no KV bindings", async () => {
+    const api = stubApi({ getWorkerKv: async () => ({ found: true, kv: {} }) });
+    await expect(checkLiveWorker(api, dep({ kind: "web", kv: {} }), { adopt: false })).resolves.toBeUndefined();
+  });
+
+  it("refuses a web deployment whose live Worker has KV bindings (a server Worker), even with adopt", async () => {
+    const api = stubApi({ getWorkerKv: async () => ({ found: true, kv: { OAUTH_KV: KV_OTHER } }) });
+    for (const adopt of [false, true]) {
+      const r = await refusalOf(checkLiveWorker(api, dep({ kind: "web", kv: {} }), { adopt }));
+      expect(r.file).toBe("deployments/alpha/deployment.jsonc");
+      expect(r.field).toBe("worker_name");
+      expect(r.message).toContain("example-alpha");
+      expect(r.message).toContain("server Worker");
     }
   });
 

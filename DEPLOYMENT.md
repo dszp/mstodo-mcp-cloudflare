@@ -27,6 +27,7 @@ see [README.md](./README.md).
     - [9. Verify](#9-verify)
   - [Optional: custom domain](#optional-custom-domain)
   - [Optional: Cloudflare Access for the sync app](#optional-cloudflare-access-for-the-sync-app)
+  - [Web client](#web-client)
   - [Keeping sync cost down](#keeping-sync-cost-down)
   - [My Day support (optional)](#my-day-support-optional)
     - [What enabling My Day unlocks (and what it costs)](#what-enabling-my-day-unlocks-and-what-it-costs)
@@ -240,6 +241,9 @@ budget (shared across all apps in the tenant) is spoken for. (`todoTask` has no 
 per-resource cap: one subscription per list, e.g. ~38 here; if any tenant limit is ever hit, Graph
 returns `403` and that list quietly falls back to timer-only.)
 
+A deployment is a server unless `deployment.jsonc` says `"kind": "web"`, the web client Worker;
+[Web client](#web-client) describes that file, its secret and how to deploy it.
+
 The committed `workers/server/wrangler.example.jsonc` is the template for every deployment and what the test
 pool and CI read, so `npm test` works without any deployment. A new binding added there reaches
 every deployment on its next deploy, once the deployment file supplies its ID.
@@ -377,6 +381,97 @@ lists the steps under **Turning it on**.
 For the app's `https` sign-in callback, the Worker can also serve
 `/.well-known/apple-app-site-association`. Set `APPLE_TEAM_ID` (the 10-character Apple
 team ID) and `APPLE_BUNDLE_IDS` (comma-separated bundle IDs). Unset, the path is a 404.
+
+## Web client
+
+The web client is a second Worker, `workers/web`, that serves the Potem web app and signs in to
+your server on your behalf. It is read-only: it shows lists, tasks, task detail and search, and
+changes nothing on the server. The browser never holds a Microsoft or server token. The Worker
+keeps the tokens in a sealed, HttpOnly cookie and forwards a fixed set of `GET` requests to the
+server's sync API.
+
+**Before you start**
+
+- A deployed server (steps 1 to 9 above), reachable over https. The web Worker needs its origin.
+- A hostname for the web Worker, for example `todo-web.example.com`, on a zone in your Cloudflare
+  account. The cookies are bound to that exact host, so use one hostname only. The Worker sends
+  `Strict-Transport-Security: max-age=31536000` for that host only (no `includeSubDomains` or
+  `preload`), so browsers that have visited it refuse plain http to it for a year.
+- Optional: put Cloudflare Access in front of that hostname as a second gate. Add a bypass
+  policy for `/robots.txt` so crawlers see the Worker's `Disallow: /`.
+
+**Describe the deployment**
+
+Create `deployments/<name>/deployment.jsonc` with `"kind": "web"`. A web deployment has no `kv`
+or `r2` (leave them out), and `base_url` becomes the Worker's own origin:
+
+```jsonc
+{
+  "kind": "web",
+  "account_id": "00000000000000000000000000000000",
+  "worker_name": "potem-web",
+  "base_url": "https://todo-web.example.com",
+  "workers_dev": false,
+  "preview_urls": false,
+  "custom_domains": ["todo-web.example.com"],
+  "vars": {
+    "SERVER_ORIGIN": "https://todo.example.com"
+  },
+  // Optional, same account only: the server Worker's name. The web Worker then
+  // reaches the server through a service binding instead of the public network.
+  "server_service": "potem-server"
+}
+```
+
+`SERVER_ORIGIN` is an https origin with no path or trailing slash. Two more vars are optional:
+`WEB_SESSION_MAX_HOURS` (default `12`) is the longest a sign-in lasts, and
+`WEB_SESSION_IDLE_MINUTES` (default `60`) is how long a browser can sit idle before it must
+sign in again. Both are positive whole numbers.
+
+**The secret**
+
+`WEB_SESSION_SECRET` seals the cookies. It must be at least 32 bytes; the Worker answers every
+request with `503` until it is. Generate one and put it in `deployments/<name>/.dev.vars`:
+
+```bash
+echo "WEB_SESSION_SECRET=$(openssl rand -base64 48)" >> deployments/<name>/.dev.vars
+```
+
+A value may also be an `op://` reference, as for the server's secrets. Changing the secret signs
+every browser out, because no cookie unseals under the new key.
+
+**Deploy**
+
+```bash
+npm run check -- <name>      # validates the file and reads the live Worker
+npm run deploy -- <name>     # builds the app; the first deploy asks you to confirm, in a terminal
+npm run secrets -- <name>    # pushes WEB_SESSION_SECRET; refuses until the Worker exists
+```
+
+Open the Worker's hostname. The first visit shows a signed-out page with a **Sign in** link.
+Select it to go to the server's consent page, which names the client "Potem Web" and shows the
+web hostname. Approve it, then sign in with Microsoft if asked. Each browser registers its own client with the server, so a second browser
+gets its own consent page and signing in there does not end the first one's session.
+
+**Signing out**
+
+Sign out in the app: it revokes that browser's grant on the server and clears the cookie.
+`revoke_all_connections` on the server changes the grant epoch, which every grant must match,
+so it also ends every web session; each browser's next request is refused and it signs in
+again.
+
+Without a sign-out, the cookie stops working at the session limits (`WEB_SESSION_MAX_HOURS`
+after sign-in, or `WEB_SESSION_IDLE_MINUTES` without use), and an open page signs itself out at
+the same moments. The grant on the server outlives the cookie: it lasts until its refresh token
+lapses, 14 days after the session's last refresh (30 days after sign-in if it was never
+refreshed), and the server refuses any grant more than 90 days after sign-in. Sign out to end
+it at once.
+
+**With Cloudflare Access on the web hostname**
+
+When the Access session for the web hostname expires, the page's requests to the Worker fail
+and the page shows its error screen. Reload the page: the reload goes through Access, which asks
+you to sign in again if its policy requires it.
 
 ## Keeping sync cost down
 

@@ -21,6 +21,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "leak-guard": "node scripts/leak-guard.ts",
+    "web:build": "vite build --config workers/web/vite.config.ts",
+    "web:dev": "vite --config workers/web/vite.config.ts",
     "web:spike": "vite --config workers/web/spike/vite.config.ts",
     "web:spike:prod": "vite build --config workers/web/spike/vite.config.ts && vite preview --config workers/web/spike/vite.config.ts"
   },

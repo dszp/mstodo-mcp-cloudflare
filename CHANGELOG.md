@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Web client Worker, read-only** (`workers/web`): a backend-for-frontend that signs in to the
+  server as its own OAuth client (tokens stay in a sealed cookie) and proxies an allowlist of
+  `GET` requests, and a React app with smart lists, lists, task detail and search. Setup is in
+  DEPLOYMENT.md, "Web client".
+- **`web` deployment kind**: `"kind": "web"` in `deployment.jsonc` renders
+  `workers/web/wrangler.example.jsonc`, with `vars.SERVER_ORIGIN` and an optional `server_service`
+  binding. `npm run secrets` pushes `WEB_SESSION_SECRET` for it.
+
 ## [0.19.1] – 2026-11-27
 
 ### Added

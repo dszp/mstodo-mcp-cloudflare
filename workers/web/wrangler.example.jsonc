@@ -1,0 +1,42 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "potem-web",
+
+  // The template the web client Worker is rendered from: a deployment with
+  // "kind": "web" in deployments/<name>/deployment.jsonc (gitignored) fills the
+  // account-specific values into .wrangler/deployments/<name>/rendered.json.
+  // Leave the placeholders as they are. The Worker has no KV, R2 or secrets
+  // bindings of its own; its one secret, WEB_SESSION_SECRET, is pushed with
+  // `npm run secrets -- <name>`.
+  "account_id": "<your-cloudflare-account-id>",
+  "main": "src/hosts/cloudflare/worker.ts",
+  "compatibility_date": "2026-05-01",
+
+  // The built client. The Worker runs first on every path so it can add the
+  // security headers to asset responses; the single-page-application fallback
+  // serves index.html for client-side routes. Wrangler runs the build command
+  // from the directory it is started in, which the deployment tool sets to the
+  // repository root: with no build.cwd the command runs in the process's working
+  // directory (node_modules/wrangler/wrangler-dist/cli.js: runCustomBuild passes
+  // build.cwd to runCommand at line 192705, which hands it to the spawn at line
+  // 192643 unchanged; the config's build.cwd is read at line 214702 with no
+  // default). Do not set "cwd" here.
+  "assets": {
+    "directory": "dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "build": { "command": "npm run web:build" },
+
+  // SERVER_ORIGIN is the https origin of the Potem server; set it under "vars"
+  // in the deployment file. WEB_ORIGIN is this Worker's own origin and comes
+  // from the deployment file's base_url, so it is not listed here.
+  "vars": {
+    "SERVER_ORIGIN": "<your-server-origin>",
+    "WEB_SESSION_MAX_HOURS": "12",
+    "WEB_SESSION_IDLE_MINUTES": "60"
+  },
+
+  "observability": { "enabled": true }
+}

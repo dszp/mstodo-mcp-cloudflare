@@ -792,7 +792,8 @@ A completed task in today's My Day stays in `my_day` and is shown under a
 
 The sidebar count is the number of open tasks in the list. For `completed` it is the
 number of tasks the list holds: completed tasks, limited by the same "completed since"
-date when the client applies one to the list.
+date when the client applies one to the list. A client may show no count for
+`completed`; the Apple apps don't.
 
 A completed task with no `completed_at` sorts last in `completed`, forms a final group
 of its own in the grouping below, and is left out when a "completed since" date is
@@ -1897,6 +1898,8 @@ These are cheap in migration v4 and expensive to retrofit, so they're built now:
 
 ## Revisions
 
+- 2026-11-27: section 4.10: a client may leave out the sidebar count for `completed`,
+  as the Apple apps do.
 - 2026-11-27: section 14.1: the authenticated `/sync/info` returns `timezone`, the owner's
   `TIMEZONE`, which section 4.10's "today" uses; its existing `cursor` field is documented.
   Section 4.2 states that `my_day.committed_day` is To Do's calendar date, unconverted.

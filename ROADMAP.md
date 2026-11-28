@@ -550,8 +550,25 @@ imports it as `@potem/core/<path>` through a `paths` alias in `tsconfig.json` an
 vitest alias, so there is no workspace to publish or link. `workers/web` is started
 (2026-11-27): a framework-free sync engine in `workers/web/src/sync` (mirror store, pull
 loop, smart lists and local search per `docs/SYNC-API.md` section 4.10) and a React spike
-in `workers/web/spike` that renders a synthetic feed. It has no Worker yet and is not
-deployed.
+in `workers/web/spike` that renders a synthetic feed. The web client's milestone 2 (read-only)
+is built: a Worker (`workers/web/src/hosts/cloudflare`), a backend-for-frontend that signs in to the
+server as an OAuth client and proxies an allowlist of `GET` requests (`workers/web/src/bff`), and a
+React app with the sidebar, smart lists, lists, task detail and search (`workers/web/src/app`), plus
+a `web` deployment kind. Deploying it is a separate step; see DEPLOYMENT.md, "Web client". Next:
+edits (milestone 3), push updates, a persistent mirror with an installable PWA, and a Node host.
+
+**Search text out of URLs (web client, later).** Today the search text is part of the page URL
+(`/search?q=…`) and of the request the page sends (`/bff/api/search?q=…`). So it stays in the
+browser's history and autocomplete after sign-out, and it reaches the web Worker's and the
+server's request logs. Three changes remove it:
+
+- The page keeps the query in `history.state` instead of the URL. Back and forward still
+  restore it, a reload clears it, and the URL becomes plain `/search`.
+- The server accepts `POST /api/v1/search` with the query in a JSON body, alongside the current
+  `GET`. This is a contract change in `docs/SYNC-API.md` for every client; the Apple apps can
+  move to it too. The web Worker proxies that one `POST` (CSRF-checked like its other `POST`s).
+- `GET /search?q=` stays for older clients, and the server logs that route's path without its
+  query string.
 
 The web UI lives here, not with the apps, because it is TypeScript and imports the sync
 API types directly. The app repository is named for its platform (`potem-apple`); an

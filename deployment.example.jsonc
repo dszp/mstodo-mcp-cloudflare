@@ -1,6 +1,11 @@
 // Copy to deployments/<name>/deployment.jsonc (gitignored). <name> matches ^[a-z0-9][a-z0-9-]*$.
 // Every value below is a placeholder.
 {
+  // Optional. "server" (the default) is the MCP and sync server; "web" is the web client Worker
+  // (workers/web), which renders from workers/web/wrangler.example.jsonc instead. A web file has no
+  // "kv" or "r2", sets vars.SERVER_ORIGIN (the server's https origin), and becomes vars.WEB_ORIGIN
+  // instead of vars.SERVICE_BASE_URL. Its one secret is WEB_SESSION_SECRET.
+  "kind": "server",
   // Cloudflare account ID: 32 lowercase hex characters.
   "account_id": "00000000000000000000000000000000",
   // The Worker's name.
@@ -26,6 +31,8 @@
   "vars": {
     "TIMEZONE": "UTC"
   },
+  // Optional, "web" only. The server Worker's name; the web Worker reaches it through a service binding named SERVER.
+  // "server_service": "potem-example",
   // Optional. 1Password account for resolving op:// references in .dev.vars.
   "op_account": "example.1password.com"
 }
