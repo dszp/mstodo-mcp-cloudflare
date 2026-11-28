@@ -118,6 +118,7 @@ function harness(over: Partial<PushDeps> = {}) {
 async function failAndReconnect(h: ReturnType<typeof harness>, code = 1011): Promise<number> {
   h.last().opened();
   h.last().closed(code);
+  await settle(); // the third close without a hello waits for a session check
   const [delay] = h.clock.waiting();
   if (delay === undefined) throw new Error("no reconnect scheduled");
   await h.clock.tick(delay);
@@ -175,14 +176,18 @@ describe("push client", () => {
     const h = harness();
     h.push.start();
     const s = h.last();
-    await h.clock.tick(60_000);
+    await h.clock.tick(9_999);
     expect(s.sent).toEqual([]); // not open yet: nothing to send on
     s.opened();
+    s.hello();
     await h.clock.tick(29_999);
     expect(s.sent).toEqual([]);
     await h.clock.tick(1);
     expect(s.sent).toEqual(["ping"]);
-    await h.clock.tick(60_000);
+    for (let i = 0; i < 2; i++) {
+      s.message("pong");
+      await h.clock.tick(30_000);
+    }
     expect(s.sent).toEqual(["ping", "ping", "ping"]);
     s.closed(1006);
     await h.clock.tick(120_000);
@@ -196,6 +201,7 @@ describe("push client", () => {
     for (let i = 0; i < 7; i++) delays.push(await failAndReconnect(h));
     expect(delays).toEqual([1000, 2000, 4000, 8000, 16_000, 30_000, 30_000]);
     expect(h.sockets).toHaveLength(8);
+    expect(h.checks()).toBe(1); // once, after the third close without a hello
   });
 
   it("reports closed while waiting to reconnect", async () => {
@@ -223,7 +229,23 @@ describe("push client", () => {
     expect(d).toBeLessThan(1200);
   });
 
-  it("resets the backoff on hello, not on open", async () => {
+  it("keeps backing off when each socket closes soon after its hello", async () => {
+    const h = harness();
+    h.push.start();
+    const delays: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      h.last().opened();
+      h.last().hello();
+      h.last().closed(1006);
+      const [d] = h.clock.waiting();
+      delays.push(d!);
+      await h.clock.tick(d!);
+    }
+    expect(delays).toEqual([1000, 2000, 4000, 8000]);
+    expect(h.checks()).toBe(0); // each had a hello
+  });
+
+  it("resets the backoff once a socket stays open 30 s past its hello", async () => {
     const h = harness();
     h.push.start();
     await failAndReconnect(h);
@@ -231,8 +253,123 @@ describe("push client", () => {
     expect(await failAndReconnect(h)).toBe(4000);
     h.last().opened();
     h.last().hello();
+    await h.clock.tick(29_999);
+    h.last().closed(1006);
+    expect(h.clock.waiting()).toEqual([8000]); // 30 s not reached: no reset
+    await h.clock.tick(8000);
+    h.last().opened();
+    h.last().hello();
+    await h.clock.tick(30_000);
     h.last().closed(1006);
     expect(h.clock.waiting()).toEqual([1000]);
+  });
+
+  describe("liveness", () => {
+    it("closes with 4000 and backs off when the transport doesn't open within 10 s", async () => {
+      const h = harness();
+      h.push.start();
+      const s = h.last();
+      await h.clock.tick(9_999);
+      expect(s.closedWith).toEqual([]);
+      await h.clock.tick(1);
+      expect(s.closedWith).toEqual([4000]);
+      expect(h.states).toEqual(["connecting", "closed"]);
+      expect(h.clock.waiting()).toEqual([1000]);
+      s.closed(4000); // the browser's close event after ours changes nothing
+      s.opened();
+      expect(h.clock.waiting()).toEqual([1000]);
+      await h.clock.tick(1000);
+      expect(h.sockets).toHaveLength(2);
+    });
+
+    it("closes with 4000 when no hello arrives within 10 s of the transport opening", async () => {
+      const h = harness();
+      h.push.start();
+      const s = h.last();
+      s.opened();
+      await h.clock.tick(5000);
+      s.message("pong"); // only a hello satisfies this wait
+      await h.clock.tick(4_999);
+      expect(s.closedWith).toEqual([]);
+      await h.clock.tick(1);
+      expect(s.closedWith).toEqual([4000]);
+      expect(h.states).toEqual(["connecting", "closed"]);
+      expect(h.clock.waiting()).toEqual([1000]);
+    });
+
+    it("after a ping, any message within 10 s keeps the socket; none closes it", async () => {
+      const h = harness();
+      h.push.start();
+      const s = h.last();
+      s.opened();
+      s.hello();
+      await h.clock.tick(30_000); // t = 30 s: the first ping
+      expect(s.sent).toEqual(["ping"]);
+      await h.clock.tick(9_999);
+      s.message("pong");
+      await h.clock.tick(20_001); // t = 60 s: the second ping
+      expect(s.sent).toEqual(["ping", "ping"]);
+      await h.clock.tick(9_999);
+      s.message(new ArrayBuffer(1)); // binary counts too
+      await h.clock.tick(1); // t = 70 s: the second ping's deadline passes
+      expect(s.closedWith).toEqual([]);
+      await h.clock.tick(20_000); // t = 90 s: the third ping, never answered
+      expect(s.sent).toEqual(["ping", "ping", "ping"]);
+      await h.clock.tick(9_999);
+      expect(s.closedWith).toEqual([]);
+      await h.clock.tick(1);
+      expect(s.closedWith).toEqual([4000]);
+      expect(h.states.at(-1)).toBe("closed");
+      expect(h.clock.waiting()).toHaveLength(1); // the reconnect
+    });
+  });
+
+  describe("closes without a hello", () => {
+    it("check the session once after three in a row, wait for it, then back off", async () => {
+      const h = harness();
+      let answer!: (v: "ok" | "signed_out") => void;
+      h.answerChecks(() => new Promise((r) => (answer = r)));
+      h.push.start();
+      await failAndReconnect(h);
+      await h.clock.tick(10_000); // a timeout counts as a close without a hello
+      await h.clock.tick(h.clock.waiting()[0]!);
+      expect(h.checks()).toBe(0);
+      h.last().opened();
+      h.last().closed(1006);
+      await settle();
+      expect(h.checks()).toBe(1);
+      expect(h.clock.waiting()).toEqual([]); // nothing reconnects while the check runs
+      answer("ok");
+      await settle();
+      expect(h.clock.waiting()).toEqual([4000]); // ok: the normal backoff, not at once
+      await h.clock.tick(4000);
+      h.answerChecks(async () => "ok");
+      for (let i = 0; i < 4; i++) await failAndReconnect(h);
+      expect(h.checks()).toBe(1); // once per run of failures
+      // A hello ends the run; three more failures check again.
+      h.last().opened();
+      h.last().hello();
+      h.last().closed(1006);
+      await h.clock.tick(h.clock.waiting()[0]!);
+      for (let i = 0; i < 3; i++) await failAndReconnect(h);
+      expect(h.checks()).toBe(2);
+    });
+
+    it("stop on signed_out", async () => {
+      const h = harness();
+      h.answerChecks(async () => "signed_out");
+      h.push.start();
+      await failAndReconnect(h);
+      await failAndReconnect(h);
+      h.last().opened();
+      h.last().closed(1006);
+      await settle();
+      await h.clock.tick(120_000);
+      expect(h.checks()).toBe(1);
+      expect(h.sockets).toHaveLength(3);
+      expect(h.clock.waiting()).toEqual([]);
+      expect(h.states.at(-1)).toBe("closed");
+    });
   });
 
   it("logs a 1008 close once and backs off like any other close", async () => {
@@ -319,8 +456,9 @@ describe("push client", () => {
       h.last().opened();
       h.last().closed(4001);
       await settle();
-      await h.clock.tick(10_001);
       h.last().opened();
+      h.last().hello();
+      await h.clock.tick(10_001);
       h.last().closed(4001);
       await settle();
       expect(h.sockets).toHaveLength(3);

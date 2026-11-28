@@ -5,13 +5,18 @@ import { watchLive } from "./live.ts";
 import { SignedOutError } from "./api.ts";
 import { type SessionClient, createSessionClient } from "./session.ts";
 
-/** A socket the test drives: it records listeners and the code it was closed with. */
+/**
+ * A socket the test drives: it records listeners and the code it was closed
+ * with, and answers each ping with "pong" as the server does, so the push
+ * client's liveness check is met while the test isn't looking at it.
+ */
 class FakeSocket implements SocketLike {
   sent: string[] = [];
   closedWith: number | null = null;
   #listeners = new Map<string, ((ev: never) => void)[]>();
   send(s: string) {
     this.sent.push(s);
+    if (s === "ping") this.emit("message", { data: "pong" });
   }
   close(code?: number) {
     this.closedWith = code ?? 1005;
@@ -229,7 +234,9 @@ describe("watchLive", () => {
   it("closes the socket of a page that loads hidden after 5 minutes", async () => {
     const t = setup({ state: "hidden" });
     expect(t.sockets).toHaveLength(1);
+    t.last().hello();
     await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(t.sockets).toHaveLength(1);
     expect(t.sockets[0]!.closedWith).toBe(1000);
     t.stop();
   });
