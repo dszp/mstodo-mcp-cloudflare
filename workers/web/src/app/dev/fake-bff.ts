@@ -1,4 +1,4 @@
-// A stand-in BFF for `npm run web:dev` (and Playwright): always signed in,
+// A stand-in BFF for `pnpm run web:dev` (and Playwright): always signed in,
 // with the spike's synthetic feed (workers/web/spike/fixture.ts) behind
 // /bff/api/sync/changes. Wired into workers/web/vite.config.ts for the dev
 // server only; the build never loads it. Nothing here is real data.

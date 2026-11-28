@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `workers/web/wrangler.example.jsonc`, with `vars.SERVER_ORIGIN` and an optional `server_service`
   binding. `npm run secrets` pushes `WEB_SESSION_SECRET` for it.
 
+### Changed
+- **pnpm replaces npm.** `pnpm-lock.yaml` replaces `package-lock.json`, with the same package
+  versions, and `package.json` names the pnpm version in `packageManager`. Run `pnpm install`
+  (`corepack enable` provides pnpm), and pass a deployment's name without `--`:
+  `pnpm run deploy <name>`. `pnpm run` refuses while `node_modules` doesn't match the lockfile.
+  The deployment scripts run wrangler from `node_modules` directly instead of through `npx`.
+  The Node host image installs its runtime dependencies with pnpm in a separate stage.
+
 ## [0.19.1] – 2026-11-27
 
 ### Added

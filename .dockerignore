@@ -10,7 +10,8 @@
 # reaches it.
 *
 !package.json
-!package-lock.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
 !tsconfig.json
 !workers/server/scripts/build-node.mjs
 !workers/server/src/

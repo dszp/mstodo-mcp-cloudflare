@@ -47,7 +47,7 @@ running your own private instance — not a shared/multi-tenant service.
 - A **Microsoft Entra app registration** — free, created once (walkthrough in the
   [deployment guide](./DEPLOYMENT.md#microsoft-entra-app-registration)).
 - **Node 24.2 or later**, for development and tests (they use Node 24's built-in `node:sqlite`
-  module); the Worker host also needs Cloudflare's **Wrangler** CLI, which `npm ci` installs.
+  module); the Worker host also needs Cloudflare's **Wrangler** CLI, which `pnpm install --frozen-lockfile` installs.
   The Docker image brings its own Node.
 - **Claude.ai** (or another MCP client) to connect to the deployed server.
 
@@ -260,7 +260,7 @@ requires `SERVICE_BASE_URL` (same as upload); unset/placeholder ⇒ `download_di
 
 ## Reset
 
-Three scopes, smallest to largest. Run from the project root. First run `npm run check -- <name>`: it writes `.wrangler/deployments/<name>/rendered.json` only after every check passes, including the read of the live Worker, and removes it when a check fails. Every command below passes that file with `-c`, because `--binding` needs it to find the namespace. These direct wrangler commands get no account or identity checks beyond that `check`, so run them from a shell where `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ENV` and `WRANGLER_CI_OVERRIDE_NAME` are unset, and keep those variables out of a root `.env` or `.env.local`, which wrangler also loads. Replace `--remote` with `--local --persist-to .wrangler/state/<name>` to operate on the local KV store that `npm run dev -- <name>` uses.
+Three scopes, smallest to largest. Run from the project root. First run `pnpm run check <name>`: it writes `.wrangler/deployments/<name>/rendered.json` only after every check passes, including the read of the live Worker, and removes it when a check fails. Every command below passes that file with `-c`, because `--binding` needs it to find the namespace. These direct wrangler commands get no account or identity checks beyond that `check`, so run them from a shell where `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ENV` and `WRANGLER_CI_OVERRIDE_NAME` are unset, and keep those variables out of a root `.env` or `.env.local`, which wrangler also loads. Replace `--remote` with `--local --persist-to .wrangler/state/<name>` to operate on the local KV store that `pnpm run dev <name>` uses.
 
 ### 1. Soft reset between test iterations
 
@@ -269,18 +269,18 @@ Most common: re-trigger the Microsoft OAuth flow without nuking infrastructure. 
 ```bash
 # Wipe the stored Microsoft refresh token. Forces the next /authorize to
 # re-run the full code-exchange flow.
-npx wrangler kv key delete --binding=TODO_CACHE --remote -c .wrangler/deployments/<name>/rendered.json tokens:owner
+pnpm exec wrangler kv key delete --binding=TODO_CACHE --remote -c .wrangler/deployments/<name>/rendered.json tokens:owner
 
 # Also wipe the stored identity record if you want to "forget" which
 # account was last seen (this disables the identity-change wipe trigger
 # the next time you sign in — useful when you want to test the wipe).
-npx wrangler kv key delete --binding=TODO_CACHE --remote -c .wrangler/deployments/<name>/rendered.json identity:owner
+pnpm exec wrangler kv key delete --binding=TODO_CACHE --remote -c .wrangler/deployments/<name>/rendered.json identity:owner
 
 # Wipe all MCP-side OAuth grants (DCR sessions) — forces every
 # previously-paired MCP client to re-add this server from scratch:
-npx wrangler kv key list --binding=OAUTH_KV --remote -c .wrangler/deployments/<name>/rendered.json \
+pnpm exec wrangler kv key list --binding=OAUTH_KV --remote -c .wrangler/deployments/<name>/rendered.json \
   | jq -r '.[].name' \
-  | xargs -I {} npx wrangler kv key delete --binding=OAUTH_KV --remote -c .wrangler/deployments/<name>/rendered.json {}
+  | xargs -I {} pnpm exec wrangler kv key delete --binding=OAUTH_KV --remote -c .wrangler/deployments/<name>/rendered.json {}
 ```
 
 To disconnect every MCP client without touching KV, call the `revoke_all_connections` tool from any connected client. It invalidates every grant at once, including the caller's; each client then reconnects and approves access again.
@@ -292,10 +292,10 @@ If you also want Microsoft to re-prompt for consent (rather than silently re-iss
 Edit `deployments/<name>/.dev.vars` with the new values, then push them all to Cloudflare in one go:
 
 ```bash
-npm run secrets -- <name>
+pnpm run secrets <name>
 ```
 
-The script reads each secret from `deployments/<name>/.dev.vars` and pipes the value over stdin to `wrangler secret put`, so values never appear in argv, environment, terminal scrollback, or AI transcripts. Verify with `npx wrangler secret list -c .wrangler/deployments/<name>/rendered.json` (written by the `secrets` run).
+The script reads each secret from `deployments/<name>/.dev.vars` and pipes the value over stdin to `wrangler secret put`, so values never appear in argv, environment, terminal scrollback, or AI transcripts. Verify with `pnpm exec wrangler secret list -c .wrangler/deployments/<name>/rendered.json` (written by the `secrets` run).
 
 Any value in `.dev.vars` may instead be a **1Password secret reference** of the form `op://<vault>/<item>/<field>` — the script resolves it via the [`op` CLI](https://developer.1password.com/docs/cli/) at push time (requires `op signin`, or `OP_SERVICE_ACCOUNT_TOKEN` for headless use) and pipes the resolved value over stdin like any other secret. Literal values still work unchanged, so you can keep some or all secrets out of the file:
 
@@ -303,10 +303,10 @@ Any value in `.dev.vars` may instead be a **1Password secret reference** of the 
 MS_CLIENT_SECRET=op://Dev/Potem Entra app/credential
 ```
 
-To push a single secret manually instead, run `npm run check -- <name>` first and then:
+To push a single secret manually instead, run `pnpm run check <name>` first and then:
 
 ```bash
-npx wrangler secret put MS_CLIENT_SECRET -c .wrangler/deployments/<name>/rendered.json   # prompts for value
+pnpm exec wrangler secret put MS_CLIENT_SECRET -c .wrangler/deployments/<name>/rendered.json   # prompts for value
 ```
 
 The **old client secret remains valid** until you also delete it in the Azure portal — `wrangler secret put` only updates the Worker side.
@@ -315,12 +315,12 @@ After rotating, do a soft reset (above) so the next `/authorize` uses the new id
 
 ### 3. Full clean slate
 
-For pre-launch publishability checks, or to recover from corrupted state. Run `npm run check -- <name>` first; these commands get no account or identity checks of their own:
+For pre-launch publishability checks, or to recover from corrupted state. Run `pnpm run check <name>` first; these commands get no account or identity checks of their own:
 
 ```bash
-npx wrangler delete -c .wrangler/deployments/<name>/rendered.json                      # nukes Worker + all DO state
-npx wrangler kv namespace delete --binding=OAUTH_KV -c .wrangler/deployments/<name>/rendered.json
-npx wrangler kv namespace delete --binding=TODO_CACHE -c .wrangler/deployments/<name>/rendered.json
+pnpm exec wrangler delete -c .wrangler/deployments/<name>/rendered.json                      # nukes Worker + all DO state
+pnpm exec wrangler kv namespace delete --binding=OAUTH_KV -c .wrangler/deployments/<name>/rendered.json
+pnpm exec wrangler kv namespace delete --binding=TODO_CACHE -c .wrangler/deployments/<name>/rendered.json
 # Then re-create namespaces, put the new IDs in deployment.jsonc, and redeploy (see DEPLOYMENT.md).
 ```
 

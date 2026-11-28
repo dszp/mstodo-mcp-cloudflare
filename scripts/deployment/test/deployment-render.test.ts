@@ -238,7 +238,7 @@ describe("renderConfig for a web deployment", () => {
   });
 
   it("keeps the build command, which wrangler runs from the repository root", () => {
-    expect((renderWeb().build as Record<string, unknown>).command).toBe("npm run web:build");
+    expect((renderWeb().build as Record<string, unknown>).command).toBe("pnpm run web:build");
   });
 
   it("refuses a kv or r2 entry the web example has no binding for", () => {

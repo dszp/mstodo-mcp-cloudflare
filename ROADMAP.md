@@ -544,7 +544,7 @@ potem-server/
   workers/<adapter>/    section 13
 ```
 
-`packages/core` and `workers/server` are in place (2026-11-27). It is still one npm
+`packages/core` and `workers/server` are in place (2026-11-27). It is still one pnpm
 package, with one `package.json` and lockfile at the root; code outside `packages/core`
 imports it as `@potem/core/<path>` through a `paths` alias in `tsconfig.json` and a matching
 vitest alias, so there is no workspace to publish or link. `workers/web` is started
@@ -644,7 +644,7 @@ the owner deploys them to different Cloudflare accounts from this one repository
 now works through named deployments. A deployment is a gitignored folder,
 `deployments/<name>/`, whose `deployment.jsonc` holds the account ID, Worker name,
 hostname, bindings and var overrides (`deployment.example.jsonc` shows the shape).
-`npm run deploy -- <name>` renders `workers/server/wrangler.example.jsonc` plus that file into a wrangler
+`pnpm run deploy <name>` renders `workers/server/wrangler.example.jsonc` plus that file into a wrangler
 config and deploys it, and `check`, `dry-run`, `secrets`, `dev`, `tail` and `render` take
 the same name. A new binding is added once, in the example. The root `wrangler.jsonc` and
 `scripts/push-secrets.sh` are gone.

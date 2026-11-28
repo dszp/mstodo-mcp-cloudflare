@@ -124,8 +124,8 @@ To run the server directly on Node.js 24 or later:
 1. Install the dependencies and build the bundle:
 
    ```sh
-   npm ci
-   npm run build:node
+   pnpm install --frozen-lockfile
+   pnpm run build:node
    ```
 
    The build writes `dist/main.mjs`.
@@ -136,7 +136,7 @@ To run the server directly on Node.js 24 or later:
 1. Start the server:
 
    ```sh
-   npm run start:node
+   pnpm run start:node
    ```
 
 The server listens on `127.0.0.1` unless you set `HOST`. Keep it on loopback behind a reverse

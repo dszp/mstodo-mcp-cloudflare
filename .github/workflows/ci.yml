@@ -18,55 +18,58 @@ jobs:
       # trailing comment tracks the human-readable version the SHA resolves to.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # Installs the pnpm version package.json's packageManager names.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           # 24: the Node host (and its test project) needs node:sqlite unflagged.
           node-version: 24
-          cache: npm
+          cache: pnpm
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       # Binding types (KV/Durable Object) live in the gitignored, generated
       # worker-configuration.d.ts. Generate it from the committed example config
       # (placeholder account_id/IDs are irrelevant — only binding shapes matter).
       - name: Generate Worker types
-        run: npx wrangler types -c workers/server/wrangler.example.jsonc workers/server/worker-configuration.d.ts
+        run: pnpm exec wrangler types -c workers/server/wrangler.example.jsonc workers/server/worker-configuration.d.ts
 
       - name: Typecheck
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
 
       # The Node host's own check: Node types only, no Workers globals, so a
       # Workers-only API reaching packages/core or workers/server/src/hosts/node fails here.
       - name: Typecheck (Node host)
-        run: npx tsc -p tsconfig.node.json
+        run: pnpm exec tsc -p tsconfig.node.json
 
       # The web client and spike: DOM lib and JSX. The tests in it import vitest,
       # which brings Node's types along, so this check alone lets process or
       # Buffer through.
       - name: Typecheck (web)
-        run: npx tsc --noEmit -p workers/web
+        run: pnpm exec tsc --noEmit -p workers/web
 
       # The sync engine (workers/web/src/sync, tests excluded): ES2022 only, no
       # DOM, Node or Workers types, so an engine file that touches window,
       # localStorage, process or Buffer fails here.
       - name: Typecheck (web sync engine)
-        run: npx tsc --noEmit -p workers/web/tsconfig.engine.json
+        run: pnpm exec tsc --noEmit -p workers/web/tsconfig.engine.json
 
       # The web Worker (workers/web/src/bff and src/hosts, tests excluded):
       # WebWorker lib, no DOM or Node types, so a document or process reference
       # in the BFF or the Cloudflare host fails here.
       - name: Typecheck (web Worker)
-        run: npx tsc --noEmit -p workers/web/tsconfig.worker.json
+        run: pnpm exec tsc --noEmit -p workers/web/tsconfig.worker.json
 
       - name: Build (Node host)
-        run: npm run build:node
+        run: pnpm run build:node
 
       - name: Build (web client)
-        run: npm run web:build
+        run: pnpm run web:build
 
       - name: Test
-        run: npm test
+        run: pnpm test
 
   # Refuses private terms (real hostnames, business and list names) in the tree
   # and in the new commits' messages. The terms come from the LEAK_PATTERNS

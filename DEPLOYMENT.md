@@ -37,8 +37,8 @@ see [README.md](./README.md).
 
 ## Prerequisites
 
-- **Node 24.2 or later** and **npm** (Wrangler 4 is pinned in `devDependencies`). The test suite and the Node host use Node 24's built-in `node:sqlite` module.
-- A **Cloudflare account**, logged in locally (`npx wrangler login`).
+- **Node 24.2 or later** and **pnpm** (the version `packageManager` in `package.json` names; `corepack enable` installs it. Wrangler 4 is pinned in `devDependencies`). The test suite and the Node host use Node 24's built-in `node:sqlite` module.
+- A **Cloudflare account**, logged in locally (`pnpm exec wrangler login`).
 - A **Microsoft Entra app registration** — walkthrough in [Microsoft Entra app
   registration](#microsoft-entra-app-registration) below. You'll need four values:
   `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `OWNER_EMAIL`.
@@ -180,15 +180,15 @@ registration and all four values.
 ```bash
 git clone https://github.com/dszp/potem-server.git
 cd potem-server
-npm install
+pnpm install
 ```
 
 ### 2. Create the KV namespaces and the bucket
 
 ```bash
-npx wrangler kv namespace create OAUTH_KV
-npx wrangler kv namespace create TODO_CACHE
-npx wrangler r2 bucket create <bucket-name>     # optional: the BLOBS attachment store
+pnpm exec wrangler kv namespace create OAUTH_KV
+pnpm exec wrangler kv namespace create TODO_CACHE
+pnpm exec wrangler r2 bucket create <bucket-name>     # optional: the BLOBS attachment store
 ```
 
 Each KV command prints an `id`. Keep both. The **binding names must stay exactly**
@@ -203,7 +203,7 @@ holds account-specific IDs. `<name>` is lowercase letters, digits and hyphens. T
 commands below render `workers/server/wrangler.example.jsonc` plus this folder's `deployment.jsonc` into
 a wrangler config, check it, write it to `.wrangler/deployments/<name>/rendered.json` and run
 wrangler against it. A deployment that fails a check gets no `rendered.json`, and a stale one
-is removed. `npm run render -- <name>` prints the config without writing it. There is no root
+is removed. `pnpm run render <name>` prints the config without writing it. There is no root
 `wrangler.jsonc`.
 
 ```bash
@@ -217,7 +217,7 @@ deploy there finds no deployment file, and one copied in has no `last-deployed.j
 deploy shows every setting as new.
 
 Edit `deployment.jsonc` and fill in:
-- `account_id`: your Cloudflare account ID (Dashboard → Workers, or `npx wrangler whoami`).
+- `account_id`: your Cloudflare account ID (Dashboard → Workers, or `pnpm exec wrangler whoami`).
   Wrangler takes the account from this value. The script also sets `CLOUDFLARE_ACCOUNT_ID` for
   the wrangler processes it starts, and refuses to run if your shell already sets a different one.
 - `worker_name`, `base_url` (the public https origin the Worker is reachable at) and
@@ -245,7 +245,7 @@ A deployment is a server unless `deployment.jsonc` says `"kind": "web"`, the web
 [Web client](#web-client) describes that file, its secret and how to deploy it.
 
 The committed `workers/server/wrangler.example.jsonc` is the template for every deployment and what the test
-pool and CI read, so `npm test` works without any deployment. A new binding added there reaches
+pool and CI read, so `pnpm test` works without any deployment. A new binding added there reaches
 every deployment on its next deploy, once the deployment file supplies its ID.
 
 ### 4. Write the secrets file
@@ -255,7 +255,7 @@ cp .dev.vars.example deployments/<name>/.dev.vars
 # edit it: MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, OWNER_EMAIL
 ```
 
-The same file feeds `npm run dev -- <name>` and `npm run secrets -- <name>` (step 6).
+The same file feeds `pnpm run dev <name>` and `pnpm run secrets <name>` (step 6).
 A value may be a literal or a **1Password secret reference** (`op://<vault>/<item>/<field>`).
 The scripts resolve references with the `op` CLI (`op signin`, or `OP_SERVICE_ACCOUNT_TOKEN`
 for CI) and pass literals through unchanged, so the file never has to hold a secret. Set
@@ -264,7 +264,7 @@ for CI) and pass literals through unchanged, so the file never has to hold a sec
 Check the deployment before anything changes:
 
 ```bash
-npm run check -- <name>
+pnpm run check <name>
 ```
 
 `check` renders the config, validates it against your other deployments and the shell, and
@@ -274,7 +274,7 @@ a deploy would detach a custom domain that is attached live but missing from `cu
 or when `workers_dev` or `preview_urls` differs from the live value. When everything passes it
 writes `rendered.json`.
 
-Run `check` before any direct `npx wrangler ... -c .wrangler/deployments/<name>/rendered.json`
+Run `check` before any direct `pnpm exec wrangler ... -c .wrangler/deployments/<name>/rendered.json`
 command (KV keys, `secret list`, `delete`). Those commands get no account or identity checks
 beyond that `check`, so run them from a shell where `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ENV`
 and `WRANGLER_CI_OVERRIDE_NAME` are unset, and keep those variables out of a root `.env` or
@@ -284,7 +284,7 @@ answer before the first deploy.
 ### 5. Deploy
 
 ```bash
-npm run deploy -- <name>
+pnpm run deploy <name>
 ```
 
 The first deploy shows the vars and bindings it will send (and, for a Worker that already
@@ -294,7 +294,7 @@ changes `workers_dev` or `preview_urls` from the live value; `--non-interactive`
 interactive terminal (stdin and stdout on a TTY, `CI` unset). From a script, pass
 `--non-interactive`, which refuses any config change you haven't seen on an earlier
 interactive deploy. Pass `--adopt` only to take over an existing Worker whose KV bindings
-don't match this deployment's file. `npm run dry-run -- <name>` builds without uploading.
+don't match this deployment's file. `pnpm run dry-run <name>` builds without uploading.
 
 Note the deployed URL and the **Current Version ID** (your rollback reference). The script
 records the config it deployed in `deployments/<name>/last-deployed.json` and shows the
@@ -303,14 +303,14 @@ difference at the next deploy.
 ### 6. Push the secrets
 
 ```bash
-npm run secrets -- <name>
+pnpm run secrets <name>
 ```
 
 The Worker must already be deployed: `secrets` refuses to run until it exists, because
 `wrangler secret put` would otherwise create an empty draft Worker. It resolves every
 non-empty secret first, then pipes each to `wrangler secret put` over stdin, so values never
 appear in argv, the environment, terminal scrollback or AI transcripts. Verify with
-`npx wrangler secret list -c .wrangler/deployments/<name>/rendered.json`.
+`pnpm exec wrangler secret list -c .wrangler/deployments/<name>/rendered.json`.
 
 **Optional: enable web attachment uploads.** To use `create_upload_link` / the `/upload`
 endpoint, set `base_url` in `deployment.jsonc` (step 3) to this Worker's real public
@@ -363,7 +363,7 @@ The sync API (`/api/v1/*`) and the app's sign-in path (`/app/signin`) can sit be
 Cloudflare Access as a second gate in front of OAuth. MCP clients aren't affected:
 `/mcp` and the OAuth endpoints stay outside Access. The server-side check is off until
 you set both variables. Set them under `vars` in `deployment.jsonc`
-and run `npm run deploy -- <name>`; they default to empty, which leaves Access off.
+and run `pnpm run deploy <name>`; they default to empty, which leaves Access off.
 
 | Variable | Value |
 |---|---|
@@ -443,9 +443,9 @@ every browser out, because no cookie unseals under the new key.
 **Deploy**
 
 ```bash
-npm run check -- <name>      # validates the file and reads the live Worker
-npm run deploy -- <name>     # builds the app; the first deploy asks you to confirm, in a terminal
-npm run secrets -- <name>    # pushes WEB_SESSION_SECRET; refuses until the Worker exists
+pnpm run check <name>      # validates the file and reads the live Worker
+pnpm run deploy <name>     # builds the app; the first deploy asks you to confirm, in a terminal
+pnpm run secrets <name>    # pushes WEB_SESSION_SECRET; refuses until the Worker exists
 ```
 
 Open the Worker's hostname. The first visit shows a signed-out page with a **Sign in** link.
@@ -536,7 +536,7 @@ To turn it on:
 1. Add the **Office 365 Exchange Online → `Tasks.ReadWrite`** delegated permission to
    the Entra app via the Manifest (see [API permissions](#2-api-permissions) above) and
    grant admin consent.
-2. Set `"ENABLE_MY_DAY": "true"` under `vars` in `deployment.jsonc` and run `npm run deploy -- <name>`.
+2. Set `"ENABLE_MY_DAY": "true"` under `vars` in `deployment.jsonc` and run `pnpm run deploy <name>`.
 3. **Re-run `/authorize`.** Enabling the flag widens the consent request to include the
    Exchange Online scope; a single consent screen now covers both resources. Without a
    fresh authorize, the existing refresh token has Graph consent only and My Day calls
@@ -616,21 +616,21 @@ official To Do client's network calls. Microsoft may change it without notice.
 | **My Day tools return `my_day_unavailable`** | The Exchange Online `Tasks.ReadWrite` permission isn't consented/granted. Add it via the Manifest + admin consent (see [My Day support](#my-day-support-optional)), then re-run `/authorize`. |
 | **`add_to_my_day` returns `ok:true` but the task doesn't appear in the app** | A task whose `PostponedDay == today` is suppressed from My Day even with `CommittedDay` set. `add_to_my_day` clears `PostponedDay` automatically, so this is handled — if you see it, confirm you're on the current deploy (the response includes `"postponed_day_raw": null` on success). |
 | **`list_my_day_tasks` is slow, or returns `substrate_429` / partial results (`folders_errored > 0`)** | It walks every list one folder at a time to stay under EXO's `MailboxConcurrency` cap (parallel fan-out trips `429 ApplicationThrottled`). On accounts with many/large lists it's inherently slow — `add`/`remove` are single-call and fast. A non-zero `folders_errored` means some folders were skipped (throttle/transient); retry. This is the case for the deferred SQLite-`CommittedDay` indexing optimization. |
-| **403 at `/authorize`** ("not the owner") | The signed-in Microsoft account doesn't match `OWNER_EMAIL`. Re-check the secret (`npx wrangler secret list -c .wrangler/deployments/<name>/rendered.json`), re-push, and re-authorize. Switching accounts = update `OWNER_EMAIL` first. |
+| **403 at `/authorize`** ("not the owner") | The signed-in Microsoft account doesn't match `OWNER_EMAIL`. Re-check the secret (`pnpm exec wrangler secret list -c .wrangler/deployments/<name>/rendered.json`), re-push, and re-authorize. Switching accounts = update `OWNER_EMAIL` first. |
 | **`SqlError: Exceeded allowed rows written in Durable Objects free tier`** (every call 500s) | The account's daily DO rows-written budget is exhausted (see [the plan note](#a-note-on-the-cloudflare-plan-free-vs-paid)). Upgrade to Workers Paid, or wait for the daily UTC reset, then reduce future cost via `sync_flagged_emails`/`no_sync`. |
 | **`sync_status` never reaches `all_idle`** | A large baseline is still draining (normal — let the cron run), or a resource shows `status: "error"` with a `last_error`. A `sync_disabled` resource is intentionally skipped (`no_sync` / default-skipped `flaggedEmails`) and excluded from `all_idle`. |
 | **Tools return empty right after deploy** | The index is still warming. `query_tasks`/`search_tasks` are empty until the first baseline lands; retry shortly or check `sync_status`. |
 | **Claude.ai can't reconnect after changes** | Clear the Claude.ai-side OAuth grants (DCR sessions) — see [README → Reset](./README.md#reset) — then re-add the connector. |
 | **Switched Microsoft accounts and data looks wiped** | Expected: the identity-change auto-wipe clears the prior account's index + tokens + aliases (see [README → Identity-change auto-wipe](./README.md#identity-change-auto-wipe-built-in)). The new account re-baselines on the next sync. |
-| **Local `tsc` errors about `Env` / bindings** | The binding types live in the gitignored, generated `worker-configuration.d.ts`. Run `npm run types` (it reads `workers/server/wrangler.example.jsonc`, as CI does) after any change to the example's bindings. |
+| **Local `tsc` errors about `Env` / bindings** | The binding types live in the gitignored, generated `worker-configuration.d.ts`. Run `pnpm run types` (it reads `workers/server/wrangler.example.jsonc`, as CI does) after any change to the example's bindings. |
 
 ## Local development
 
 ```bash
-npm run types             # (re)generate worker-configuration.d.ts from workers/server/wrangler.example.jsonc
-npx tsc --noEmit          # typecheck
-npm test                  # vitest (uses workers/server/wrangler.example.jsonc; no secrets needed)
-npm run dev -- <name>     # local Worker using deployments/<name>/.dev.vars
+pnpm run types             # (re)generate worker-configuration.d.ts from workers/server/wrangler.example.jsonc
+pnpm exec tsc --noEmit          # typecheck
+pnpm test                  # vitest (uses workers/server/wrangler.example.jsonc; no secrets needed)
+pnpm run dev <name>     # local Worker using deployments/<name>/.dev.vars
 ```
 
 ## Reset and teardown
