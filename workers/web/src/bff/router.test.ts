@@ -56,8 +56,11 @@ describe("route", () => {
       ["/bff/session", {}, 200],
       ["/bff/session/refresh", { method: "POST", headers: csrf }, 401],
       ["/bff/api/sync/info", {}, 401],
-      ["/bff/api/sync/mutations", { method: "POST" }, 404],
+      ["/bff/api/sync/mutations", { method: "POST" }, 403],
+      ["/bff/api/sync/mutations", {}, 405],
       ["/bff/api/sync/changes", { method: "POST" }, 405],
+      ["/bff/api/attachments/x", { method: "POST" }, 405],
+      ["/bff/api/token", { method: "POST" }, 404],
       ["/auth/login", { method: "POST" }, 405],
       ["/auth/logout", {}, 405],
       ["/bff/session", { method: "DELETE" }, 405],
@@ -83,6 +86,43 @@ describe("route", () => {
   it("names the allowed method on a 405", async () => {
     expect((await route(req("/auth/logout"), cfg))!.headers.get("allow")).toBe("POST");
     expect((await route(req("/bff/session", { method: "POST" }), cfg))!.headers.get("allow")).toBe("GET");
+  });
+
+  it("names the allowed method on a /bff/api 405: GET for a read path, POST for sync/mutations", async () => {
+    expect((await route(req("/bff/api/sync/changes", { method: "POST" }), cfg))!.headers.get("allow")).toBe("GET");
+    expect((await route(req("/bff/api/attachments/x", { method: "POST" }), cfg))!.headers.get("allow")).toBe("GET");
+    expect((await route(req("/bff/api/sync/mutations"), cfg))!.headers.get("allow")).toBe("POST");
+  });
+
+  it("proxies a mutation batch with the sandbox CSP and CORP on the response", async () => {
+    // Sign in through the routes, keeping the cookies.
+    const cookies = new Map<string, string>();
+    const keep = (res: Response) => {
+      for (const line of res.headers.getSetCookie()) {
+        const pair = line.split(";")[0];
+        const eq = pair.indexOf("=");
+        cookies.set(pair.slice(0, eq), pair.slice(eq + 1));
+      }
+      return res;
+    };
+    const withCookies = (path: string, init: RequestInit = {}) => {
+      const headers = new Headers(init.headers);
+      headers.set("cookie", [...cookies].map(([k, v]) => `${k}=${v}`).join("; "));
+      return req(path, { ...init, headers });
+    };
+    const login = keep((await route(withCookies("/auth/login"), cfg))!);
+    const back = await server.authorize(login.headers.get("location")!);
+    keep((await route(withCookies(new URL(back).pathname + new URL(back).search), cfg))!);
+
+    const body = JSON.stringify({ client_id: "web-1", mutations: [{ id: "m-1", at: "2031-01-01T00:00:00Z", op: "task.delete", sid: "T_1" }] });
+    const res = (await route(
+      withCookies("/bff/api/sync/mutations", { method: "POST", headers: { ...csrf, "content-type": "application/json" }, body }),
+      cfg,
+    ))!;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ cursor: "cursor-1", results: [{ id: "m-1", status: "applied", sid: "T_1" }] });
+    expectSecurityHeaders(res, "mutations", true, API_CSP);
+    expect(server.apiRequests.map((r) => `${r.method} ${r.path}`)).toEqual(["POST /api/v1/sync/mutations"]);
   });
 
   it("returns null for every other path, so static assets answer", async () => {

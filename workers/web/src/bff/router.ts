@@ -18,7 +18,8 @@ const ROUTES = new Map<string, { method: string; handler: Handler }>([
 ]);
 
 function dispatch(req: Request, cfg: BffConfig, pathname: string): Promise<Response> {
-  // handleApi answers 404 off the allowlist, then 405 for anything but GET.
+  // handleApi answers 404 off the allowlist, then 405 for any method but the
+  // path's own: GET for the read paths, POST for sync/mutations.
   if (pathname.startsWith("/bff/api/")) return handleApi(req, cfg);
   const r = ROUTES.get(pathname);
   if (!r) return Promise.resolve(jsonResponse({ error: "not_found" }, 404));

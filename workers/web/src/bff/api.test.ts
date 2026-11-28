@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { apiPath, handleApi, handleRefresh, handleSession } from "./api.ts";
+import { apiRoute, handleApi, handleRefresh, handleSession } from "./api.ts";
 import { handleCallback, handleLogin } from "./auth.ts";
 import { DEVICE_COOKIE, SESSION_COOKIE } from "./cookies.ts";
 import { sealer } from "./seal.ts";
@@ -496,7 +496,7 @@ describe("GET /bff/api/*", () => {
 
   it("refuses a path outside the allowlist with 404 and doesn't call the server", async () => {
     const jar = await signedIn();
-    for (const path of ["sync/mutations", "tasks", "tasks/a/b", "sync/info/", "token", "attachments/a.b"]) {
+    for (const path of ["sync/mutation", "sync/mutations/x", "tasks", "tasks/a/b", "sync/info/", "token", "attachments/a.b"]) {
       expect((await jar.api(path)).status, path).toBe(404);
     }
     expect(server.apiRequests).toHaveLength(0);
@@ -646,10 +646,271 @@ describe("GET /bff/api/*", () => {
   });
 });
 
-describe("apiPath", () => {
-  it("maps an allowlisted path to /api/v1", () => {
-    expect(apiPath("tasks/abc_D-9")).toBe("/api/v1/tasks/abc_D-9");
-    expect(apiPath("sync/info")).toBe("/api/v1/sync/info");
+const MAX_BODY = 256 * 1024;
+const POST_HEADERS = { "x-potem": "1", origin: WEB, "content-type": "application/json" };
+const BATCH = {
+  client_id: "web-0190",
+  mutations: [{ id: "m-1", at: "2031-01-01T10:00:00.000Z", op: "task.update", sid: "T_1", fields: { title: "Call example" } }],
+};
+
+/** A JSON batch of exactly `size` bytes. */
+function batchOfSize(size: number): Uint8Array<ArrayBuffer> {
+  const head = '{"client_id":"web-0190","mutations":[],"pad":"';
+  const text = head + "a".repeat(size - head.length - 2) + '"}';
+  const bytes = new Uint8Array(new TextEncoder().encode(text));
+  expect(bytes.byteLength).toBe(size);
+  return bytes;
+}
+
+/** A stream of `chunks` chunks of `chunkSize` bytes that records how many were pulled. */
+function chunkedBody(chunks: number, chunkSize: number) {
+  const state = { pulled: 0, cancelled: false };
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (state.pulled === chunks) return controller.close();
+      state.pulled++;
+      controller.enqueue(new Uint8Array(chunkSize).fill(0x20));
+    },
+    cancel() {
+      state.cancelled = true;
+    },
+  }, { highWaterMark: 0 }); // pulled only when read, so `pulled` counts reads
+  return { stream, state };
+}
+
+describe("POST /bff/api/sync/mutations", () => {
+  const post = (jar: Jar, body: BodyInit | null, headers: Record<string, string> = POST_HEADERS, extra: RequestInit = {}) =>
+    jar.api("sync/mutations", { method: "POST", headers, body, ...extra });
+  const mutationCalls = () => server.apiRequests.filter((r) => r.path === "/api/v1/sync/mutations");
+
+  it("forwards the exact bytes with the bearer token and JSON type, and nothing else of the browser's", async () => {
+    const jar = await signedIn();
+    const session = (await jar.unseal<Session>(SESSION_COOKIE))!;
+    // Odd spacing and non-ASCII text: the bytes go through untouched, not re-serialized.
+    const text = `{ "client_id":"web-0190",\n "mutations":[{"id":"m-1","at":"2031-01-01T10:00:00.000Z","op":"task.update","sid":"T_1","fields":{"title":"Café ✓"}}] }`;
+    const bytes = new TextEncoder().encode(text);
+    const res = await post(jar, bytes, {
+      ...POST_HEADERS,
+      "content-type": "Application/JSON; charset=UTF-8",
+      "x-custom": "1",
+      authorization: "Bearer forged",
+    });
+    expect(res.status).toBe(200);
+    const [call] = mutationCalls();
+    expect(call.method).toBe("POST");
+    expect(call.path).toBe("/api/v1/sync/mutations");
+    expect(call.body).toEqual(bytes);
+    expect(call.headers.get("authorization")).toBe(`Bearer ${session.access_token}`);
+    expect(call.headers.get("content-type")).toBe("application/json");
+    expect(call.headers.has("cf-access-token")).toBe(false);
+    expect(call.headers.has("cookie")).toBe(false);
+    expect(call.headers.has("x-potem")).toBe(false);
+    expect(call.headers.has("origin")).toBe(false);
+    expect(call.headers.has("x-custom")).toBe(false);
+  });
+
+  it("returns the server's status and JSON body, with only its Content-Type", async () => {
+    const jar = await signedIn();
+    const res = await post(jar, JSON.stringify(BATCH));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(await res.json()).toEqual({ cursor: "cursor-1", results: [{ id: "m-1", status: "applied", sid: "T_1" }] });
+
+    server.apiReply = () =>
+      new Response('{"error":"bad_batch","detail":"mutations"}', {
+        status: 400,
+        headers: { "content-type": "application/json", "set-cookie": "upstream=1; Path=/", etag: '"e"', "x-internal": "secret" },
+      });
+    const bad = await post(jar, JSON.stringify(BATCH));
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toEqual({ error: "bad_batch", detail: "mutations" });
+    expect([...bad.headers.keys()]).toEqual(["content-type"]);
+  });
+
+  it("never passes on a non-JSON Content-Type from the server", async () => {
+    const jar = await signedIn();
+    server.apiReply = () => new Response("<script>", { status: 500, headers: { "content-type": "text/html" } });
+    const res = await post(jar, JSON.stringify(BATCH));
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toBe("application/octet-stream");
+  });
+
+  it("sends cf-access-token when the session carries one", async () => {
+    server.access = "forbidden";
+    const jar = await signedIn();
+    await post(jar, JSON.stringify(BATCH));
+    expect(mutationCalls()[0].headers.get("cf-access-token")).toBe(CF_ACCESS_TOKEN);
+  });
+
+  it("refuses a request without X-Potem and the web Origin with 403 forbidden", async () => {
+    const jar = await signedIn();
+    const cases: Record<string, string>[] = [
+      { origin: WEB, "content-type": "application/json" },
+      { "x-potem": "0", origin: WEB, "content-type": "application/json" },
+      { "x-potem": "1", "content-type": "application/json" },
+      { "x-potem": "1", origin: "https://evil.example.com", "content-type": "application/json" },
+      { "x-potem": "1", origin: "null", "content-type": "application/json" },
+    ];
+    for (const headers of cases) {
+      const res = await post(jar, JSON.stringify(BATCH), headers);
+      expect(res.status, JSON.stringify(headers)).toBe(403);
+      expect(await res.json()).toEqual({ error: "forbidden" });
+    }
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("refuses any Content-Type but application/json with 415", async () => {
+    const jar = await signedIn();
+    for (const type of [null, "text/plain", "application/jsonx", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", "text/json"]) {
+      const headers: Record<string, string> = { "x-potem": "1", origin: WEB };
+      if (type) headers["content-type"] = type;
+      // A string body would get text/plain from the runtime, so send bytes.
+      const res = await post(jar, new TextEncoder().encode(JSON.stringify(BATCH)), headers);
+      expect(res.status, String(type)).toBe(415);
+      expect(await res.json()).toEqual({ error: "unsupported_media_type" });
+    }
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("forwards a body of exactly 256 KiB", async () => {
+    const jar = await signedIn();
+    const bytes = batchOfSize(MAX_BODY);
+    const res = await post(jar, bytes);
+    expect(res.status).toBe(200);
+    expect(mutationCalls()[0].body).toEqual(bytes);
+  });
+
+  it("refuses a body of 256 KiB and one byte with 413", async () => {
+    const jar = await signedIn();
+    const res = await post(jar, batchOfSize(MAX_BODY + 1));
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: "body_too_large", max: MAX_BODY });
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("refuses a Content-Length over the limit before reading the body", async () => {
+    const jar = await signedIn();
+    const { stream, state } = chunkedBody(1, 16);
+    const res = await post(jar, stream, { ...POST_HEADERS, "content-length": String(MAX_BODY + 1) }, { duplex: "half" } as RequestInit);
+    expect(res.status).toBe(413);
+    expect(state.pulled).toBe(0);
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("refuses a chunked body without Content-Length once it passes the limit, and stops reading", async () => {
+    const jar = await signedIn();
+    // 80 chunks of 4 KiB: 320 KiB, so the limit is crossed at the 65th.
+    const { stream, state } = chunkedBody(80, 4096);
+    const res = await post(jar, stream, POST_HEADERS, { duplex: "half" } as RequestInit);
+    expect(res.status).toBe(413);
+    expect(state.pulled).toBeLessThan(80);
+    expect(state.cancelled).toBe(true);
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("refuses a body longer than its Content-Length claims", async () => {
+    const jar = await signedIn();
+    const { stream } = chunkedBody(80, 4096);
+    const res = await post(jar, stream, { ...POST_HEADERS, "content-length": "10" }, { duplex: "half" } as RequestInit);
+    expect(res.status).toBe(413);
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("asks for a refresh with an expiring session, without calling the server", async () => {
+    const jar = await signedIn();
+    const tokenCalls = server.tokenRequests.length;
+    now += 3600 - 30;
+    jar.values.set(SESSION_COOKIE, await reseal(jar, { last_seen: now }));
+    const res = await post(jar, JSON.stringify(BATCH));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "session_refresh_needed" });
+    expect(res.headers.getSetCookie()).toEqual([]);
+    expect(server.apiRequests).toHaveLength(0);
+    expect(server.tokenRequests.length).toBe(tokenCalls);
+  });
+
+  it("answers signed_out and clears the cookie for an expired session", async () => {
+    const jar = await signedIn();
+    now += 60 * 60;
+    const res = await post(jar, JSON.stringify(BATCH));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "signed_out" });
+    expect(sessionCookies(res).map(isClear)).toEqual([true]);
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("answers signed_out without a session", async () => {
+    const res = await post(new Jar(), JSON.stringify(BATCH));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "signed_out" });
+    expect(res.headers.getSetCookie()).toEqual([]);
+  });
+
+  it("turns an upstream 401 into session_refresh_needed", async () => {
+    const jar = await signedIn();
+    server.grants[0].revoked = true;
+    const res = await post(jar, JSON.stringify(BATCH));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "session_refresh_needed" });
+    expect(res.headers.has("www-authenticate")).toBe(false);
+  });
+
+  it("turns an upstream 403 access_denied into signed_out", async () => {
+    const jar = await signedIn();
+    server.apiReply = () => new Response(JSON.stringify({ error: "access_denied" }), { status: 403, headers: { "content-type": "application/json" } });
+    const res = await post(jar, JSON.stringify(BATCH));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "signed_out" });
+  });
+
+  it("turns an upstream redirect into 502 upstream_redirect, and a network failure into upstream_unavailable", async () => {
+    const jar = await signedIn();
+    server.apiReply = () => new Response(null, { status: 302, headers: { location: "https://team.cloudflareaccess.com/x" } });
+    let res = await post(jar, JSON.stringify(BATCH));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "upstream_redirect" });
+    cfg.upstream = async () => {
+      throw new TypeError("network down");
+    };
+    res = await post(jar, JSON.stringify(BATCH));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "upstream_unavailable" });
+  });
+
+  it("never writes the session cookie", async () => {
+    const jar = await signedIn();
+    now += 5 * 60;
+    const res = await post(jar, JSON.stringify(BATCH));
+    expect(res.status).toBe(200);
+    expect(res.headers.getSetCookie()).toEqual([]);
+  });
+
+  it("refuses every method but POST with 405 naming POST", async () => {
+    const jar = await signedIn();
+    for (const method of ["GET", "PUT", "PATCH", "DELETE"]) {
+      const res = await jar.api("sync/mutations", { method, headers: POST_HEADERS });
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get("allow"), method).toBe("POST");
+    }
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("refuses POST on every read path with 405 naming GET", async () => {
+    const jar = await signedIn();
+    for (const path of ["sync/changes", "attachments/x", "tasks/T_1", "sync/info"]) {
+      const res = await jar.api(path, { method: "POST", headers: POST_HEADERS, body: JSON.stringify(BATCH) });
+      expect(res.status, path).toBe(405);
+      expect(res.headers.get("allow"), path).toBe("GET");
+    }
+    expect(server.apiRequests).toHaveLength(0);
+  });
+});
+
+describe("apiRoute", () => {
+  it("maps an allowlisted path to /api/v1 and the one method it takes", () => {
+    expect(apiRoute("tasks/abc_D-9")).toEqual({ path: "/api/v1/tasks/abc_D-9", method: "GET" });
+    expect(apiRoute("sync/info")).toEqual({ path: "/api/v1/sync/info", method: "GET" });
+    expect(apiRoute("sync/mutations")).toEqual({ path: "/api/v1/sync/mutations", method: "POST" });
   });
 
   it("refuses encoded, dotted, doubled, backslashed and empty segments", () => {
@@ -665,8 +926,8 @@ describe("apiPath", () => {
       "",
       "tasks/" + "a".repeat(129),
     ]) {
-      expect(apiPath(raw), raw).toBeNull();
+      expect(apiRoute(raw), raw).toBeNull();
     }
-    expect(apiPath("tasks/" + "a".repeat(128))).toBe("/api/v1/tasks/" + "a".repeat(128));
+    expect(apiRoute("tasks/" + "a".repeat(128))?.path).toBe("/api/v1/tasks/" + "a".repeat(128));
   });
 });

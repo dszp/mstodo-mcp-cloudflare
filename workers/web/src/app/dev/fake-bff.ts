@@ -12,12 +12,18 @@
 //
 // Dataset size: POTEM_FAKE_TOTAL (default 2400) tasks, POTEM_FAKE_OPEN
 // (default 545) of them open.
+//
+// POST /bff/api/sync/mutations applies the task, My Day and step ops to the
+// fixture (see applyMutation) and appends each changed task to the feed, so
+// the next pull sees it. The edits last until the server restarts or the date
+// changes (the fixture is rebuilt each day).
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import { generateFeed, pageOf } from "../../../spike/fixture.ts";
 import type { FeedChange, FeedTask } from "../../sync/feed.ts";
 import { todayIn } from "../loader.ts";
+import { orderedSteps } from "../model.ts";
 
 const TIMEZONE = "America/New_York";
 const DAY_MS = 86_400_000;
@@ -138,6 +144,110 @@ function oldTasks(today: string): FeedChange[] {
   ];
 }
 
+type TaskChange = Extract<FeedChange, { kind: "task"; deleted: false }>;
+type Mutation = {
+  id?: unknown;
+  op?: unknown;
+  sid?: unknown;
+  fields?: Record<string, unknown>;
+  position?: { before?: string; after?: string; top?: true; bottom?: true };
+};
+type Result = { id: unknown; status: "applied"; sid: string } | { id: unknown; status: "rejected"; error: string };
+
+/** The BFF's limit (MUTATIONS_MAX_BYTES in workers/web/src/bff/api.ts). */
+const MUTATIONS_MAX_BYTES = 256 * 1024;
+const FAKE_OPS = [
+  "task.create", "task.update", "task.delete", "task.move", "myday.add", "myday.remove",
+  "step.create", "step.update", "step.delete", "step.reorder",
+];
+const TASK_FIELDS = ["title", "body", "status", "completed_at", "importance", "due", "start", "reminder", "categories", "recurrence"];
+
+/**
+ * One mutation against the "server's" tasks: the new task data, null for a
+ * delete, or the reason it is rejected. A simplified copy of the server's ops
+ * (packages/core/sync/mutations.ts): no field clocks, no Graph rules beyond
+ * completion's date, and positions only for steps. Ops the web client doesn't
+ * send yet (lists, links, attachments, task and My Day reorders) are rejected.
+ */
+function applyMutation(
+  m: Mutation,
+  find: (sid: string) => TaskChange | undefined,
+  findStep: (sid: string) => TaskChange | undefined,
+  today: string,
+  now: string,
+): { sid: string; data: FeedTask | null } | string {
+  if (typeof m.op !== "string" || !FAKE_OPS.includes(m.op)) return "unknown_op";
+  if (typeof m.sid !== "string" || m.sid === "") return "missing_sid";
+  const sid = m.sid;
+  const f = m.fields ?? {};
+  const pick = (names: string[]) => Object.fromEntries(Object.entries(f).filter(([k]) => names.includes(k)));
+  // Completing without a date gets the owner's today, as the server stamps it (SYNC-API section 6).
+  const completion = (data: FeedTask): FeedTask =>
+    data.status === "completed" ? { ...data, completed_at: data.completed_at ?? today } : { ...data, completed_at: null };
+
+  if (m.op === "task.create") {
+    if (find(sid)) return "sid_exists";
+    if (typeof f.list_id !== "string" || typeof f.title !== "string") return "invalid_field:list_id";
+    return {
+      sid,
+      data: completion({
+        list_id: f.list_id, title: f.title, status: "notStarted", body: null, importance: "normal", categories: [],
+        due: null, start: null, reminder: { on: false, at: null }, completed_at: null, recurrence: null,
+        created_at: now, modified_at: now, order: String(Date.now()),
+        my_day: { committed_day: null, committed_order: null, postponed_day: null },
+        subresources_complete: true, steps: [], links: [], attachments: [],
+        ...(pick(TASK_FIELDS) as Partial<FeedTask>),
+      }),
+    };
+  }
+  if (m.op.startsWith("step.")) {
+    const owner = m.op === "step.create" ? find(typeof f.task_id === "string" ? f.task_id : "") : findStep(sid);
+    if (!owner) return "not_found";
+    let steps = [...owner.data.steps];
+    if (m.op === "step.create") {
+      steps.push({ id: sid, title: typeof f.title === "string" ? f.title : "", checked: f.checked === true, checked_at: null, created_at: now, order: null });
+    } else if (m.op === "step.update") {
+      steps = steps.map((s) => (s.id === sid ? { ...s, ...(pick(["title", "checked"]) as Partial<typeof s>) } : s));
+    } else if (m.op === "step.delete") {
+      steps = steps.filter((s) => s.id !== sid);
+    } else if (m.op === "step.reorder") {
+      // Put the step where `position` says in the shown order, then number
+      // every step in that order, latest first, as To Do's OrderDateTime does.
+      const shown = orderedSteps(steps);
+      const moved = shown.find((s) => s.id === sid)!;
+      const rest = shown.filter((s) => s.id !== sid);
+      const p = m.position ?? {};
+      const ref = p.before ?? p.after;
+      let at = p.top ? 0 : p.bottom ? rest.length : rest.findIndex((s) => s.id === ref);
+      if (at === -1) return "unknown_position";
+      if (p.after) at++;
+      rest.splice(at, 0, moved);
+      const base = Date.now();
+      steps = rest.map((s, i) => ({ ...s, order: new Date(base - i * 1000).toISOString() }));
+    } else {
+      return "unknown_op";
+    }
+    return { sid: owner.id, data: { ...owner.data, steps, modified_at: now } };
+  }
+  const task = find(sid);
+  if (!task) return "not_found";
+  const data = task.data;
+  switch (m.op) {
+    case "task.update":
+      return { sid, data: completion({ ...data, ...(pick(TASK_FIELDS) as Partial<FeedTask>), modified_at: now }) };
+    case "task.delete":
+      return { sid, data: null };
+    case "task.move":
+      if (typeof f.list_id !== "string") return "invalid_field:list_id";
+      return { sid, data: { ...data, list_id: f.list_id, modified_at: now } };
+    case "myday.add":
+      return { sid, data: { ...data, my_day: { ...data.my_day, committed_day: today, committed_order: String(Date.now()) }, modified_at: now } };
+    case "myday.remove":
+      return { sid, data: { ...data, my_day: { ...data.my_day, committed_day: null, committed_order: null }, modified_at: now } };
+  }
+  return "unknown_op";
+}
+
 function envCount(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
@@ -172,6 +282,73 @@ export function fakeBff(): Plugin {
     feed();
     return cached!.everything.filter((c): c is Extract<FeedChange, { kind: "task" }> => c.kind === "task" && !c.deleted);
   };
+
+  let seq = 3_000_000;
+  /**
+   * POST /bff/api/sync/mutations. Each applied edit appends the task's new
+   * state (or its deletion) to the feed and replaces it among every task the
+   * "server" holds. The returned cursor is the feed position of the first
+   * appended change, so a pull from it, or from any earlier cursor, shows the
+   * edits. The real server returns the cursor after the batch; the page pulls
+   * from its own cursor either way.
+   */
+  function mutate(batch: { mutations?: Mutation[] }): { cursor: string; results: Result[] } {
+    const changes = feed();
+    const cursor = String(changes.length);
+    const everything = cached!.everything;
+    const today = cached!.today;
+    const isTask = (c: FeedChange): c is TaskChange => c.kind === "task" && !c.deleted;
+    const find = (sid: string) => everything.find((c): c is TaskChange => isTask(c) && c.id === sid);
+    const findStep = (sid: string) => everything.find((c): c is TaskChange => isTask(c) && c.data.steps.some((s) => s.id === sid));
+    const results: Result[] = [];
+    for (const m of Array.isArray(batch.mutations) ? batch.mutations : []) {
+      const out = applyMutation(m, find, findStep, today, new Date().toISOString());
+      if (typeof out === "string") {
+        results.push({ id: m.id, status: "rejected", error: out });
+        continue;
+      }
+      const at = everything.findIndex((c) => isTask(c) && c.id === out.sid);
+      if (out.data === null) {
+        everything.splice(at, 1);
+        changes.push({ kind: "task", id: out.sid, seq: ++seq, deleted: true });
+      } else {
+        const change: TaskChange = { kind: "task", id: out.sid, seq: ++seq, deleted: false, field_clock: {}, data: out.data };
+        if (at === -1) everything.push(change);
+        else everything[at] = change;
+        changes.push(change);
+      }
+      results.push({ id: m.id, status: "applied", sid: typeof m.sid === "string" ? m.sid : out.sid });
+    }
+    return { cursor, results };
+  }
+
+  /** The request body as JSON, or the status that refuses it. */
+  async function readBatch(req: IncomingMessage): Promise<unknown> {
+    let total = 0;
+    const chunks: Buffer[] = [];
+    for await (const chunk of req as AsyncIterable<Buffer>) {
+      total += chunk.length;
+      if (total > MUTATIONS_MAX_BYTES) return 413;
+      chunks.push(chunk);
+    }
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      return 400;
+    }
+  }
+
+  async function postMutations(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // The BFF's checks, so a page that forgets a header fails here too. Origin
+    // isn't checked: the dev server's origin varies.
+    if (req.headers["x-potem"] !== "1") return send(res, 403, { error: "forbidden" });
+    const media = (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+    if (media !== "application/json") return send(res, 415, { error: "unsupported_media_type" });
+    const batch = await readBatch(req);
+    if (batch === 413) return send(res, 413, { error: "body_too_large", max: MUTATIONS_MAX_BYTES });
+    if (batch === 400 || typeof batch !== "object" || batch === null) return send(res, 400, { error: "bad_json" });
+    return send(res, 200, mutate(batch as { mutations?: Mutation[] }));
+  }
 
   function send(res: ServerResponse, status: number, body?: unknown): void {
     res.statusCode = status;
@@ -218,6 +395,9 @@ export function fakeBff(): Plugin {
           link_rules_rev: null,
           timezone: TIMEZONE,
         });
+      case "POST /bff/api/sync/mutations":
+        postMutations(req, res).catch(next);
+        return;
       case "GET /bff/api/sync/changes": {
         const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit") ?? 500) | 0));
         return send(res, 200, pageOf(feed(), url.searchParams.get("cursor"), limit));
