@@ -153,6 +153,17 @@ describe("DateEntry", () => {
     expect(saved).toEqual(["2026-12-04"]);
   });
 
+  it("discard drops a pending value without saving, and close afterwards saves nothing", () => {
+    const { e, clock, registry, saved } = entry();
+    e.change("2026-12-03", false);
+    expect(registry.any()).toBe(true);
+    e.discard();
+    expect(clock.waiting()).toEqual([]);
+    expect(registry.any()).toBe(false);
+    e.close();
+    expect(saved).toEqual([]);
+  });
+
   it("waits for nothing while a value is partial, unchanged, or emptied", () => {
     const { e, clock, saved } = entry();
     e.change("0002-12-03", false);

@@ -153,6 +153,13 @@ export class DateEntry {
     return c.kind !== "none";
   }
 
+  /** Drops a value not yet saved (Escape): nothing is sent, now or on close. */
+  discard(): void {
+    this.#cancel();
+    this.#draft = null;
+    this.#registry.delete(this);
+  }
+
   /** As EditSession.close: saves now, and never throws. */
   close(): void {
     try {
