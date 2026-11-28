@@ -344,6 +344,15 @@ describe("searchText / searchPath", () => {
     const path = searchPath("a".repeat(300))!;
     expect(decodeURIComponent(path.slice("search?q=".length))).toBe("a".repeat(256));
   });
+
+  it("never splits a character made of two UTF-16 units at the limit", () => {
+    // 255 units, then an emoji (2 units) that would straddle the 256th.
+    const path = searchPath(`${"a".repeat(255)}😀😀`)!;
+    expect(decodeURIComponent(path.slice("search?q=".length))).toBe("a".repeat(255));
+    // Whole emoji up to the limit are kept: 128 of them are 256 units.
+    const emoji = searchPath("😀".repeat(200))!;
+    expect(decodeURIComponent(emoji.slice("search?q=".length))).toBe("😀".repeat(128));
+  });
 });
 
 describe("parseSearchResponse / parseTaskResponse", () => {

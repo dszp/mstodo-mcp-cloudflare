@@ -458,9 +458,23 @@ const MAX_SEARCH_CHARS = 256;
 /** The words typed, with the ends trimmed: what the local search matches. */
 export const searchText = (q: string): string => q.trim();
 
+/**
+ * `text` cut to at most `max` UTF-16 units (the server's measure) without
+ * splitting a character: half of a surrogate pair would make
+ * encodeURIComponent throw.
+ */
+function cutWhole(text: string, max: number): string {
+  let out = "";
+  for (const ch of text) {
+    if (out.length + ch.length > max) break;
+    out += ch;
+  }
+  return out;
+}
+
 /** The BFF path for "search all history", or null for an empty query. */
 export function searchPath(q: string): string | null {
-  const text = searchText(q).slice(0, MAX_SEARCH_CHARS);
+  const text = cutWhole(searchText(q), MAX_SEARCH_CHARS);
   return text === "" ? null : `search?q=${encodeURIComponent(text)}`;
 }
 
