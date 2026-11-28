@@ -514,7 +514,7 @@ describe("watchSession", () => {
     const now = LOCAL_START / 1000;
     const s = await setup(signedInInfo({ refresh_at: now + 120, idle_minutes: 60 }));
     await vi.advanceTimersByTimeAsync(seconds(60));
-    s.target.dispatchEvent(new Event("keydown")); // the check moves last_seen to now
+    s.target.dispatchEvent(new Event("keydown")); // reported at once; the report moves last_seen at the BFF
     await vi.advanceTimersByTimeAsync(seconds(600));
     expect(s.sessionChecks()).toBe(1);
     expect(s.refreshes()).toBe(0);

@@ -25,16 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binding. `npm run secrets` pushes `WEB_SESSION_SECRET` for it.
 
 ### Changed
-- **The web session's idle timer moves only on user activity.** `last_seen` is updated by
-  `GET /bff/session` with `X-Potem-Activity: 1`, which the page sends after activity (at most
-  once a minute). Refreshes and plain session reads no longer move it, so the page's automatic
-  refreshes can't keep an unattended session signed in. (Security.)
 - **pnpm replaces npm.** `pnpm-lock.yaml` replaces `package-lock.json`, with the same package
   versions, and `package.json` names the pnpm version in `packageManager`. Run `pnpm install`
   (`corepack enable` provides pnpm), and pass a deployment's name without `--`:
   `pnpm run deploy <name>`. `pnpm run` refuses while `node_modules` doesn't match the lockfile.
   The deployment scripts run wrangler from `node_modules` directly instead of through `npx`.
   The Node host image installs its runtime dependencies with pnpm in a separate stage.
+
+### Security
+- **The web session's idle timer moves only on user activity.** `last_seen` is updated by
+  `GET /bff/session` with `X-Potem-Activity: 1`, which the page sends after activity (at most
+  once a minute). Refreshes and plain session reads no longer move it, so the page's automatic
+  refreshes can't keep an unattended session signed in.
 
 ## [0.19.1] – 2026-11-27
 
