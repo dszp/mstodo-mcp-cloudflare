@@ -72,6 +72,10 @@ To upgrade:
 4. In the main checkout, run `npm run check -- <name>` and `npm run dry-run -- <name>` for every deployment. `check` doesn't depend on the wrangler version except through `auth token`, so it mainly proves the token step still works.
 5. Merge, then deploy as usual. The first deploy after the upgrade shows an empty config diff if the rendered config is unchanged.
 
+## Upgrading the OAuth library
+
+The web client's BFF (`workers/web/src/bff/`) talks to `@cloudflare/workers-oauth-provider` over HTTP and relies on how it answers; each behaviour is cited in a comment by its line in `node_modules/@cloudflare/workers-oauth-provider/dist/oauth-provider.js` (search `workers/web/src/bff` for `oauth-provider.js`), and `workers/web/src/bff/test-server.ts` copies it, so the BFF tests stay green when the library changes. On a library upgrade, re-check each cited line and update the copy. The one most likely to break silently is the stored-client check in `auth.ts` `clientIsKnown`: it revokes a random, malformed token and depends on the library answering `401 invalid_client` for an unknown client or wrong secret *before* it looks at the token, and `200` for a token that isn't three `:`-parts. If either changes, a browser whose registration expired can no longer sign in, or every sign-in registers a new client.
+
 ## Leak guard
 
 The repository is public. Don't put real hostnames, account or KV IDs, business or client names, real list or task names, or figures from the owner's account in files or commit messages: use `example.com` hosts, made-up names and made-up numbers, and keep the real values in gitignored files (`deployments/`, `config-live/`).

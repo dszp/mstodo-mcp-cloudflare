@@ -17,15 +17,20 @@ the repository's [DEPLOYMENT.md](../../DEPLOYMENT.md#web-client); the API it rea
 Run these from the repository root.
 
 ```bash
+npm run web:dev                   # Vite dev server with hot reload and a fake BFF
 npm run web:build                 # build the app into workers/web/dist
-npm run dev -- <name>             # the Worker and BFF, for a deployment with "kind": "web"
-npm run web:dev                   # Vite dev server for the app alone
+npx vite preview --config workers/web/vite.config.ts   # serve the build, with the same fake BFF
 npx vitest run --project web      # tests
 npx tsc --noEmit -p workers/web   # typecheck the app
 npx tsc --noEmit -p workers/web/tsconfig.worker.json   # typecheck the BFF and host
 npx tsc --noEmit -p workers/web/tsconfig.engine.json   # typecheck the engine
 ```
 
-`npm run dev -- <name>` serves the built app, so run `web:build` first and sign in to a real
-server. `web:dev` serves the app with hot reload and answers `/bff/*` and `/auth/*` from a fake
-BFF (`src/app/dev/fake-bff.ts`) with made-up data, so it needs no server and no sign-in.
+`web:dev` and `vite preview` answer `/bff/*` and `/auth/*` from a fake BFF
+(`src/app/dev/fake-bff.ts`) with made-up data, so they need no server and no sign-in. Use
+`vite preview` to check the production build (`http://127.0.0.1:4173`).
+
+The real Worker and BFF don't run locally against a server: the Worker answers `421` to any
+origin other than its `WEB_ORIGIN` (the deployment's https `base_url`), and the server only
+redirects sign-in back to that origin. Test sign-in on a deployed web Worker pointed at a test
+server.

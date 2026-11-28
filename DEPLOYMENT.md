@@ -241,13 +241,8 @@ budget (shared across all apps in the tenant) is spoken for. (`todoTask` has no 
 per-resource cap: one subscription per list, e.g. ~38 here; if any tenant limit is ever hit, Graph
 returns `403` and that list quietly falls back to timer-only.)
 
-A deployment is a server unless `deployment.jsonc` says `"kind": "web"`. A web deployment is the
-web client Worker in `workers/web`: it renders from `workers/web/wrangler.example.jsonc`, has no
-`kv` or `r2` (leave them out), and needs `vars.SERVER_ORIGIN`, the https origin of your server.
-`base_url` becomes `vars.WEB_ORIGIN`. `server_service` (optional) is the server Worker's name; when
-set, the web Worker reaches the server through a service binding instead of the public network.
-`npm run secrets -- <name>` pushes only `WEB_SESSION_SECRET` for a web deployment, at least 32
-bytes of random data, for example `openssl rand -base64 48`. Put it in the deployment's `.dev.vars`.
+A deployment is a server unless `deployment.jsonc` says `"kind": "web"`, the web client Worker;
+[Web client](#web-client) describes that file, its secret and how to deploy it.
 
 The committed `workers/server/wrangler.example.jsonc` is the template for every deployment and what the test
 pool and CI read, so `npm test` works without any deployment. A new binding added there reaches
@@ -453,9 +448,9 @@ npm run deploy -- <name>     # builds the app; the first deploy asks you to conf
 npm run secrets -- <name>    # pushes WEB_SESSION_SECRET; refuses until the Worker exists
 ```
 
-Open the Worker's hostname. The first visit sends the browser to the server's consent page,
-which names the client "Potem Web" and shows the web hostname. Approve it, then sign in with
-Microsoft if asked. Each browser registers its own client with the server, so a second browser
+Open the Worker's hostname. The first visit shows a signed-out page with a **Sign in** link.
+Select it to go to the server's consent page, which names the client "Potem Web" and shows the
+web hostname. Approve it, then sign in with Microsoft if asked. Each browser registers its own client with the server, so a second browser
 gets its own consent page and signing in there does not end the first one's session.
 
 **Signing out**
@@ -463,8 +458,19 @@ gets its own consent page and signing in there does not end the first one's sess
 Sign out in the app: it revokes that browser's grant on the server and clears the cookie.
 `revoke_all_connections` on the server changes the grant epoch, which every grant must match,
 so it also ends every web session; each browser's next request is refused and it signs in
-again. Closing a browser without signing out leaves the grant until the session's time limits
-pass.
+again.
+
+Without a sign-out, the cookie stops working at the session limits (`WEB_SESSION_MAX_HOURS`
+after sign-in, or `WEB_SESSION_IDLE_MINUTES` without use), and an open page signs itself out at
+the same moments. The grant on the server outlives the cookie: it lasts until its refresh token
+lapses, 14 days after the session's last refresh (30 days after sign-in if it was never
+refreshed). Sign out to end it at once.
+
+**With Cloudflare Access on the web hostname**
+
+When the Access session for the web hostname expires, the page's requests to the Worker fail
+and the page shows its error screen. Reload the page: the reload goes through Access, which asks
+you to sign in again if its policy requires it.
 
 ## Keeping sync cost down
 
