@@ -289,15 +289,31 @@ describe("MirrorStore pending edits", () => {
     expect(seen()).toEqual(["task:t1", "tasks"]);
   });
 
-  it("clear() drops the overlay and notifies pending-only tasks", () => {
+  it("clear() keeps pending edits: a create stays, an update returns with the refill", () => {
     const s = new MirrorStore();
-    s.applyPage([task("t1")]);
+    s.applyPage([task("t1", { title: "A" })]);
     s.setPending([mut("task.create", "n1", { title: "New" }), mut("task.update", "t1", { title: "B" })], CTX);
     const seen = watch(s, KEYS);
-    s.clear();
-    expect(s.task("n1")).toBeUndefined();
-    expect(s.tasks()).toEqual([]);
+    s.clear(); // a 410 resync
+    expect(s.task("n1")?.title).toBe("New");
+    expect(s.tasks().map((t) => t.id)).toEqual(["n1"]);
+    expect(s.baseTasks()).toEqual([]);
+    // n1 too: its top order is measured against a now-empty mirror.
     expect(seen()).toEqual(["lists", "task:n1", "task:t1", "tasks"]);
+    s.applyPage([task("t1", { title: "A" })]);
+    expect(s.task("t1")?.title).toBe("B");
+    expect(s.tasks().map((t) => t.id).sort()).toEqual(["n1", "t1"]);
+  });
+
+  it("seal() drops a pending create and a pending update", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1", { title: "A" })]);
+    s.setPending([mut("task.create", "n1", { title: "New" }), mut("task.update", "t1", { title: "B" })], CTX);
+    s.seal();
+    expect(s.task("n1")).toBeUndefined();
+    expect(s.task("t1")?.title).toBe("A");
+    s.clear();
+    expect(s.tasks()).toEqual([]);
   });
 
   it("seal() drops the overlay and ignores later pending edits", () => {

@@ -13,6 +13,7 @@ import {
   msUntilNextDay,
   noteText,
   olderTasks,
+  searchDetailSource,
   parseSearchResponse,
   parseTaskResponse,
   orderedSteps,
@@ -432,5 +433,27 @@ describe("olderTasks", () => {
       today: TODAY, defaultListId: "L1",
     });
     expect(olderTasks([hit("mirror-open"), hit("old-1")], [], p, true).map((t) => t.id)).toEqual(["old-1"]);
+  });
+});
+
+describe("searchDetailSource", () => {
+  const CTX = { today: TODAY, defaultListId: "L1" };
+  const at = "2026-11-27T12:00:00.000Z";
+
+  it("is the store for a mirror task and for a pending create", () => {
+    const s = storeOf(task("a"));
+    s.setPending([{ id: "m1", at, op: "task.create", sid: "n1", fields: { title: "New" } }], CTX);
+    expect(searchDetailSource(s, "a")).toBe("store");
+    expect(searchDetailSource(s, "n1")).toBe("store");
+  });
+
+  it("is gone for a mirror task pending deletion, never the server", () => {
+    const s = storeOf(task("a"));
+    s.setPending([{ id: "m1", at, op: "task.delete", sid: "a" }], CTX);
+    expect(searchDetailSource(s, "a")).toBe("gone");
+  });
+
+  it("is the server for a task the mirror doesn't hold", () => {
+    expect(searchDetailSource(storeOf(), "x")).toBe("server");
   });
 });

@@ -512,6 +512,17 @@ export function parseSearchResponse(json: unknown): MirrorTask[] | null {
   return json.results.flatMap((e) => readTask(e) ?? []);
 }
 
+/**
+ * Where a search's detail pane gets its task: the store (a mirror task, or a
+ * pending create), "gone" for a mirror task pending deletion, or the server
+ * for a task the mirror doesn't hold. A pending deletion is decided by the
+ * mirror's own copy (baseTask), so the server's copy never brings it back.
+ */
+export function searchDetailSource(store: MirrorStore, id: string): "store" | "gone" | "server" {
+  if (store.task(id) !== undefined) return "store";
+  return store.baseTask(id) !== undefined ? "gone" : "server";
+}
+
 /** The task of a GET /tasks/{sid} response, or null. */
 export const parseTaskResponse = (json: unknown): MirrorTask | null => readTask(json);
 

@@ -114,14 +114,23 @@ export class MirrorStore {
     this.#notify(this.#dropOverlay());
   }
 
+  /**
+   * Empties the mirror. Pending edits stay: pull.ts clears before a full
+   * resync (a 410), and the outbox still holds them, so a pending create
+   * stays on screen and the other edits return as applyPage refills their
+   * tasks. Only seal() drops them.
+   */
   clear(): void {
-    const dirty = this.#dropOverlay();
-    dirty.add("tasks").add("lists");
+    const dirty = new Set<string>(["tasks", "lists"]);
     for (const id of this.#tasks.keys()) dirty.add(MirrorStore.#k({ task: id }));
+    for (const id of this.#view.keys()) dirty.add(MirrorStore.#k({ task: id }));
     this.#tasks.clear();
     this.#lists.clear();
     this.#groups.clear();
+    this.#view.clear();
+    this.#edits = new Map();
     this.#baseArr = this.#taskArr = this.#listArr = this.#groupArr = this.#stepIndex = null;
+    for (const k of this.#refresh(new Set(), true)) dirty.add(k);
     this.#notify(dirty);
   }
 
@@ -212,39 +221,26 @@ export class MirrorStore {
     return byTask;
   }
 
-  // The "top" value of each pending task.create (order, within its list) and
-  // myday.add (committed_order, within today's My Day): above the base
-  // maximum, and each later one above the earlier ones (overlay.ts `above`).
-  // Measured against base tasks only: a task moved in by a pending task.move
-  // with a higher order can still sort above a pending create.
+  // The "top" value of each pending task.create (order) and myday.add
+  // (committed_order): above the maximum over every base task (for My Day,
+  // today's), and each later one above the earlier ones (overlay.ts
+  // `above`). Global rather than per list, because All and Important sort by
+  // `order` across lists. A list's view sorts its own tasks, so first there too.
   #tops(ctx: PendingContext): Map<string, string> {
     const tops = new Map<string, string>();
     const creates = this.#pending.filter((m) => m.op === "task.create");
     const adds = this.#pending.filter((m) => m.op === "myday.add");
     if (creates.length === 0 && adds.length === 0) return tops;
-    const listOf = (m: Mutation) => {
-      const v = m.fields?.["list_id"];
-      return typeof v === "string" ? v : ctx.defaultListId;
-    };
-    const lists = new Set(creates.map(listOf));
-    const maxOrder = new Map<string, string | null>();
+    let maxOrder: string | null = null;
     let maxCommitted: string | null = null;
     const gt = (a: string | null, b: string | null) => a !== null && (b === null || a > b);
     for (const t of this.#tasks.values()) {
-      if (t.list_id !== null && lists.has(t.list_id) && gt(t.order, maxOrder.get(t.list_id) ?? null)) {
-        maxOrder.set(t.list_id, t.order);
-      }
+      if (gt(t.order, maxOrder)) maxOrder = t.order;
       if (t.my_day.committed_day === ctx.today && gt(t.my_day.committed_order, maxCommitted)) {
         maxCommitted = t.my_day.committed_order;
       }
     }
-    const seen = new Map<string, number>();
-    for (const m of creates) {
-      const l = listOf(m);
-      const k = (seen.get(l) ?? 0) + 1;
-      seen.set(l, k);
-      tops.set(m.id, above(maxOrder.get(l) ?? null, k));
-    }
+    creates.forEach((m, i) => tops.set(m.id, above(maxOrder, i + 1)));
     adds.forEach((m, i) => tops.set(m.id, above(maxCommitted, i + 1)));
     return tops;
   }

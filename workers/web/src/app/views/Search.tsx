@@ -3,7 +3,7 @@ import { useMemo, useRef } from "react";
 import { searchLocal } from "../../sync/smart-lists.ts";
 import type { MirrorStore } from "../../sync/store.ts";
 import type { BffFetch } from "../api.ts";
-import { olderTasks, parseSearchResponse, parseTaskResponse, searchPath, searchText } from "../model.ts";
+import { olderTasks, parseSearchResponse, searchDetailSource, parseTaskResponse, searchPath, searchText } from "../model.ts";
 import { type Route, replaceRoute } from "../route.ts";
 import { useRemote } from "../use-remote.ts";
 import { useStoreKey } from "../use-store.ts";
@@ -186,10 +186,11 @@ export function SearchDetail({
   onOpenAttachment: (href: string, name: string) => void;
 }) {
   useStoreKey(store, { task: id });
-  const inStore = store.task(id) !== undefined;
-  const [remote, retry] = useRemote(bff, inStore ? null : `tasks/${encodeURIComponent(id)}`, parseTaskResponse);
+  const source = searchDetailSource(store, id);
+  const [remote, retry] = useRemote(bff, source === "server" ? `tasks/${encodeURIComponent(id)}` : null, parseTaskResponse);
   const props = { store, id, today, timeZone, onBack, onOpenAttachment };
-  if (inStore) return <TaskDetail {...props} />;
+  if (source === "store") return <TaskDetail {...props} />;
+  if (source === "gone") return <TaskDetail {...props} placeholder={<p className="empty">This task no longer exists.</p>} />;
   switch (remote.status) {
     case "ok":
       return <TaskDetail {...props} task={remote.data} />;

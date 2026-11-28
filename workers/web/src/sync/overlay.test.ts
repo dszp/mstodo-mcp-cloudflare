@@ -73,6 +73,11 @@ describe("applyOptimistic", () => {
     expect(undone).toMatchObject({ status: "notStarted", completed_at: null });
   });
 
+  it("completing a task that is already completed keeps its completed_at", () => {
+    const done = base("a", { status: "completed", completed_at: "2026-11-20" });
+    expect(applyOptimistic(done, mut("task.update", "a", { status: "completed" }), CTX)?.completed_at).toBe("2026-11-20");
+  });
+
   it("task.delete hides the task", () => {
     expect(applyOptimistic(base("a"), mut("task.delete", "a"), CTX)).toBeNull();
   });
@@ -159,10 +164,32 @@ describe("pending edits in the store", () => {
     expect(ids(smartListTasks(s, "all", { today: TODAY }))).toEqual(["n2", "n1", "b", "a"]);
   });
 
-  it("a pending create in an empty list still has an order", () => {
-    const s = store();
+  it("a pending create sorts first in All and Important, whatever list it is in", () => {
+    const s = store(
+      task("old", { list_id: "L1", order: "2026-11-01T00:00:00.000Z", importance: "high" }),
+      task("new", { list_id: "L2", order: "2026-11-26T00:00:00.000Z", importance: "high" }),
+    );
+    s.setPending([
+      mut("task.create", "n1", { list_id: "L1", title: "One", importance: "high" }),
+      mut("task.create", "n2", { list_id: "L2", title: "Two", importance: "high" }),
+    ], CTX);
+    expect(ids(smartListTasks(s, "all", { today: TODAY }))).toEqual(["n2", "n1", "new", "old"]);
+    expect(ids(smartListTasks(s, "important", { today: TODAY }))).toEqual(["n2", "n1", "new", "old"]);
+  });
+
+  it("a pending create in an empty list sorts above every other list's tasks", () => {
+    const s = store(task("a", { list_id: "L1", order: "2026-11-26T00:00:00.000Z" }));
     s.setPending([mut("task.create", "n1", { list_id: "L2", title: "One" })], CTX);
-    expect(s.task("n1")?.order).not.toBeNull();
+    expect(ids(smartListTasks(s, "all", { today: TODAY }))).toEqual(["n1", "a"]);
+  });
+
+  it("a pending create the pull already brought in, then updated, shows the server's copy plus the update", () => {
+    const s = store();
+    const create = mut("task.create", "n1", { list_id: "L1", title: "Mine" });
+    s.setPending([create, mut("task.update", "n1", { importance: "high" })], CTX);
+    s.applyPage([task("n1", { title: "Mine", order: "2026-11-27T12:00:00.000Z", created_at: "2026-11-27T12:00:01Z" })]);
+    expect(s.task("n1")).toMatchObject({ title: "Mine", importance: "high", order: "2026-11-27T12:00:00.000Z", created_at: "2026-11-27T12:00:01Z" });
+    expect(ids(s.tasks())).toEqual(["n1"]);
   });
 
   it("a pending myday.add shows in My Day, at the top", () => {
@@ -198,8 +225,8 @@ describe("pending edits in the store", () => {
     s.setPending([m], CTX);
     expect(s.task("a")?.title).toBe("Mine");
     // The server applied it, then another device renamed it; the pull brings that.
-    s.setPending([], CTX);
     s.applyPage([task("a", { title: "Theirs" })]);
+    s.setPending([], CTX);
     expect(s.task("a")?.title).toBe("Theirs");
     expect(s.task("a")).toBe(s.baseTask("a"));
   });

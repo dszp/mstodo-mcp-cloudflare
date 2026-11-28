@@ -23,7 +23,9 @@ export interface OverlayContext extends PendingContext {
 // `order` and `committed_order` compare as text, descending (SYNC-API §4.10).
 // A string followed by anything sorts after that string, so the current
 // maximum plus one suffix sorts above every existing value, and plus k
-// suffixes above k - 1 earlier pending ones. The value never leaves the
+// suffixes above k - 1 earlier pending ones. The store measures against every
+// task, not one list, because All and Important sort by `order` across lists.
+// The value never leaves the
 // client: the server picks the real order.
 export const TOP_SUFFIX = "~";
 export function above(max: string | null, k: number): string {
@@ -59,7 +61,9 @@ function withFields(t: MirrorTask, f: Record<string, unknown>, today: string): M
   if (has(f, "status")) {
     // The app sends completion without completed_at; the server stamps the
     // owner's date (§6), which is today in the owner's zone.
-    out.completed_at = f["status"] === "completed" ? (str(f["completed_at"]) ?? today) : null;
+    // Completing a task that is already completed keeps its date (§6).
+    if (f["status"] !== "completed") out.completed_at = null;
+    else out.completed_at = str(f["completed_at"]) ?? (t.status === "completed" ? t.completed_at : null) ?? today;
   }
   return out;
 }
@@ -151,6 +155,7 @@ export function applyOptimistic(
       return listId === undefined ? undefined : { ...base, list_id: listId };
     }
     case "myday.add":
+      // 3a only adds to the top, so the overlay shows the top and ignores `position`.
       return {
         ...base,
         my_day: { ...base.my_day, committed_day: ctx.today, committed_order: ctx.top?.(m) ?? above(null, 1) },
