@@ -216,7 +216,12 @@ export function TaskDetail({
 
         <section className="card">
           {edits ? (
-            <ReminderRow key={`r-${t.id}`} at={t.reminder.on ? t.reminder.at : null} onChange={(v) => edits.setReminder(t.id, v)} />
+            <ReminderRow
+              key={`r-${t.id}`}
+              at={t.reminder.on ? t.reminder.at : null}
+              label={t.reminder.on ? reminder : null}
+              onChange={(v) => edits.setReminder(t.id, v)}
+            />
           ) : (
             <p className={`detail-line${reminder ? " set" : ""}`}>
               <BellIcon /> {reminder ? `Remind me ${reminder}` : "No reminder"}
@@ -372,6 +377,8 @@ function DateInput({
   shown,
   read,
   onChange,
+  onDone,
+  picker,
 }: {
   type: "date" | "datetime-local";
   label: string;
@@ -379,8 +386,28 @@ function DateInput({
   shown: string;
   read: (v: string) => string | null;
   onChange: (value: string | null) => void;
+  /** Called when editing ends: the input was left, Enter, or Escape. */
+  onDone: () => void;
+  /** Open the browser's picker too: the row was pressed with a pointer, not the keyboard. */
+  picker: boolean;
 }) {
   const [draft, setDraft] = useState(shown);
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    // The row was just pressed: focus the input, and for a pointer press open
+    // the browser's picker too (showPicker needs the press's user activation,
+    // still live here). A keyboard press only focuses, because an open picker
+    // takes the keys and the date couldn't be typed.
+    const el = input.current;
+    if (!el) return;
+    el.focus();
+    if (!picker) return;
+    try {
+      el.showPicker?.();
+    } catch {
+      // No picker, or no activation left: the focused input is enough.
+    }
+  }, []);
   const [prev, setPrev] = useState(shown);
   if (prev !== shown) {
     // The task changed (here or elsewhere): show its value.
@@ -397,8 +424,13 @@ function DateInput({
   const commit = () => {
     if (!entry.current!.commit()) setDraft(shown);
   };
+  const finish = () => {
+    commit();
+    onDone();
+  };
   return (
     <input
+      ref={input}
       type={type}
       className="date-input"
       aria-label={label}
@@ -407,11 +439,15 @@ function DateInput({
         setDraft(e.target.value);
         entry.current!.change(e.target.value, e.target.validity.badInput);
       }}
-      onBlur={commit}
+      onBlur={finish}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          commit();
+          finish();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          entry.current!.discard();
+          onDone();
         }
       }}
     />
@@ -423,8 +459,22 @@ const platformSchedule = (fn: () => void, ms: number) => {
   return () => clearTimeout(t);
 };
 
-/** The reminder: a datetime-local input in the browser's zone, and Clear. */
-function ReminderRow({ at, onChange }: { at: string | null; onChange: (instant: string | null) => void }) {
+/**
+ * The reminder row: "Remind me" or "Remind me <time>" until pressed; then a
+ * datetime-local input in the browser's zone, with its picker open. Clear
+ * removes a set reminder.
+ */
+function ReminderRow({
+  at,
+  label,
+  onChange,
+}: {
+  at: string | null;
+  /** The reminder's time as shown (the owner's zone), or null when none is set. */
+  label: string | null;
+  onChange: (instant: string | null) => void;
+}) {
+  const [open, setOpen] = useState<null | { picker: boolean }>(null);
   const zone = browserZone();
   // Compared as the input reads it, so a stored instant with seconds or
   // milliseconds doesn't count as a change.
@@ -432,17 +482,23 @@ function ReminderRow({ at, onChange }: { at: string | null; onChange: (instant: 
   return (
     <div className={`detail-line${at !== null ? " set" : ""}`}>
       <BellIcon />
-      {/* The input shows the time; the label only names the row. */}
-      <span className="line-label">Remind me</span>
-      <DateInput
-        type="datetime-local"
-        label="Reminder"
-        current={current}
-        shown={at === null ? "" : reminderInputValue(at, zone)}
-        read={(v) => reminderFromInput(v, zone)}
-        onChange={onChange}
-      />
-      {at !== null && (
+      {open ? (
+        <DateInput
+          type="datetime-local"
+          label="Reminder"
+          current={current}
+          shown={at === null ? "" : reminderInputValue(at, zone)}
+          read={(v) => reminderFromInput(v, zone)}
+          onChange={onChange}
+          onDone={() => setOpen(null)}
+          picker={open.picker}
+        />
+      ) : (
+        <button type="button" className="line-button" onClick={(e) => setOpen({ picker: e.detail > 0 })}>
+          {label !== null ? `Remind me ${label}` : "Remind me"}
+        </button>
+      )}
+      {at !== null && !open && (
         <button type="button" className="icon-button" aria-label="Clear reminder" onClick={() => onChange(null)}>
           <XIcon />
         </button>
@@ -451,7 +507,11 @@ function ReminderRow({ at, onChange }: { at: string | null; onChange: (instant: 
   );
 }
 
-/** The due date: its label, a date input (the bare date the feed uses), and Clear. */
+/**
+ * The due-date row: "Add due date" or "Due <day>" until pressed; then a date
+ * input (the bare date the feed uses) with its picker open. Clear removes a
+ * set date.
+ */
 function DueRow({
   due,
   label,
@@ -463,12 +523,27 @@ function DueRow({
   tone: string | null;
   onChange: (date: string | null) => void;
 }) {
+  const [open, setOpen] = useState<null | { picker: boolean }>(null);
   return (
     <div className={`detail-line${label ? ` set due-${tone}` : ""}`}>
       <CalendarIcon />
-      <span className="line-label">{label ?? "Due date"}</span>
-      <DateInput type="date" label="Due date" current={due} shown={due ?? ""} read={(v) => v} onChange={onChange} />
-      {due !== null && (
+      {open ? (
+        <DateInput
+          type="date"
+          label="Due date"
+          current={due}
+          shown={due ?? ""}
+          read={(v) => v}
+          onChange={onChange}
+          onDone={() => setOpen(null)}
+          picker={open.picker}
+        />
+      ) : (
+        <button type="button" className="line-button" onClick={(e) => setOpen({ picker: e.detail > 0 })}>
+          {label ?? "Add due date"}
+        </button>
+      )}
+      {due !== null && !open && (
         <button type="button" className="icon-button" aria-label="Clear due date" onClick={() => onChange(null)}>
           <XIcon />
         </button>
