@@ -1,10 +1,12 @@
 // Dispatches the BFF's paths: /auth/* (sign-in) and /bff/* (session and API).
 // Every response it returns carries the security headers; null hands the
-// request to the static assets.
+// request to the host: the static assets, or, for a GET /bff/socket upgrade,
+// the socket relay, which calls authorizeSocket itself before relaying.
 
 import { handleApi, handleRefresh, handleSession, jsonResponse } from "./api.ts";
 import { handleCallback, handleLogin, handleLogout } from "./auth.ts";
 import { isBffPath, withSecurityHeaders } from "./headers.ts";
+import { BFF_SOCKET_PATH, upgradeRefusal } from "./socket.ts";
 import type { BffConfig } from "./upstream.ts";
 
 type Handler = (req: Request, cfg: BffConfig) => Promise<Response>;
@@ -32,6 +34,12 @@ function dispatch(req: Request, cfg: BffConfig, pathname: string): Promise<Respo
 export async function route(req: Request, cfg: BffConfig): Promise<Response | null> {
   const { pathname } = new URL(req.url);
   if (!isBffPath(pathname)) return null;
+  if (pathname === BFF_SOCKET_PATH) {
+    // An upgrade is the host's: it calls authorizeSocket (Origin, session) and
+    // relays. Anything else gets the same 405 or 426 authorizeSocket would give.
+    const refusal = upgradeRefusal(req);
+    return refusal && withSecurityHeaders(refusal, cfg, pathname);
+  }
   let res: Response;
   try {
     res = await dispatch(req, cfg, pathname);

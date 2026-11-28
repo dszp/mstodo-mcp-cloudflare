@@ -65,6 +65,8 @@ describe("route", () => {
       ["/auth/logout", {}, 405],
       ["/bff/session", { method: "DELETE" }, 405],
       ["/bff/session/refresh", {}, 405],
+      ["/bff/socket", {}, 426],
+      ["/bff/socket", { method: "POST", headers: { upgrade: "websocket", origin: WEB } }, 405],
       ["/auth/other", {}, 404],
       ["/auth", {}, 404],
       ["/bff/other", {}, 404],
@@ -86,6 +88,20 @@ describe("route", () => {
   it("names the allowed method on a 405", async () => {
     expect((await route(req("/auth/logout"), cfg))!.headers.get("allow")).toBe("POST");
     expect((await route(req("/bff/session", { method: "POST" }), cfg))!.headers.get("allow")).toBe("GET");
+    expect((await route(req("/bff/socket", { method: "POST" }), cfg))!.headers.get("allow")).toBe("GET");
+  });
+
+  it("returns null for a GET /bff/socket upgrade, which the host authorizes and relays", async () => {
+    for (const upgrade of ["websocket", "WebSocket"]) {
+      expect(await route(req("/bff/socket", { headers: { upgrade, origin: WEB } }), cfg), upgrade).toBeNull();
+    }
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("answers 426 naming the upgrade for a GET /bff/socket without one", async () => {
+    const res = (await route(req("/bff/socket", { headers: { origin: WEB } }), cfg))!;
+    expect(res.status).toBe(426);
+    expect(res.headers.get("upgrade")).toBe("websocket");
   });
 
   it("names the allowed method on a /bff/api 405: GET for a read path, POST for sync/mutations", async () => {

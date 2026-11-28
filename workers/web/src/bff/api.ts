@@ -227,8 +227,12 @@ export async function handleApi(req: Request, cfg: BffConfig): Promise<Response>
   return route.method === "POST" ? postMutations(req, cfg, route.path) : getRead(req, cfg, route.path + url.search);
 }
 
-/** The session's upstream headers, or the 401 that answers instead. */
-async function authorize(req: Request, cfg: BffConfig): Promise<Headers | Response> {
+/**
+ * The session's upstream headers, a fresh Headers holding only Authorization
+ * and, when the session has one, cf-access-token; or the 401 that answers
+ * instead. Nothing from the browser's request is copied. socket.ts uses it too.
+ */
+export async function authorize(req: Request, cfg: BffConfig): Promise<Headers | Response> {
   const s = await sealer(cfg.secret);
   const session = await readSession(req, s);
   const state = session ? sessionState(session, cfg.now(), limits(cfg)) : "expired";
