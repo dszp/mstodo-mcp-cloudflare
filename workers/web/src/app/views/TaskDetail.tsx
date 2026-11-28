@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { MirrorStore, MirrorTask } from "../../sync/store.ts";
+import { caretFromClick, focusAt } from "../caret.ts";
 import { DateEntry } from "../edit-session.ts";
 import type { Edits } from "../edits.ts";
 import {
@@ -493,7 +494,14 @@ function NoteEditor({ text, onSave }: { text: string; onSave: (text: string) => 
     setEditing(false);
     session.finish(save, value);
   };
-  const start = () => {
+  const box = useRef<HTMLTextAreaElement>(null);
+  // Where the click landed in the note, so the caret goes there (null: the end).
+  const caret = useRef<number | null>(null);
+  useEffect(() => {
+    if (editing && box.current) focusAt(box.current, caret.current);
+  }, [editing]);
+  const start = (at: number | null) => {
+    caret.current = at;
     session.open(text);
     setEditing(true);
   };
@@ -505,7 +513,7 @@ function NoteEditor({ text, onSave }: { text: string; onSave: (text: string) => 
           className="note-input"
           aria-label="Note"
           defaultValue={text}
-          autoFocus
+          ref={box}
           rows={6}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -527,13 +535,13 @@ function NoteEditor({ text, onSave }: { text: string; onSave: (text: string) => 
       className="card note"
       onClick={(e) => {
         // A click on a link in the note follows it; anywhere else edits.
-        if (!(e.target instanceof Element && e.target.closest("a"))) start();
+        if (!(e.target instanceof Element && e.target.closest("a"))) start(caretFromClick(e.nativeEvent, e.currentTarget));
       }}
     >
       {text !== "" ? <LinkedText text={text} /> : <span className="muted">Add a note</span>}
       <button type="button" className="icon-button note-edit" aria-label={text !== "" ? "Edit note" : "Add a note"} onClick={(e) => {
         e.stopPropagation();
-        start();
+        start(null);
       }}>
         <PencilIcon />
       </button>
