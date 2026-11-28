@@ -27,6 +27,7 @@ see [README.md](./README.md).
     - [9. Verify](#9-verify)
   - [Optional: custom domain](#optional-custom-domain)
   - [Optional: Cloudflare Access for the sync app](#optional-cloudflare-access-for-the-sync-app)
+  - [Web client](#web-client)
   - [Keeping sync cost down](#keeping-sync-cost-down)
   - [My Day support (optional)](#my-day-support-optional)
     - [What enabling My Day unlocks (and what it costs)](#what-enabling-my-day-unlocks-and-what-it-costs)
@@ -385,6 +386,83 @@ lists the steps under **Turning it on**.
 For the app's `https` sign-in callback, the Worker can also serve
 `/.well-known/apple-app-site-association`. Set `APPLE_TEAM_ID` (the 10-character Apple
 team ID) and `APPLE_BUNDLE_IDS` (comma-separated bundle IDs). Unset, the path is a 404.
+
+## Web client
+
+The web client is a second Worker, `workers/web`, that serves the Potem web app and signs in to
+your server on your behalf. It is read-only: it shows lists, tasks, task detail and search, and
+changes nothing on the server. The browser never holds a Microsoft or server token. The Worker
+keeps the tokens in a sealed, HttpOnly cookie and forwards a fixed set of `GET` requests to the
+server's sync API.
+
+**Before you start**
+
+- A deployed server (steps 1 to 9 above), reachable over https. The web Worker needs its origin.
+- A hostname for the web Worker, for example `todo-web.example.com`, on a zone in your Cloudflare
+  account. The cookies are bound to that exact host, so use one hostname only.
+- Optional: put Cloudflare Access in front of that hostname as a second gate. Add a bypass
+  policy for `/robots.txt` so crawlers see the Worker's `Disallow: /`.
+
+**Describe the deployment**
+
+Create `deployments/<name>/deployment.jsonc` with `"kind": "web"`. A web deployment has no `kv`
+or `r2` (leave them out), and `base_url` becomes the Worker's own origin:
+
+```jsonc
+{
+  "kind": "web",
+  "account_id": "00000000000000000000000000000000",
+  "worker_name": "potem-web",
+  "base_url": "https://todo-web.example.com",
+  "workers_dev": false,
+  "preview_urls": false,
+  "custom_domains": ["todo-web.example.com"],
+  "vars": {
+    "SERVER_ORIGIN": "https://todo.example.com"
+  },
+  // Optional, same account only: the server Worker's name. The web Worker then
+  // reaches the server through a service binding instead of the public network.
+  "server_service": "potem-server"
+}
+```
+
+`SERVER_ORIGIN` is an https origin with no path or trailing slash. Two more vars are optional:
+`WEB_SESSION_MAX_HOURS` (default `12`) is the longest a sign-in lasts, and
+`WEB_SESSION_IDLE_MINUTES` (default `60`) is how long a browser can sit idle before it must
+sign in again. Both are positive whole numbers.
+
+**The secret**
+
+`WEB_SESSION_SECRET` seals the cookies. It must be at least 32 bytes; the Worker answers every
+request with `503` until it is. Generate one and put it in `deployments/<name>/.dev.vars`:
+
+```bash
+echo "WEB_SESSION_SECRET=$(openssl rand -base64 48)" >> deployments/<name>/.dev.vars
+```
+
+A value may also be an `op://` reference, as for the server's secrets. Changing the secret signs
+every browser out, because no cookie unseals under the new key.
+
+**Deploy**
+
+```bash
+npm run check -- <name>      # validates the file and reads the live Worker
+npm run deploy -- <name>     # builds the app; the first deploy asks you to confirm, in a terminal
+npm run secrets -- <name>    # pushes WEB_SESSION_SECRET; refuses until the Worker exists
+```
+
+Open the Worker's hostname. The first visit sends the browser to the server's consent page,
+which names the client "Potem Web" and shows the web hostname. Approve it, then sign in with
+Microsoft if asked. Each browser registers its own client with the server, so a second browser
+gets its own consent page and signing in there does not end the first one's session.
+
+**Signing out**
+
+Sign out in the app: it revokes that browser's grant on the server and clears the cookie.
+`revoke_all_connections` on the server changes the grant epoch, which every grant must match,
+so it also ends every web session; each browser's next request is refused and it signs in
+again. Closing a browser without signing out leaves the grant until the session's time limits
+pass.
 
 ## Keeping sync cost down
 

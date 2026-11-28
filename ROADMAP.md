@@ -550,8 +550,12 @@ imports it as `@potem/core/<path>` through a `paths` alias in `tsconfig.json` an
 vitest alias, so there is no workspace to publish or link. `workers/web` is started
 (2026-11-27): a framework-free sync engine in `workers/web/src/sync` (mirror store, pull
 loop, smart lists and local search per `docs/SYNC-API.md` section 4.10) and a React spike
-in `workers/web/spike` that renders a synthetic feed. It has no Worker yet and is not
-deployed.
+in `workers/web/spike` that renders a synthetic feed. The web client's milestone 2 (read-only)
+is built: a Worker (`workers/web/src/hosts/cloudflare`), a backend-for-frontend that signs in to the
+server as an OAuth client and proxies an allowlist of `GET` requests (`workers/web/src/bff`), and a
+React app with the sidebar, smart lists, lists, task detail and search (`workers/web/src/app`), plus
+a `web` deployment kind. Deploying it is a separate step; see DEPLOYMENT.md, "Web client". Next:
+edits (milestone 3), push updates, a persistent mirror with an installable PWA, and a Node host.
 
 The web UI lives here, not with the apps, because it is TypeScript and imports the sync
 API types directly. The app repository is named for its platform (`potem-apple`); an
