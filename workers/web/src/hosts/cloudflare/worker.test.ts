@@ -60,6 +60,7 @@ describe("config check", () => {
     { label: "max hours fractional", over: { WEB_SESSION_MAX_HOURS: "1.5" }, name: "WEB_SESSION_MAX_HOURS" },
     { label: "idle minutes negative", over: { WEB_SESSION_IDLE_MINUTES: "-5" }, name: "WEB_SESSION_IDLE_MINUTES" },
     { label: "idle minutes empty", over: { WEB_SESSION_IDLE_MINUTES: "" }, name: "WEB_SESSION_IDLE_MINUTES" },
+    { label: "icon not blue or teal", over: { WEB_ICON: "green" }, name: "WEB_ICON" },
   ];
   for (const c of cases) {
     it(`503 naming the variable, never its value: ${c.label}`, async () => {
@@ -194,5 +195,35 @@ describe("upstream", () => {
     await call(fakeEnv().env, `${WEB}/auth/login`);
     expect(seen.length).toBeGreaterThan(0);
     expect(seen[0]).toContain(`${SERVER}/`);
+  });
+});
+
+describe("app icon", () => {
+  const ICON_PATHS = ["/favicon.svg", "/favicon.ico", "/apple-touch-icon.png"];
+
+  it("serves the blue icons as they are when WEB_ICON is absent or blue", async () => {
+    for (const over of [{}, { WEB_ICON: "blue" }]) {
+      const { env, assets } = fakeEnv(over);
+      for (const path of ICON_PATHS) await call(env, `${WEB}${path}`);
+      expect(assets.calls.map((r) => new URL(r.url).pathname), JSON.stringify(over)).toEqual(ICON_PATHS);
+    }
+  });
+
+  it("serves the teal set for WEB_ICON teal, with the security headers", async () => {
+    const { env, assets } = fakeEnv({ WEB_ICON: "teal" });
+    for (const path of ICON_PATHS) {
+      const res = await call(env, `${WEB}${path}`);
+      expect(res.headers.get("strict-transport-security"), path).toBe(HSTS);
+    }
+    expect(assets.calls.map((r) => new URL(r.url).pathname)).toEqual(
+      ICON_PATHS.map((p) => `/icons/teal${p}`),
+    );
+  });
+
+  it("leaves other paths alone for WEB_ICON teal", async () => {
+    const { env, assets } = fakeEnv({ WEB_ICON: "teal" });
+    await call(env, `${WEB}/robots.txt`);
+    await call(env, `${WEB}/favicon.svg.map`);
+    expect(assets.calls.map((r) => new URL(r.url).pathname)).toEqual(["/robots.txt", "/favicon.svg.map"]);
   });
 });

@@ -429,10 +429,12 @@ or `r2` (leave them out), and `base_url` becomes the Worker's own origin:
 }
 ```
 
-`SERVER_ORIGIN` is an https origin with no path or trailing slash. Two more vars are optional:
+`SERVER_ORIGIN` is an https origin with no path or trailing slash. Three more vars are optional:
 `WEB_SESSION_MAX_HOURS` (default `12`) is the longest a sign-in lasts, and
 `WEB_SESSION_IDLE_MINUTES` (default `60`) is how long a browser can sit idle before it must
-sign in again. Both are positive whole numbers.
+sign in again. Both are positive whole numbers. `WEB_ICON` picks the app icon the page and the
+browser tab show: `blue` (the default) or `teal`, for a development deployment, like the apps'
+Dev builds.
 
 **The secret**
 

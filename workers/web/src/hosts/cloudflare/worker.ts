@@ -23,12 +23,20 @@ export interface Env {
   WEB_SESSION_SECRET: string;
   WEB_SESSION_MAX_HOURS?: string;
   WEB_SESSION_IDLE_MINUTES?: string;
+  /** Which app icon the deployment shows: "blue" (the default, production) or "teal" (development). */
+  WEB_ICON?: string;
 }
 
 const DEFAULT_MAX_HOURS = 12;
 const DEFAULT_IDLE_MINUTES = 60;
 
-type Checked = { ok: true; cfg: BffConfig } | { ok: false; variable: string };
+type Icon = "blue" | "teal";
+type Checked = { ok: true; cfg: BffConfig; icon: Icon } | { ok: false; variable: string };
+
+// The icon files at the site root are the blue set; a teal deployment serves
+// the same names from public/icons/teal/, so index.html and the sidebar logo
+// never need to know which deployment they are on.
+const ICON_FILES = new Set(["/favicon.svg", "/favicon.ico", "/apple-touch-icon.png"]);
 
 /** An https origin with no path, query or userinfo; plain http only for loopback. */
 function originOf(value: unknown): string | null {
@@ -68,10 +76,13 @@ async function checkConfig(env: Env): Promise<Checked> {
   if (maxHours === null) return { ok: false, variable: "WEB_SESSION_MAX_HOURS" };
   const idleMinutes = positiveInt(env.WEB_SESSION_IDLE_MINUTES, DEFAULT_IDLE_MINUTES);
   if (idleMinutes === null) return { ok: false, variable: "WEB_SESSION_IDLE_MINUTES" };
+  const icon = env.WEB_ICON ?? "blue";
+  if (icon !== "blue" && icon !== "teal") return { ok: false, variable: "WEB_ICON" };
 
   const fetchFn = env.SERVER ? (r: Request) => env.SERVER!.fetch(r) : (r: Request) => fetch(r);
   return {
     ok: true,
+    icon,
     cfg: {
       webOrigin,
       serverOrigin,
@@ -107,7 +118,7 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const checked = await checkConfig(env);
     if (!checked.ok) return misconfigured(checked.variable, new URL(req.url).pathname);
-    const { cfg } = checked;
+    const { cfg, icon } = checked;
     const url = new URL(req.url);
 
     // A second hostname on the Worker would mint cookies and OAuth callbacks
@@ -121,6 +132,11 @@ export default {
 
     if (req.method !== "GET" && req.method !== "HEAD") {
       return withSecurityHeaders(text("Method not allowed.\n", 405, { allow: "GET, HEAD" }), cfg, url.pathname);
+    }
+    if (icon === "teal" && ICON_FILES.has(url.pathname)) {
+      const teal = new URL(url);
+      teal.pathname = `/icons/teal${url.pathname}`;
+      return withSecurityHeaders(await env.ASSETS.fetch(new Request(teal, req)), cfg, url.pathname);
     }
     return withSecurityHeaders(await env.ASSETS.fetch(req), cfg, url.pathname);
   },
