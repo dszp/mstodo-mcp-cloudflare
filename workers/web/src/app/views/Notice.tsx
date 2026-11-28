@@ -42,6 +42,21 @@ export function EditStatus({ outbox, notices }: { outbox: Pick<Outbox, "unsent" 
 }
 
 /**
+ * Writes `text` to the clipboard: true when it worked. False, never a throw,
+ * when the page has no clipboard (an insecure origin, an old browser) or the
+ * browser refuses the write.
+ */
+export async function copyText(text: string, clipboard: Pick<Clipboard, "writeText"> | undefined): Promise<boolean> {
+  if (!clipboard) return false;
+  try {
+    await clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * One notice. It goes away after NOTICE_MS of the page being visible, except
  * one holding a refused note's text: that stays until dismissed, so the text
  * can still be copied.
@@ -61,12 +76,7 @@ export function NoticeItem({ notice, onDismiss }: { notice: Notice; onDismiss: (
         <button
           type="button"
           className="notice-action"
-          onClick={() => {
-            navigator.clipboard.writeText(recover).then(
-              () => setCopied(true),
-              () => setCopied(false),
-            );
-          }}
+          onClick={() => void copyText(recover, navigator.clipboard).then(setCopied)}
         >
           {copied === true ? "Copied" : copied === false ? "Couldn't copy" : "Copy my text"}
         </button>

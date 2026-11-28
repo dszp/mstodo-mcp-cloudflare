@@ -62,8 +62,9 @@ function setup(...extra: FeedChange[]) {
   ]);
   const { outbox, sent } = fakeOutbox();
   let n = 0;
-  const edits = createEdits(outbox, store, loader, () => `new-${++n}`);
-  return { store, sent, edits };
+  const refusedNotes: [string, string][] = [];
+  const edits = createEdits(outbox, store, loader, () => `new-${++n}`, (sid, text) => refusedNotes.push([sid, text]));
+  return { store, sent, edits, refusedNotes };
 }
 
 beforeEach(() => {
@@ -201,17 +202,22 @@ describe("task edits", () => {
     ]);
   });
 
-  it("setNotes on an HTML body throws, and nothing is enqueued", () => {
-    const { edits, sent } = setup();
-    expect(() => edits.setNotes("t-html", "flattened")).toThrow(/html/i);
+  it("setNotes on an HTML body sends nothing and reports the typed text instead of throwing", () => {
+    const { edits, sent, refusedNotes } = setup();
+    expect(() => edits.setNotes("t-html", "flattened")).not.toThrow();
     expect(sent).toEqual([]);
+    expect(refusedNotes).toEqual([["t-html", "flattened"]]);
   });
 
-  it("setNotes throws for a body of a type it doesn't know, and for an unknown task", () => {
-    const { edits, sent } = setup(task("t-rtf", { body: { type: "rtf", content: "x" } }));
-    expect(() => edits.setNotes("t-rtf", "x")).toThrow();
-    expect(() => edits.setNotes("missing", "x")).toThrow();
+  it("setNotes on a body of a type it doesn't know, or a task that's gone, reports the text and sends nothing", () => {
+    const { edits, sent, refusedNotes } = setup(task("t-rtf", { body: { type: "rtf", content: "x" } }));
+    edits.setNotes("t-rtf", "typed");
+    edits.setNotes("missing", "typed too");
     expect(sent).toEqual([]);
+    expect(refusedNotes).toEqual([
+      ["t-rtf", "typed"],
+      ["missing", "typed too"],
+    ]);
   });
 
   it("setDue sends a bare date, or null to clear", () => {

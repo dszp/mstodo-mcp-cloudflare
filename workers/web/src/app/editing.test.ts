@@ -354,6 +354,25 @@ describe("createEditing: superseded and refused notes", () => {
     ]);
   });
 
+  it("a note that can't be saved here (task gone) becomes a notice carrying the typed text", () => {
+    const { editing } = setup();
+    editing.edits.setNotes("gone", "My typed note");
+    expect(editing.outbox.pending()).toEqual([]);
+    expect(editing.notices.list()).toEqual([
+      { id: expect.any(Number), op: "task.update", sid: "gone", error: "note_changed", recoverText: "My typed note" },
+    ]);
+  });
+
+  it("a refused edit that emptied the note has no text to copy", async () => {
+    const { editing } = setup({
+      answer: (b) => json({ cursor: "c", results: b.mutations.map((m) => ({ id: m.id, status: "rejected", error: "deleted" })) }),
+    });
+    editing.edits.setNotes("t1", "");
+    await editing.outbox.flush();
+    expect(editing.notices.list()).toHaveLength(1);
+    expect(editing.notices.list()[0]).not.toHaveProperty("recoverText");
+  });
+
   it("a refused rename has no text to copy", async () => {
     const { editing } = setup({
       answer: (b) => json({ cursor: "c", results: b.mutations.map((m) => ({ id: m.id, status: "rejected", error: "deleted" })) }),
@@ -365,6 +384,7 @@ describe("createEditing: superseded and refused notes", () => {
 });
 
 describe("flushWithin (sign-out)", () => {
+  const edit: Mutation = { id: "m1", at: "2026-11-27T12:00:00.000Z", op: "task.update", sid: "t1", fields: { title: "A" } };
   function fakeTimers() {
     const timers: { fn: () => void; ms: number }[] = [];
     return { timers, schedule: (fn: () => void, ms: number) => (timers.push({ fn, ms }), () => {}) };
@@ -373,14 +393,14 @@ describe("flushWithin (sign-out)", () => {
   it("resolves when the flush finishes", async () => {
     const t = fakeTimers();
     let done = false;
-    await flushWithin({ flush: async () => void (done = true) }, 3000, t.schedule);
+    await flushWithin({ unsent: () => [edit], flush: async () => void (done = true) }, 3000, t.schedule);
     expect(done).toBe(true);
   });
 
   it("gives up after 3 s when the flush hangs", async () => {
     const t = fakeTimers();
     let resolved = false;
-    const p = flushWithin({ flush: () => new Promise<void>(() => {}) }, 3000, t.schedule).then(() => (resolved = true));
+    const p = flushWithin({ unsent: () => [edit], flush: () => new Promise<void>(() => {}) }, 3000, t.schedule).then(() => (resolved = true));
     await Promise.resolve();
     expect(resolved).toBe(false);
     expect(t.timers.map((x) => x.ms)).toEqual([3000]);
@@ -389,9 +409,17 @@ describe("flushWithin (sign-out)", () => {
     expect(resolved).toBe(true);
   });
 
+  it("resolves at once with nothing unsent, without waiting on a pull retry", async () => {
+    const t = fakeTimers();
+    let flushed = false;
+    await flushWithin({ unsent: () => [], flush: () => ((flushed = true), new Promise<void>(() => {})) }, 3000, t.schedule);
+    expect(flushed).toBe(false);
+    expect(t.timers).toEqual([]);
+  });
+
   it("resolves when the flush throws", async () => {
     const t = fakeTimers();
-    await expect(flushWithin({ flush: async () => Promise.reject(new Error("x")) }, 3000, t.schedule)).resolves.toBeUndefined();
+    await expect(flushWithin({ unsent: () => [edit], flush: async () => Promise.reject(new Error("x")) }, 3000, t.schedule)).resolves.toBeUndefined();
   });
 
   it("a sign-out after it counts only what is still unsent", async () => {

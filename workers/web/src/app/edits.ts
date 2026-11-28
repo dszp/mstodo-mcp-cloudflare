@@ -19,7 +19,12 @@ export interface Edits {
   setImportant(sid: string, on: boolean): void;
   /** A blank title does nothing. */
   rename(sid: string, title: string): void;
-  /** Throws, sending nothing, unless the task's note is plain text or empty. */
+  /**
+   * Sends the note when the task's note is plain text or empty. Otherwise (the
+   * task is gone, or its note is HTML) it sends nothing and hands the text to
+   * `onNoteRefused`. It never throws: the note box saves from an unmount, where
+   * a throw would take down the page.
+   */
   setNotes(sid: string, text: string): void;
   /** `date` is YYYY-MM-DD in the owner's zone; null clears it. */
   setDue(sid: string, date: string | null): void;
@@ -56,6 +61,8 @@ export function createEdits(
   loader: Pick<Loader, "today">,
   // New task and step sids are made on the device (SYNC-API §2).
   newSid: () => string = () => crypto.randomUUID(),
+  // A note setNotes wouldn't send; the page shows it so the words can be copied.
+  onNoteRefused: (sid: string, text: string) => void = () => {},
 ): Edits {
   const send = (m: Omit<Mutation, "id" | "at">) => void outbox.enqueue(m);
   const update = (sid: string, fields: Record<string, unknown>) => send({ op: "task.update", sid, fields });
@@ -93,11 +100,12 @@ export function createEdits(
 
     setNotes(sid, text) {
       const shown = store.task(sid);
-      if (shown === undefined) throw new Error(`no task ${sid} to edit`);
       // Both the shown task and the server's copy: no path may send a body
-      // over an HTML note.
-      if (!editableBody(shown.body) || !editableBody(store.baseTask(sid)?.body)) {
-        throw new Error("this note is HTML; edit it in the app");
+      // over an HTML note. Another device can delete the task or make its
+      // note HTML while a note box is open.
+      if (shown === undefined || !editableBody(shown.body) || !editableBody(store.baseTask(sid)?.body)) {
+        onNoteRefused(sid, text);
+        return;
       }
       update(sid, { body: { type: "text", content: text } });
     },

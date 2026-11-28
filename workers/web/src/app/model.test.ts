@@ -570,6 +570,10 @@ describe("noticeText", () => {
     expect(noticeText("step.update", "superseded", ["checked"])).toBe("Another change to the step was newer, so yours wasn't kept.");
   });
 
+  it("says a note couldn't be saved because the task changed elsewhere", () => {
+    expect(noticeText("task.update", "note_changed")).toBe("Couldn't save your note: the task changed elsewhere.");
+  });
+
   it("says why an add failed before the lists loaded", () => {
     expect(noticeText("task.create", "no_default_list")).toBe("Couldn't add the task: no default list yet.");
   });

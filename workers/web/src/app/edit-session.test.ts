@@ -84,6 +84,17 @@ describe("EditSession", () => {
     expect(commits).toEqual(["Draft 2"]);
   });
 
+  it("an unmount never throws, even when the save does", () => {
+    const { s } = session();
+    s.onCommit = () => {
+      throw new Error("no task to edit");
+    };
+    s.open("Draft");
+    s.type("Draft 2");
+    expect(() => s.close()).not.toThrow();
+    expect(s.isOpen).toBe(false);
+  });
+
   it("an unmount while open with nothing typed, or the opened text typed back, saves nothing", () => {
     const { s, commits } = session();
     s.open("Draft");
@@ -186,6 +197,16 @@ describe("DateEntry", () => {
     const c = entry();
     c.e.close();
     expect(c.saved).toEqual([]);
+  });
+
+  it("an unmount never throws, even when the save does", () => {
+    const clock = fakeSchedule();
+    const e = new DateEntry(clock.schedule, createDirtyRegistry());
+    e.sync("2026-12-01", asIs, () => {
+      throw new Error("gone");
+    });
+    e.change("2026-12-03", false);
+    expect(() => e.close()).not.toThrow();
   });
 
   it("is dirty while a save waits or a changed value is uncommitted", () => {

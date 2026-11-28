@@ -74,9 +74,17 @@ export class EditSession {
     if (next !== null) this.onCommit(next);
   }
 
-  /** The box unmounts: an open edit saves what was typed. */
+  /**
+   * The box unmounts: an open edit saves what was typed. Never throws: it
+   * runs in a React effect cleanup, where a throw reaches the root error
+   * boundary and replaces the page.
+   */
   close(): void {
-    this.finish(true);
+    try {
+      this.finish(true);
+    } catch (e) {
+      console.error("saving an edit box on close failed", e);
+    }
   }
 }
 
@@ -145,7 +153,12 @@ export class DateEntry {
     return c.kind !== "none";
   }
 
+  /** As EditSession.close: saves now, and never throws. */
   close(): void {
-    this.commit();
+    try {
+      this.commit();
+    } catch (e) {
+      console.error("saving a date on close failed", e);
+    }
   }
 }

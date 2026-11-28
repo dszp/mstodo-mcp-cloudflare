@@ -242,6 +242,7 @@ export function noticeText(op: Op, error: string, fields: readonly string[] = []
     const what = names.length > 0 ? names.join(" and ") : `the ${subject}`;
     return `Another change to ${what} was newer, so yours ${names.length > 1 ? "weren't" : "wasn't"} kept.`;
   }
+  if (error === "note_changed") return "Couldn't save your note: the task changed elsewhere.";
   if (error === "ambiguous_create") {
     return `Couldn't confirm the new ${subject}: it may have been added twice. Check the list.`;
   }

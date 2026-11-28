@@ -44,7 +44,8 @@ export interface Notice {
   sid: string;
   /**
    * The §5.3 error, the outbox's "refused" / "too_large", the page's
-   * "no_default_list", or "superseded" for an applied edit some of whose
+   * "no_default_list", "note_changed" (a note setNotes wouldn't send: the
+   * task is gone or its note became HTML), or "superseded" for an applied edit some of whose
    * fields a newer edit had already set.
    */
   error: string;
@@ -145,14 +146,16 @@ export const SIGN_OUT_FLUSH_MS = 3_000;
 
 /**
  * Sends what is unsent, giving up after `ms`: sign-out calls it first, so an
- * edit made just before pressing Sign out isn't lost to the discard. Never
- * rejects.
+ * edit made just before pressing Sign out isn't lost to the discard. With
+ * nothing unsent it resolves at once: flush() would otherwise wait on a pull
+ * retry, which sign-out doesn't need. Never rejects.
  */
 export function flushWithin(
-  outbox: Pick<Outbox, "flush">,
+  outbox: Pick<Outbox, "flush" | "unsent">,
   ms: number = SIGN_OUT_FLUSH_MS,
   schedule: (fn: () => void, ms: number) => Cancel = platformSchedule,
 ): Promise<void> {
+  if (outbox.unsent().length === 0) return Promise.resolve();
   return new Promise<void>((resolve) => {
     const cancel = schedule(resolve, ms);
     outbox.flush().then(
@@ -218,16 +221,20 @@ export function createEditing(deps: EditingDeps): Editing {
   const guarded = { enqueue: (m: Parameters<Outbox["enqueue"]>[0]) => (discarded === null ? outbox.enqueue(m) : null) };
 
   const notices = createNotices();
+  // An empty note (one the edit cleared) has nothing to copy, and the notice
+  // would otherwise stay until dismissed.
+  const recover = (text: unknown) => (typeof text === "string" && text !== "" ? { recoverText: text } : {});
   outbox.onRejected((m, r) => {
     const body = m.op === "task.update" ? (m.fields?.["body"] as { content?: unknown } | null | undefined) : undefined;
-    const text = typeof body?.content === "string" ? body.content : undefined;
-    notices.add({ op: m.op, sid: m.sid, error: r.error, ...(text !== undefined && { recoverText: text }) });
+    notices.add({ op: m.op, sid: m.sid, error: r.error, ...recover(body?.content) });
   });
   outbox.onSuperseded((m, fields) => notices.add({ op: m.op, sid: m.sid, error: "superseded", fields }));
 
   return {
     outbox,
-    edits: createEdits(guarded, store, loader, random),
+    edits: createEdits(guarded, store, loader, random, (sid, text) =>
+      notices.add({ op: "task.update", sid, error: "note_changed", ...recover(text) }),
+    ),
     notices,
     refreshContext,
     discarded: () => discarded,
