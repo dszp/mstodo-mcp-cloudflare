@@ -3,6 +3,7 @@ import type { Mutation, MutationResult, SendResult } from "./mutation";
 import { type OutboxDeps, createOutbox } from "./outbox";
 
 class SignedOut extends Error {}
+class Permanent extends Error {}
 
 // A virtual clock behind the injected schedule: timers fire only when tick()
 // passes their due time, so every delay the outbox asks for is observable.
@@ -43,12 +44,14 @@ type Responder = (batch: Mutation[]) => SendResult | Error;
 function harness(respond: Responder = (b) => answer(b, "applied")) {
   const clock = fakeClock();
   const sent: string[][] = [];
+  const sentBytes: number[] = [];
   let pulls = 0;
   let n = 0;
   let responder = respond;
   const deps: OutboxDeps = {
     async send(batch) {
       sent.push(batch.map((m) => m.id));
+      sentBytes.push(JSON.stringify(batch).length);
       const r = responder(batch);
       if (r instanceof Error) throw r;
       return r;
@@ -60,12 +63,14 @@ function harness(respond: Responder = (b) => answer(b, "applied")) {
     random: () => `m-${++n}`,
     schedule: clock.schedule,
     isSignedOut: (e) => e instanceof SignedOut,
+    isPermanent: (e) => e instanceof Permanent,
   };
   const outbox = createOutbox(deps);
   return {
     outbox,
     clock,
     sent,
+    sentBytes,
     pulls: () => pulls,
     respondWith(r: Responder) {
       responder = r;
@@ -131,6 +136,7 @@ describe("outbox", () => {
       random: () => `m-${++n}`,
       schedule: clock.schedule,
       isSignedOut: () => false,
+      isPermanent: () => false,
     });
     outbox.enqueue(edit("t1"));
     const first = outbox.flush();
@@ -180,10 +186,10 @@ describe("outbox", () => {
   });
 
   it("keeps a sent mutation the results leave out, and ignores results for ids it never sent", async () => {
-    const h = harness((b) => ({
+    const h = harness(() => ({
       cursor: "c2",
       results: [
-        { id: b[0]!.id, status: "applied", sid: "t1" },
+        { id: "m-1", status: "applied", sid: "t1" },
         { id: "m-unknown", status: "rejected", error: "deleted" },
       ],
     }));
@@ -192,7 +198,11 @@ describe("outbox", () => {
     h.outbox.enqueue(edit("t1"));
     h.outbox.enqueue(edit("t2"));
     await h.outbox.flush();
+    // m-1 went through, so m-2 is resent at once; that answer removes nothing,
+    // so the outbox backs off.
+    expect(h.sent).toEqual([["m-1", "m-2"], ["m-2"]]);
     expect(h.outbox.pending().map((m) => m.sid)).toEqual(["t2"]);
+    expect(h.clock.waiting()).toEqual([1000]);
     expect(rejected).toEqual([]);
   });
 
@@ -276,6 +286,7 @@ describe("outbox", () => {
       random: () => `m-${++n}`,
       schedule: clock.schedule,
       isSignedOut: () => false,
+      isPermanent: () => false,
     });
     outbox.subscribe(() => {
       pending = outbox.pending().length;
@@ -310,6 +321,7 @@ describe("outbox", () => {
       random: () => `m-${++n}`,
       schedule: clock.schedule,
       isSignedOut: () => false,
+      isPermanent: () => false,
     });
     for (let i = 0; i < 26; i++) outbox.enqueue(edit(`t${i}`));
     await outbox.flush();
@@ -365,5 +377,117 @@ describe("outbox", () => {
     expect(h.pulls()).toBe(0);
     // The edits stay until sign-out discards them, so the count can be shown.
     expect(h.outbox.discard()).toBe(2);
+  });
+
+  it("sends an edit enqueued while a run is shutting down", async () => {
+    const h = harness();
+    let once = true;
+    h.outbox.subscribe(() => {
+      // One microtask after the queue drains: the run's loop has returned but
+      // the run itself hasn't been cleared yet.
+      if (once && h.outbox.pending().length === 0) {
+        once = false;
+        void Promise.resolve().then(() => h.outbox.enqueue(edit("t2")));
+      }
+    });
+    h.outbox.enqueue(edit("t1"));
+    await h.outbox.flush();
+    await settle();
+    expect(h.outbox.pending().map((m) => m.id)).toEqual(["m-2"]);
+    await h.clock.tick(300);
+    expect(h.sent).toEqual([["m-1"], ["m-2"]]);
+    expect(h.outbox.pending()).toEqual([]);
+  });
+
+  it("caps a batch at 192 KiB of JSON as well as 25 mutations", async () => {
+    const h = harness();
+    const text = "x".repeat(30 * 1024);
+    for (let i = 1; i <= 10; i++) h.outbox.enqueue({ op: "task.update", sid: `t${i}`, fields: { title: text } });
+    await h.outbox.flush();
+    expect(h.sent.length).toBeGreaterThan(1);
+    for (const bytes of h.sentBytes) expect(bytes).toBeLessThanOrEqual(192 * 1024);
+    expect(h.sent.flat()).toEqual(Array.from({ length: 10 }, (_, i) => `m-${i + 1}`));
+    expect(h.outbox.pending()).toEqual([]);
+  });
+
+  it("rejects a mutation larger than a batch as too_large and sends the rest", async () => {
+    const h = harness();
+    const rejected: [string, unknown][] = [];
+    h.outbox.onRejected((m, e) => rejected.push([m.id, e]));
+    h.outbox.enqueue(edit("t1"));
+    h.outbox.enqueue({ op: "task.update", sid: "t2", fields: { title: "x".repeat(200 * 1024) } });
+    h.outbox.enqueue(edit("t3"));
+    await h.outbox.flush();
+    expect(h.sent).toEqual([["m-1"], ["m-3"]]);
+    expect(rejected).toEqual([["m-2", { error: "too_large" }]]);
+    expect(h.outbox.pending()).toEqual([]);
+  });
+
+  it("splits a permanently refused batch until the one bad edit is found, in order, never resending a batch", async () => {
+    const h = harness((b) => (b.some((m) => m.sid === "t3") ? new Permanent("400") : answer(b, "applied")));
+    const rejected: [string, unknown][] = [];
+    h.outbox.onRejected((m, e) => rejected.push([m.id, e]));
+    for (const s of ["t1", "t2", "t3", "t4"]) h.outbox.enqueue(edit(s));
+    await h.outbox.flush();
+    expect(h.sent).toEqual([["m-1", "m-2", "m-3", "m-4"], ["m-1", "m-2"], ["m-3", "m-4"], ["m-3"], ["m-4"]]);
+    expect(rejected).toEqual([["m-3", { error: "refused" }]]);
+    expect(h.outbox.pending()).toEqual([]);
+    expect(h.clock.waiting()).toEqual([]);
+    expect(new Set(h.sent.map((b) => b.join())).size).toBe(h.sent.length);
+  });
+
+  it("a batch that made progress without a failure resets the backoff and sends the rest at once", async () => {
+    let call = 0;
+    const h = harness((b) => {
+      call += 1;
+      if (call === 1) return new Error("network");
+      if (call === 2) return { cursor: "c", results: [{ id: b[0]!.id, status: "applied" }, { id: b[1]!.id, status: "skipped" }] };
+      return answer(b, "applied");
+    });
+    h.outbox.enqueue(edit("t1"));
+    h.outbox.enqueue(edit("t2"));
+    await h.outbox.flush();
+    expect(h.clock.waiting()).toEqual([1000]);
+    await h.clock.tick(1000);
+    expect(h.sent).toEqual([["m-1", "m-2"], ["m-1", "m-2"], ["m-2"]]);
+    expect(h.outbox.pending()).toEqual([]);
+    expect(h.clock.waiting()).toEqual([]);
+    h.respondWith(() => new Error("network"));
+    h.outbox.enqueue(edit("t3"));
+    await h.outbox.flush();
+    expect(h.clock.waiting()).toEqual([1000]);
+  });
+
+  it("a discard while a request is open: no onRejected for discarded edits, no timer left behind", async () => {
+    const clock = fakeClock();
+    let release: (r: SendResult) => void = () => {};
+    let n = 0;
+    const outbox = createOutbox({
+      send: () => new Promise<SendResult>((r) => (release = r)),
+      pull: async () => {},
+      now: () => new Date(0),
+      random: () => `m-${++n}`,
+      schedule: clock.schedule,
+      isSignedOut: () => false,
+      isPermanent: () => false,
+    });
+    const rejected: unknown[] = [];
+    outbox.onRejected((m) => rejected.push(m));
+    outbox.enqueue(edit("t1"));
+    outbox.enqueue(edit("t2"));
+    const done = outbox.flush();
+    await settle();
+    expect(outbox.discard()).toBe(2);
+    release({
+      cursor: "c",
+      results: [
+        { id: "m-1", status: "rejected", error: "deleted" },
+        { id: "m-2", status: "failed", error: "graph_unavailable", retry: true },
+      ],
+    });
+    await done;
+    expect(rejected).toEqual([]);
+    expect(clock.waiting()).toEqual([]);
+    expect(outbox.pending()).toEqual([]);
   });
 });
