@@ -425,4 +425,12 @@ describe("olderTasks", () => {
   it("keeps the server's order", () => {
     expect(olderTasks([hit("z"), hit("a"), hit("m")], [], s, true).map((t) => t.id)).toEqual(["z", "a", "m"]);
   });
+
+  it("doesn't bring back a mirror task that is pending deletion", () => {
+    const p = storeOf(task("mirror-open"));
+    p.setPending([{ id: "m1", at: "2026-11-27T12:00:00.000Z", op: "task.delete", sid: "mirror-open" }], {
+      today: TODAY, defaultListId: "L1",
+    });
+    expect(olderTasks([hit("mirror-open"), hit("old-1")], [], p, true).map((t) => t.id)).toEqual(["old-1"]);
+  });
 });

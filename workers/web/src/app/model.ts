@@ -529,7 +529,9 @@ export function olderTasks(
   const seen = new Set(localIds);
   const out: MirrorTask[] = [];
   for (const h of hits) {
-    if (seen.has(h.id) || store.task(h.id) !== undefined) continue;
+    // The mirror's own copy, not the overlay: a task pending deletion is still
+    // held, and must not come back as an older hit.
+    if (seen.has(h.id) || store.baseTask(h.id) !== undefined) continue;
     seen.add(h.id);
     if (includeCompleted || h.status !== "completed") out.push(h);
   }
