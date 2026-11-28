@@ -3,7 +3,7 @@ import type { FeedChange, FeedList, FeedTask } from "../sync/feed.ts";
 import type { Mutation, SendResult } from "../sync/mutation.ts";
 import { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError } from "./api.ts";
-import { CLIENT_ID_KEY, MutationsHttpError, createEditing, sendMutations } from "./editing.ts";
+import { CLIENT_ID_KEY, MutationsHttpError, createEditing, sendMutations, watchOnline } from "./editing.ts";
 
 function taskData(over: Partial<FeedTask> = {}): FeedTask {
   return {
@@ -317,6 +317,63 @@ describe("createEditing: notices", () => {
     editing.notices.dismiss(n!.id);
     expect(editing.notices.list()).toEqual([]);
     expect(seen).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("createEditing: superseded and refused notes", () => {
+  it("superseded_fields on an applied result become a notice naming the fields", async () => {
+    const { editing } = setup({
+      answer: (b) =>
+        json({ cursor: "c", results: b.mutations.map((m) => ({ id: m.id, status: "applied", sid: m.sid, superseded_fields: ["title"] })) }),
+    });
+    editing.edits.rename("t1", "A");
+    await editing.outbox.flush();
+    expect(editing.notices.list()).toEqual([
+      { id: expect.any(Number), op: "task.update", sid: "t1", error: "superseded", fields: ["title"] },
+    ]);
+  });
+
+  it("a refused note keeps the text, so the notice can copy it", async () => {
+    const { editing } = setup({
+      answer: (b) => json({ cursor: "c", results: b.mutations.map((m) => ({ id: m.id, status: "rejected", error: "invalid_field:body" })) }),
+    });
+    editing.edits.setNotes("t1", "Line one\nLine two");
+    await editing.outbox.flush();
+    expect(editing.notices.list()).toEqual([
+      { id: expect.any(Number), op: "task.update", sid: "t1", error: "invalid_field:body", recoverText: "Line one\nLine two" },
+    ]);
+  });
+
+  it("a note too large to send keeps the text too", async () => {
+    const { editing } = setup();
+    const big = "x".repeat(200 * 1024);
+    editing.edits.setNotes("t1", big);
+    await editing.outbox.flush();
+    expect(editing.notices.list()).toEqual([
+      { id: expect.any(Number), op: "task.update", sid: "t1", error: "too_large", recoverText: big },
+    ]);
+  });
+
+  it("a refused rename has no text to copy", async () => {
+    const { editing } = setup({
+      answer: (b) => json({ cursor: "c", results: b.mutations.map((m) => ({ id: m.id, status: "rejected", error: "deleted" })) }),
+    });
+    editing.edits.rename("t1", "A");
+    await editing.outbox.flush();
+    expect(editing.notices.list()[0]).not.toHaveProperty("recoverText");
+  });
+});
+
+describe("watchOnline", () => {
+  it("flushes the outbox when the browser comes back online, until stopped", () => {
+    const target = new EventTarget();
+    const flush = vi.fn(async () => {});
+    const stop = watchOnline({ flush }, target);
+    target.dispatchEvent(new Event("online"));
+    expect(flush).toHaveBeenCalledTimes(1);
+    stop();
+    target.dispatchEvent(new Event("online"));
+    expect(flush).toHaveBeenCalledTimes(1);
   });
 });
 

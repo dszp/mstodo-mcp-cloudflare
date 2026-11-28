@@ -17,6 +17,7 @@ import {
   titleEdit,
   msUntilNextDay,
   noticeText,
+  editStatusText,
   reminderFromInput,
   reminderInputValue,
   noteText,
@@ -537,6 +538,15 @@ describe("reminder input", () => {
   });
 });
 
+describe("editStatusText", () => {
+  it("says Saving while edits are unsent, and Offline when the browser is offline", () => {
+    expect(editStatusText(false, true)).toBeNull();
+    expect(editStatusText(false, false)).toBeNull();
+    expect(editStatusText(true, true)).toBe("Saving…");
+    expect(editStatusText(true, false)).toBe("Offline — changes will be sent when you reconnect.");
+  });
+});
+
 describe("noticeText", () => {
   it("names the action and the reason for each rejected error", () => {
     expect(noticeText("task.update", "deleted")).toBe("Couldn't save: the task was deleted elsewhere.");
@@ -546,6 +556,18 @@ describe("noticeText", () => {
       "Couldn't confirm the new task: it may have been added twice. Check the list.",
     );
     expect(noticeText("task.delete", "too_large")).toBe("Couldn't delete the task: the edit is too large to send.");
+  });
+
+  it("says My Day is off when the server has it turned off", () => {
+    expect(noticeText("myday.add", "my_day_disabled")).toBe("Couldn't add the task to My Day: My Day is turned off on the server.");
+  });
+
+  it("says a newer change won for a superseded field", () => {
+    expect(noticeText("task.update", "superseded", ["title"])).toBe("Another change to the title was newer, so yours wasn't kept.");
+    expect(noticeText("task.update", "superseded", ["due", "body"])).toBe(
+      "Another change to the due date and the note was newer, so yours weren't kept.",
+    );
+    expect(noticeText("step.update", "superseded", ["checked"])).toBe("Another change to the step was newer, so yours wasn't kept.");
   });
 
   it("says why an add failed before the lists loaded", () => {

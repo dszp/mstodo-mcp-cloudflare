@@ -37,13 +37,21 @@ export async function sendMutations(bff: BffFetch, clientId: string, batch: read
   return (await res.json()) as SendResult;
 }
 
-/** An edit the server refused, or that could never be sent. */
+/** An edit the server refused or partly skipped, or that could never be sent. */
 export interface Notice {
   id: number;
   op: Op;
   sid: string;
-  /** The §5.3 error, the outbox's "refused" / "too_large", or the page's "no_default_list". */
+  /**
+   * The §5.3 error, the outbox's "refused" / "too_large", the page's
+   * "no_default_list", or "superseded" for an applied edit some of whose
+   * fields a newer edit had already set.
+   */
   error: string;
+  /** For "superseded": the fields that weren't kept. */
+  fields?: string[];
+  /** A refused note's text, so the notice can offer to copy it: the edit is gone, the words needn't be. */
+  recoverText?: string;
 }
 
 export interface Notices {
@@ -122,6 +130,16 @@ function createNotices(): Notices {
   };
 }
 
+/**
+ * Sends waiting edits as soon as the browser is back online, rather than at
+ * the end of a backoff. Returns a function that stops watching.
+ */
+export function watchOnline(outbox: Pick<Outbox, "flush">, target: EventTarget): () => void {
+  const onOnline = () => void outbox.flush();
+  target.addEventListener("online", onOnline);
+  return () => target.removeEventListener("online", onOnline);
+}
+
 const platformSchedule = (fn: () => void, ms: number): Cancel => {
   const t = setTimeout(fn, ms);
   return () => clearTimeout(t);
@@ -172,7 +190,12 @@ export function createEditing(deps: EditingDeps): Editing {
   const guarded = { enqueue: (m: Parameters<Outbox["enqueue"]>[0]) => (discarded === null ? outbox.enqueue(m) : null) };
 
   const notices = createNotices();
-  outbox.onRejected((m, r) => notices.add({ op: m.op, sid: m.sid, error: r.error }));
+  outbox.onRejected((m, r) => {
+    const body = m.op === "task.update" ? (m.fields?.["body"] as { content?: unknown } | null | undefined) : undefined;
+    const text = typeof body?.content === "string" ? body.content : undefined;
+    notices.add({ op: m.op, sid: m.sid, error: r.error, ...(text !== undefined && { recoverText: text }) });
+  });
+  outbox.onSuperseded((m, fields) => notices.add({ op: m.op, sid: m.sid, error: "superseded", fields }));
 
   return {
     outbox,

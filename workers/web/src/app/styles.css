@@ -588,6 +588,17 @@ dialog.confirm p { margin: 0 0 16px; overflow-wrap: anywhere; }
   color: var(--bg);
   font-size: 14px;
 }
+.notice-action {
+  flex: none;
+  padding: 3px 8px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
 .saving { padding: 4px 10px; background: var(--card); color: var(--text-2); font-size: 12px; }
 
 /* iOS zooms into any field under 16 px. */

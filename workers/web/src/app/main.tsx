@@ -4,7 +4,7 @@ import { MirrorStore } from "../sync/store.ts";
 import { App, AppContext, type AppDeps } from "./App.tsx";
 import { createBffFetch, withTimeout } from "./api.ts";
 import { dirtyEditors } from "./edit-session.ts";
-import { createEditing } from "./editing.ts";
+import { createEditing, watchOnline } from "./editing.ts";
 import { createLoader } from "./loader.ts";
 import { createSessionClient } from "./session.ts";
 import { ErrorBoundary } from "./views/ErrorBoundary.tsx";
@@ -37,6 +37,7 @@ window.addEventListener("beforeunload", (e) => {
   e.preventDefault();
   e.returnValue = "";
 });
+watchOnline(editing.outbox, window);
 const deps: AppDeps = { store, session, loader, bff, editing };
 
 createRoot(document.getElementById("root")!).render(

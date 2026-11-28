@@ -215,9 +215,33 @@ const NOTICE_ACTIONS: Partial<Record<Op, string>> = {
  * `failed` that won't be retried, or the outbox's "refused"/"too_large"):
  * the action, then the reason in plain words.
  */
-export function noticeText(op: Op, error: string): string {
+// How a superseded field is named in the notice.
+const FIELD_NAMES: Record<string, string> = {
+  title: "the title",
+  body: "the note",
+  due: "the due date",
+  start: "the start date",
+  reminder: "the reminder",
+  importance: "importance",
+  status: "completion",
+  completed_at: "the completion date",
+  categories: "the categories",
+  recurrence: "the repeat",
+};
+
+/**
+ * The notice for an edit: one the server refused (`error`), or, for error
+ * "superseded", one whose `fields` the server skipped because another edit
+ * to them was newer (SYNC-API §6).
+ */
+export function noticeText(op: Op, error: string, fields: readonly string[] = []): string {
   const action = NOTICE_ACTIONS[op] ?? "save";
   const subject = op.startsWith("step.") ? "step" : "task";
+  if (error === "superseded") {
+    const names = op.startsWith("task.") ? fields.map((f) => FIELD_NAMES[f] ?? f) : [`the ${subject}`];
+    const what = names.length > 0 ? names.join(" and ") : `the ${subject}`;
+    return `Another change to ${what} was newer, so yours ${names.length > 1 ? "weren't" : "wasn't"} kept.`;
+  }
   if (error === "ambiguous_create") {
     return `Couldn't confirm the new ${subject}: it may have been added twice. Check the list.`;
   }
@@ -226,8 +250,18 @@ export function noticeText(op: Op, error: string): string {
   else if (error === "list_excluded") reason = "that list doesn't sync";
   else if (error === "too_large") reason = "the edit is too large to send";
   else if (error === "no_default_list") reason = "no default list yet";
+  else if (error === "my_day_disabled") reason = "My Day is turned off on the server";
   else reason = "the server refused it";
   return `Couldn't ${action}: ${reason}.`;
+}
+
+/**
+ * The line beside the notices while edits are unsent: Saving…, or, with the
+ * browser offline, that they wait for the connection. Null when nothing waits.
+ */
+export function editStatusText(unsent: boolean, online: boolean): string | null {
+  if (!unsent) return null;
+  return online ? "Saving…" : "Offline — changes will be sent when you reconnect.";
 }
 
 /** The signed-out screen's line for edits sign-out dropped; null when none were. */
