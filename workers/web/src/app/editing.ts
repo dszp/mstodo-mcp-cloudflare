@@ -140,6 +140,34 @@ export function watchOnline(outbox: Pick<Outbox, "flush">, target: EventTarget):
   return () => target.removeEventListener("online", onOnline);
 }
 
+/** How long an explicit sign-out waits for unsent edits to go before it signs out anyway. */
+export const SIGN_OUT_FLUSH_MS = 3_000;
+
+/**
+ * Sends what is unsent, giving up after `ms`: sign-out calls it first, so an
+ * edit made just before pressing Sign out isn't lost to the discard. Never
+ * rejects.
+ */
+export function flushWithin(
+  outbox: Pick<Outbox, "flush">,
+  ms: number = SIGN_OUT_FLUSH_MS,
+  schedule: (fn: () => void, ms: number) => Cancel = platformSchedule,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const cancel = schedule(resolve, ms);
+    outbox.flush().then(
+      () => {
+        cancel();
+        resolve();
+      },
+      () => {
+        cancel();
+        resolve();
+      },
+    );
+  });
+}
+
 const platformSchedule = (fn: () => void, ms: number): Cancel => {
   const t = setTimeout(fn, ms);
   return () => clearTimeout(t);

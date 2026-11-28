@@ -3,7 +3,7 @@ import type { FeedChange, FeedList, FeedTask } from "../sync/feed.ts";
 import type { Mutation, SendResult } from "../sync/mutation.ts";
 import { MirrorStore } from "../sync/store.ts";
 import { type BffFetch, SignedOutError } from "./api.ts";
-import { CLIENT_ID_KEY, MutationsHttpError, createEditing, sendMutations, watchOnline } from "./editing.ts";
+import { CLIENT_ID_KEY, MutationsHttpError, createEditing, flushWithin, sendMutations, watchOnline } from "./editing.ts";
 
 function taskData(over: Partial<FeedTask> = {}): FeedTask {
   return {
@@ -361,6 +361,45 @@ describe("createEditing: superseded and refused notes", () => {
     editing.edits.rename("t1", "A");
     await editing.outbox.flush();
     expect(editing.notices.list()[0]).not.toHaveProperty("recoverText");
+  });
+});
+
+describe("flushWithin (sign-out)", () => {
+  function fakeTimers() {
+    const timers: { fn: () => void; ms: number }[] = [];
+    return { timers, schedule: (fn: () => void, ms: number) => (timers.push({ fn, ms }), () => {}) };
+  }
+
+  it("resolves when the flush finishes", async () => {
+    const t = fakeTimers();
+    let done = false;
+    await flushWithin({ flush: async () => void (done = true) }, 3000, t.schedule);
+    expect(done).toBe(true);
+  });
+
+  it("gives up after 3 s when the flush hangs", async () => {
+    const t = fakeTimers();
+    let resolved = false;
+    const p = flushWithin({ flush: () => new Promise<void>(() => {}) }, 3000, t.schedule).then(() => (resolved = true));
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    expect(t.timers.map((x) => x.ms)).toEqual([3000]);
+    t.timers[0]!.fn();
+    await p;
+    expect(resolved).toBe(true);
+  });
+
+  it("resolves when the flush throws", async () => {
+    const t = fakeTimers();
+    await expect(flushWithin({ flush: async () => Promise.reject(new Error("x")) }, 3000, t.schedule)).resolves.toBeUndefined();
+  });
+
+  it("a sign-out after it counts only what is still unsent", async () => {
+    const { editing, session } = setup();
+    editing.edits.rename("t1", "A");
+    await flushWithin(editing.outbox, 3000, () => () => {});
+    session.end();
+    expect(editing.discarded()).toBe(0);
   });
 });
 

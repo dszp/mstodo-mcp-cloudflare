@@ -13,7 +13,7 @@ import { type Loader, myDayOn, watchFocus } from "./loader.ts";
 import { type TaskView, unsavedEditsText } from "./model.ts";
 import { type Route, currentRoute, replaceRoute, subscribeRoute } from "./route.ts";
 import { openAttachment, saveWithAnchor } from "./download.ts";
-import type { Editing } from "./editing.ts";
+import { type Editing, flushWithin } from "./editing.ts";
 import { type SessionClient, watchSession } from "./session.ts";
 import { useToday } from "./use-today.ts";
 import { SearchDetail, SearchPane } from "./views/Search.tsx";
@@ -162,12 +162,20 @@ function Ready() {
   const task = route.task ?? null;
   const pane = task !== null ? "detail" : sidebarShown ? "sidebar" : "list";
 
+  const [signingOut, setSigningOut] = useState(false);
   const signOut = () => {
     setSignOutFailed(false);
-    session.logout().catch((e: unknown) => {
-      console.error("sign-out failed", e);
-      setSignOutFailed(true);
-    });
+    setSigningOut(true);
+    // Unsent edits get up to 3 s to go first (pressing the button has
+    // already blurred and saved an open edit box); what is still unsent is
+    // then discarded and counted on the signed-out screen.
+    flushWithin(editing.outbox)
+      .then(() => session.logout())
+      .catch((e: unknown) => {
+        console.error("sign-out failed", e);
+        setSignOutFailed(true);
+      })
+      .finally(() => setSigningOut(false));
   };
   const onOpenAttachment = (href: string, name: string) => {
     void openAttachment(session, href, name, saveWithAnchor(document));
@@ -186,8 +194,8 @@ function Ready() {
         onNavigate={() => setSidebarShown(false)}
         footer={
           <>
-            <button type="button" className="sign-out" onClick={signOut}>
-              Sign out
+            <button type="button" className="sign-out" onClick={signOut} disabled={signingOut}>
+              {signingOut ? "Signing out…" : "Sign out"}
             </button>
             {signOutFailed && <p className="small">Sign-out didn't finish. Try again.</p>}
           </>
