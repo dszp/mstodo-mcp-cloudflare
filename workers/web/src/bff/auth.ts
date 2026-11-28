@@ -241,13 +241,13 @@ export async function handleCallback(req: Request, cfg: BffConfig): Promise<Resp
 
   const error = q.get("error");
   if (error !== null) {
+    // The server's words only for this sign-in: anyone can send a browser a
+    // callback URL with an error text of their choosing.
+    if (!stateMatches) return errorPage(400, "Sign-in didn't finish", "Sign-in didn't complete.");
     const description = q.get("error_description");
-    return errorPage(
-      400,
-      "Sign-in didn't finish",
-      description ? `${error}: ${description}` : error,
-      stateMatches ? [clearCookie(LOGIN_COOKIE)] : [],
-    );
+    return errorPage(400, "Sign-in didn't finish", description ? `${error}: ${description}` : error, [
+      clearCookie(LOGIN_COOKIE),
+    ]);
   }
   if (!login || !stateMatches) {
     return errorPage(400, "Sign-in expired", "This sign-in doesn't match one started in this browser.");
@@ -312,6 +312,11 @@ export async function handleCallback(req: Request, cfg: BffConfig): Promise<Resp
   // expires_in (oauth-provider.js, lines 3637-3654). Behind Access, the front
   // adds cf_access_token and cf_access_expires_at in epoch seconds
   // (workers/server/src/hosts/shared/app-signin.ts, withAccessToken, line 195).
+  // Sign-in went through /app/signin, so the server is behind Access and every
+  // /api/v1 call needs the Access token; a session without one would only fail.
+  if (login.access && !nonEmpty(body.cf_access_token)) {
+    return unavailable("The Potem server didn't send the Cloudflare Access token this sign-in needs.");
+  }
   const now = cfg.now();
   const session = {
     access_token: body.access_token,
@@ -347,18 +352,25 @@ export async function handleLogout(req: Request, cfg: BffConfig): Promise<Respon
     // RFC 7009: a token and no grant_type. The library authenticates the
     // client as for any /token call, then revokes the whole grant for a refresh
     // token that belongs to it (oauth-provider.js, line 3221; revokeToken and
-    // revokeRefreshIfOwned, lines 4248-4287).
-    try {
-      const res = await cfg.upstream("/token", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded", authorization: basicAuth(device) },
-        body: new URLSearchParams({ token: session.refresh_token, token_type_hint: "refresh_token" }),
-      });
-      await res.body?.cancel();
-    } catch {
-      // The cookie is cleared regardless; an unrevoked grant lapses with its
-      // refresh token.
-    }
+    // revokeRefreshIfOwned, lines 4248-4287). The access token is revoked in a
+    // second call, in case the first didn't land. Both are best effort: the
+    // cookie is cleared regardless, and an unrevoked grant lapses with its
+    // refresh token.
+    await revoke(cfg, device, session.refresh_token, "refresh_token");
+    await revoke(cfg, device, session.access_token, "access_token");
   }
   return new Response(null, { status: 204, headers: { "set-cookie": clearCookie(SESSION_COOKIE) } });
+}
+
+async function revoke(cfg: BffConfig, device: Device, token: string, hint: string): Promise<void> {
+  try {
+    const res = await cfg.upstream("/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", authorization: basicAuth(device) },
+      body: new URLSearchParams({ token, token_type_hint: hint }),
+    });
+    await res.body?.cancel();
+  } catch {
+    // best effort; see handleLogout
+  }
 }

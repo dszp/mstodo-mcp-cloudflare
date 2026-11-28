@@ -33,7 +33,7 @@ beforeEach(() => {
 const csrf = { "x-potem": "1", origin: WEB };
 const req = (path: string, init: RequestInit = {}) => new Request(new URL(path, WEB), init);
 
-const API_CSP = "sandbox; default-src 'none'";
+const API_CSP = "sandbox; default-src 'none'; frame-ancestors 'none'";
 
 function expectSecurityHeaders(res: Response, label: string, noStore: boolean, csp = CSP) {
   expect(res.headers.get("content-security-policy"), label).toBe(csp);
@@ -41,6 +41,8 @@ function expectSecurityHeaders(res: Response, label: string, noStore: boolean, c
   expect(res.headers.get("referrer-policy"), label).toBe("no-referrer");
   expect(res.headers.get("x-robots-tag"), label).toBe("noindex, nofollow");
   if (noStore) expect(res.headers.get("cache-control"), label).toBe("no-store");
+  // Every /auth and /bff response (noStore marks those) is same-origin only.
+  expect(res.headers.get("cross-origin-resource-policy"), label).toBe(noStore ? "same-origin" : null);
 }
 
 describe("route", () => {
@@ -72,7 +74,6 @@ describe("route", () => {
       expect(res?.status, label).toBe(status);
       const api = new URL(path, WEB).pathname.startsWith("/bff/api/");
       expectSecurityHeaders(res!, label, true, api ? API_CSP : CSP);
-      expect(res!.headers.get("cross-origin-resource-policy"), label).toBe(api ? "same-origin" : null);
     }
     expect(server.apiRequests).toHaveLength(0);
   });

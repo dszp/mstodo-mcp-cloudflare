@@ -521,6 +521,30 @@ describe("GET /auth/callback", () => {
     expect(jar.values.has(LOGIN_COOKIE)).toBe(true);
   });
 
+  it("shows only a generic message for an error without this sign-in's state", async () => {
+    const jar = new Jar();
+    await jar.login();
+    const out = await jar.callback("/auth/callback?error=forged_error&state=forged&error_description=Call%20this%20number");
+    const html = await out.text();
+    expect(html).toContain("Sign-in didn&#39;t complete.");
+    expect(html).not.toContain("forged_error");
+    expect(html).not.toContain("Call this number");
+  });
+
+  it("refuses an Access sign-in whose token response has no cf_access_token", async () => {
+    server.access = "forbidden";
+    server.omitCfAccessToken = true;
+    const jar = new Jar();
+    const login = jar.store(await handleLogin(jar.request("/auth/login"), cfg));
+    const back = await server.authorize(login.headers.get("location")!);
+    const out = await jar.callback(back);
+    expect(out.status).toBe(502);
+    expect(out.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(await out.text()).toContain("Cloudflare Access");
+    expect(jar.values.has(SESSION_COOKIE)).toBe(false);
+    expect(jar.values.has(LOGIN_COOKIE)).toBe(false);
+  });
+
   it("shows a 502 page and clears only the login cookie when /token fails", async () => {
     const jar = new Jar();
     const res = await jar.login();
@@ -571,7 +595,7 @@ describe("POST /auth/logout", () => {
     const device = (await jar.unseal<Device>(DEVICE_COOKIE))!;
     const res = await jar.logout();
     expect(res.status).toBe(204);
-    const req = server.tokenRequests.at(-1)!;
+    const req = server.tokenRequests.find((r) => r.form.get("token_type_hint") === "refresh_token")!;
     expect(req.form.get("token")).toBe(s.refresh_token);
     expect(req.form.get("token_type_hint")).toBe("refresh_token");
     expect(req.form.has("grant_type")).toBe(false);
@@ -579,6 +603,36 @@ describe("POST /auth/logout", () => {
     expect(server.liveGrants()).toHaveLength(0);
     expect(jar.values.has(SESSION_COOKIE)).toBe(false);
     expect(jar.values.has(DEVICE_COOKIE)).toBe(true);
+  });
+
+  it("also revokes the access token, in a second RFC 7009 call", async () => {
+    const jar = new Jar();
+    await jar.signIn();
+    const s = (await jar.unseal<Session>(SESSION_COOKIE))!;
+    const before = server.tokenRequests.length;
+    await jar.logout();
+    const forms = server.tokenRequests.slice(before).map((r) => [r.form.get("token"), r.form.get("token_type_hint")]);
+    expect(forms).toEqual([
+      [s.refresh_token, "refresh_token"],
+      [s.access_token, "access_token"],
+    ]);
+  });
+
+  it("still revokes the access token when the refresh-token revocation fails", async () => {
+    const jar = new Jar();
+    await jar.signIn();
+    const s = (await jar.unseal<Session>(SESSION_COOKIE))!;
+    const inner = cfg.upstream;
+    let calls = 0;
+    cfg.upstream = async (path, init) => {
+      if (path === "/token" && calls++ === 0) throw new TypeError("fetch failed");
+      return inner(path, init);
+    };
+    const before = server.tokenRequests.length;
+    const res = await jar.logout();
+    expect(res.status).toBe(204);
+    expect(server.tokenRequests.slice(before).map((r) => r.form.get("token"))).toEqual([s.access_token]);
+    expect(jar.values.has(SESSION_COOKIE)).toBe(false);
   });
 
   it("clears the session even when revocation answers 500", async () => {

@@ -211,6 +211,11 @@ export async function handleApi(req: Request, cfg: BffConfig): Promise<Response>
     await res.body?.cancel();
     return refreshNeeded();
   }
+  if (res.status === 403 && (await accessDenied(res))) {
+    // Access refused the Access token the session carries (expired or
+    // revoked). Only a new sign-in through /app/signin gets another.
+    return signedOut(req);
+  }
   if (res.status >= 300 && res.status < 400) {
     // Most likely Access's login page. A Location to follow would take the
     // page off this origin, so it isn't passed on.
@@ -222,11 +227,23 @@ export async function handleApi(req: Request, cfg: BffConfig): Promise<Response>
     const value = res.headers.get(name);
     if (value !== null) out.set(name, value);
   }
+  // A body the runtime still has to decode (or re-encode) has no fixed length.
+  if (res.headers.has("content-encoding")) out.delete("content-length");
   const bytes = target.startsWith("/api/v1/attachments/") || target.startsWith("/api/v1/theme-images/");
   if (bytes && !res.ok) keepType(out, ["application/json"]); // the server's contract errors
   else if (target.startsWith("/api/v1/attachments/")) asDownload(out, ATTACHMENT_TYPES);
   else if (target.startsWith("/api/v1/theme-images/")) keepType(out, RASTER_TYPES);
   return new Response(res.body, { status: res.status, headers: out });
+}
+
+/**
+ * Whether a 403 is the server's Access refusal, {"error":"access_denied"}
+ * (packages/core/auth/access.ts, accessRefusalResponse). Reads a clone, so the
+ * response can still be passed on when it isn't.
+ */
+async function accessDenied(res: Response): Promise<boolean> {
+  const body = (await res.clone().json().catch(() => null)) as { error?: unknown } | null;
+  return body?.error === "access_denied";
 }
 
 // Attachment and theme-image bytes are anyone's content, served from the app's

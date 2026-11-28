@@ -417,6 +417,37 @@ describe("GET /bff/api/*", () => {
     expect(res.headers.has("x-internal")).toBe(false);
   });
 
+  it("drops content-length when the upstream response has a content-encoding", async () => {
+    const jar = await signedIn();
+    server.apiReply = () =>
+      new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json", "content-length": "20", "content-encoding": "gzip" },
+      });
+    const res = await jar.api("sync/info");
+    expect(res.status).toBe(200);
+    expect(res.headers.has("content-length")).toBe(false);
+    expect(res.headers.has("content-encoding")).toBe(false);
+  });
+
+  it("turns an upstream 403 access_denied into signed_out and clears the cookie", async () => {
+    const jar = await signedIn();
+    server.apiReply = () => new Response(JSON.stringify({ error: "access_denied" }), { status: 403, headers: { "content-type": "application/json" } });
+    const res = await jar.api("sync/changes");
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "signed_out" });
+    expect(sessionCookies(res).map(isClear)).toEqual([true]);
+  });
+
+  it("passes another 403 through unchanged", async () => {
+    const jar = await signedIn();
+    server.apiReply = () => new Response(JSON.stringify({ error: "forbidden" }), { status: 403, headers: { "content-type": "application/json" } });
+    const res = await jar.api("sync/changes");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "forbidden" });
+    expect(sessionCookies(res)).toEqual([]);
+  });
+
   it("passes a contract error through unchanged", async () => {
     const jar = await signedIn();
     server.apiReply = () => new Response(JSON.stringify({ error: "cursor_reset" }), { status: 410, headers: { "content-type": "application/json" } });

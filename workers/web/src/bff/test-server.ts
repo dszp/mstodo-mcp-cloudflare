@@ -45,6 +45,8 @@ export class TestServer {
   probeFailure: number | null = null;
   /** When set, replaces the cf_access_token in a token response. */
   cfAccessTokenOverride: string | null = null;
+  /** When set, a token response for an Access sign-in carries no cf_access_token. */
+  omitCfAccessToken = false;
   /** When set, /register answers with this status. */
   registerFailure: number | null = null;
   #codes = new Map<string, Code>();
@@ -217,7 +219,7 @@ export class TestServer {
       refresh_token,
       // oauth.ts adds these (app-signin.ts withAccessToken) when the grant
       // started at /app/signin.
-      ...(code.cf_access ? { cf_access_token: this.cfAccessTokenOverride ?? CF_ACCESS_TOKEN, cf_access_expires_at: CF_ACCESS_EXPIRES_AT } : {}),
+      ...(code.cf_access && !this.omitCfAccessToken ? { cf_access_token: this.cfAccessTokenOverride ?? CF_ACCESS_TOKEN, cf_access_expires_at: CF_ACCESS_EXPIRES_AT } : {}),
     });
   }
 
