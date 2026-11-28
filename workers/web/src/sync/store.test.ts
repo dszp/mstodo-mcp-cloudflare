@@ -151,4 +151,20 @@ describe("MirrorStore", () => {
     expect(c1).toHaveBeenCalledTimes(1);
     expect(cl).toHaveBeenCalledTimes(1);
   });
+
+  it("ignores every page after seal(), and clear() still works", () => {
+    const s = new MirrorStore();
+    expect(s.applyPage([task("t1"), list("l1")])).toBe(true);
+    s.seal();
+    const cb = vi.fn();
+    s.subscribe("tasks", cb);
+    expect(s.applyPage([task("t2")])).toBe(false);
+    expect(s.task("t2")).toBeUndefined();
+    expect(cb).not.toHaveBeenCalled();
+    s.clear();
+    expect(s.tasks()).toEqual([]);
+    expect(s.lists()).toEqual([]);
+    expect(s.applyPage([task("t3")])).toBe(false);
+    expect(s.tasks()).toEqual([]);
+  });
 });

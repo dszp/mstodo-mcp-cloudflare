@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FeedChange, FeedPage } from "../sync/feed.ts";
 import { MirrorStore } from "../sync/store.ts";
-import type { BffFetch } from "./api.ts";
+import { type BffFetch, SignedOutError, createBffFetch } from "./api.ts";
+import { createSessionClient } from "./session.ts";
 import { changesFetchPage, createLoader, todayIn, watchFocus } from "./loader.ts";
 
 const json = (body: unknown, status = 200) =>
@@ -20,6 +21,9 @@ const page = (changes: FeedChange[], cursor: string, has_more = false): FeedPage
   changes,
   backfill: { remaining: 0 },
 });
+
+/** A session that stays signed in. */
+const LIVE = { signedOut: false };
 
 /** A bffFetch stub: answers by path, records each path asked for. */
 function stub(route: (path: string) => Response) {
@@ -48,7 +52,7 @@ describe("todayIn", () => {
 describe("changesFetchPage", () => {
   it("asks for scope=active&limit=1000, adding the cursor when there is one", async () => {
     const { fn, paths } = stub(() => json(page([], "7")));
-    const fetchPage = changesFetchPage(fn);
+    const fetchPage = changesFetchPage(fn, LIVE);
     await fetchPage(null);
     await fetchPage("abc/+=");
     expect(paths).toEqual([
@@ -60,18 +64,56 @@ describe("changesFetchPage", () => {
   it("returns the page", async () => {
     const p = page([list("l1", "Example")], "9");
     const { fn } = stub(() => json(p));
-    expect(await changesFetchPage(fn)(null)).toEqual({ ok: true, page: p });
+    expect(await changesFetchPage(fn, LIVE)(null)).toEqual({ ok: true, page: p });
   });
 
   it.each(["cursor_reset", "cursor_expired"] as const)("maps 410 %s to the FetchPage 410 shape", async (error) => {
     const { fn } = stub(() => json({ error }, 410));
-    expect(await changesFetchPage(fn)("5")).toEqual({ ok: false, status: 410, error });
+    expect(await changesFetchPage(fn, LIVE)("5")).toEqual({ ok: false, status: 410, error });
   });
 
   it("throws on a 410 with another body, and on any other failure", async () => {
-    await expect(changesFetchPage(stub(() => json({ error: "gone" }, 410)).fn)("5")).rejects.toThrow();
-    await expect(changesFetchPage(stub(() => json({ error: "x" }, 502)).fn)("5")).rejects.toThrow();
-    await expect(changesFetchPage(stub(() => json({ error: "x" }, 400)).fn)(null)).rejects.toThrow();
+    await expect(changesFetchPage(stub(() => json({ error: "gone" }, 410)).fn, LIVE)("5")).rejects.toThrow();
+    await expect(changesFetchPage(stub(() => json({ error: "x" }, 502)).fn, LIVE)("5")).rejects.toThrow();
+    await expect(changesFetchPage(stub(() => json({ error: "x" }, 400)).fn, LIVE)(null)).rejects.toThrow();
+  });
+});
+
+describe("a sign-out while a feed page is being read", () => {
+  it("leaves the store empty and throws SignedOutError", async () => {
+    let releaseBody!: () => void;
+    const bodyGate = new Promise<void>((r) => (releaseBody = r));
+    let bodyStarted!: () => void;
+    const reading = new Promise<void>((r) => (bodyStarted = r));
+    const p = page([list("l1", "One")], "1");
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/bff/api/sync/info") return json({ server_id: "s", timezone: "UTC", capabilities: {} });
+      // Headers now; pull runs only once res.json() reads (highWaterMark 0),
+      // and the body arrives only when the gate opens.
+      const body = new ReadableStream<Uint8Array>(
+        {
+          async pull(controller) {
+            bodyStarted();
+            await bodyGate;
+            controller.enqueue(new TextEncoder().encode(JSON.stringify(p)));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const store = new MirrorStore();
+    const session = createSessionClient(fetchFn, { store, locks: null, channel: null });
+    const loader = createLoader(createBffFetch(fetchFn, session), store, session);
+    const loading = loader.load();
+    await reading;
+    session.markSignedOut();
+    releaseBody();
+    await expect(loading).rejects.toBeInstanceOf(SignedOutError);
+    expect(store.lists()).toEqual([]);
+    expect(store.tasks()).toEqual([]);
   });
 });
 
@@ -92,7 +134,7 @@ describe("createLoader", () => {
   it("reads /sync/info first, then pulls every page into the store", async () => {
     const { fn, paths } = server();
     const store = new MirrorStore();
-    const loader = createLoader(fn, store);
+    const loader = createLoader(fn, store, LIVE);
     await loader.load();
     expect(paths).toEqual([
       "sync/info",
@@ -104,7 +146,7 @@ describe("createLoader", () => {
   });
 
   it("computes today in the server's zone", async () => {
-    const loader = createLoader(server().fn, new MirrorStore());
+    const loader = createLoader(server().fn, new MirrorStore(), LIVE);
     await loader.load();
     expect(loader.today(new Date("2026-11-27T04:30:00Z"))).toBe("2026-11-26");
   });
@@ -114,22 +156,35 @@ describe("createLoader", () => {
     const { fn } = stub((path) =>
       path === "sync/info" ? json({ server_id: "s", capabilities: {} }) : json(page([], "1")),
     );
-    const loader = createLoader(fn, new MirrorStore());
+    const loader = createLoader(fn, new MirrorStore(), LIVE);
     await loader.load();
     await loader.load();
     expect(loader.info()?.timezone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
+  it("falls back to the browser's zone when /sync/info names a zone that doesn't exist", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { fn } = stub((path) =>
+      path === "sync/info" ? json({ server_id: "s", timezone: "Not/AZone", capabilities: {} }) : json(page([], "1")),
+    );
+    const loader = createLoader(fn, new MirrorStore(), LIVE);
+    await loader.load();
+    await loader.load();
+    expect(loader.info()?.timezone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    expect(() => loader.today()).not.toThrow();
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
   it("throws when /sync/info fails", async () => {
-    const loader = createLoader(stub(() => json({ error: "x" }, 502)).fn, new MirrorStore());
+    const loader = createLoader(stub(() => json({ error: "x" }, 502)).fn, new MirrorStore(), LIVE);
     await expect(loader.load()).rejects.toThrow();
   });
 
   it("reload() pulls incrementally from the kept cursor", async () => {
     const { fn, paths } = server();
     const store = new MirrorStore();
-    const loader = createLoader(fn, store);
+    const loader = createLoader(fn, store, LIVE);
     await loader.load();
     paths.length = 0;
     await loader.reload();
@@ -139,13 +194,13 @@ describe("createLoader", () => {
 
   it("reload() before a load does nothing", async () => {
     const { fn, paths } = server();
-    await createLoader(fn, new MirrorStore()).reload();
+    await createLoader(fn, new MirrorStore(), LIVE).reload();
     expect(paths).toEqual([]);
   });
 
   it("concurrent reloads share one pull", async () => {
     const { fn, paths } = server();
-    const loader = createLoader(fn, new MirrorStore());
+    const loader = createLoader(fn, new MirrorStore(), LIVE);
     await loader.load();
     paths.length = 0;
     await Promise.all([loader.reload(), loader.reload()]);

@@ -5,7 +5,8 @@
 import { type FetchPage, pullAll } from "../sync/pull.ts";
 import type { FeedPage } from "../sync/feed.ts";
 import type { MirrorStore } from "../sync/store.ts";
-import type { BffFetch } from "./api.ts";
+import { type BffFetch, SignedOutError } from "./api.ts";
+import type { SessionClient } from "./session.ts";
 import { throttle } from "./throttle.ts";
 
 /** Active scope: open tasks and recent completions. 1000 is the feed's largest page. */
@@ -36,10 +37,17 @@ export function todayIn(timeZone: string, now: Date): string {
 }
 
 /** The FetchPage pullAll uses: the active-scope feed, mapping a cursor 410 to its 410 result. */
-export function changesFetchPage(bffFetch: BffFetch): FetchPage {
+export function changesFetchPage(bffFetch: BffFetch, session: Pick<SessionClient, "signedOut">): FetchPage {
   return async (cursor) => {
     const res = await bffFetch(cursor === null ? CHANGES : `${CHANGES}&${new URLSearchParams({ cursor })}`);
-    if (res.ok) return { ok: true, page: (await res.json()) as FeedPage };
+    if (res.ok) {
+      const page = (await res.json()) as FeedPage;
+      // bffFetch checked when the headers arrived; the session can end while
+      // the body is read. The sealed store would drop the page anyway; this
+      // stops the pull too.
+      if (session.signedOut) throw new SignedOutError();
+      return { ok: true, page };
+    }
     const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
     if (res.status === 410 && (body?.error === "cursor_reset" || body?.error === "cursor_expired")) {
       return { ok: false, status: 410, error: body.error };
@@ -50,8 +58,18 @@ export function changesFetchPage(bffFetch: BffFetch): FetchPage {
 
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-export function createLoader(bffFetch: BffFetch, store: MirrorStore): Loader {
-  const fetchPage = changesFetchPage(bffFetch);
+function isZone(timeZone: string): boolean {
+  if (timeZone === "") return false;
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function createLoader(bffFetch: BffFetch, store: MirrorStore, session: Pick<SessionClient, "signedOut">): Loader {
+  const fetchPage = changesFetchPage(bffFetch, session);
   let info: ServerInfo | null = null;
   let cursor: string | null = null;
   let reloading: Promise<void> | null = null;
@@ -61,11 +79,12 @@ export function createLoader(bffFetch: BffFetch, store: MirrorStore): Loader {
     const res = await bffFetch("sync/info");
     if (!res.ok) throw new Error(`/sync/info answered ${res.status}`);
     const body = (await res.json()) as { timezone?: unknown; capabilities?: unknown };
-    let timezone = typeof body.timezone === "string" && body.timezone !== "" ? body.timezone : null;
+    let timezone = typeof body.timezone === "string" && isZone(body.timezone) ? body.timezone : null;
     if (timezone === null) {
-      // A server from before 0.19.1 doesn't send its zone.
+      // A server from before 0.19.1 doesn't send its zone; a zone Intl doesn't
+      // know would throw on every "today".
       timezone = browserZone();
-      if (!warnedZone) console.warn(`/sync/info has no timezone; using the browser's (${timezone})`);
+      if (!warnedZone) console.warn(`/sync/info has no usable timezone; using the browser's (${timezone})`);
       warnedZone = true;
     }
     const capabilities = typeof body.capabilities === "object" && body.capabilities !== null ? body.capabilities : {};

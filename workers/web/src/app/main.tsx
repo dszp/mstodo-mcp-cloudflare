@@ -10,7 +10,7 @@ import { createSessionClient } from "./session.ts";
 const fetchFn: typeof fetch = (input, init) => fetch(input, init);
 const store = new MirrorStore();
 const session = createSessionClient(fetchFn, { store });
-const loader = createLoader(createBffFetch(fetchFn, session), store);
+const loader = createLoader(createBffFetch(fetchFn, session), store, session);
 const deps: AppDeps = { store, session, loader };
 
 createRoot(document.getElementById("root")!).render(

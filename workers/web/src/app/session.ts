@@ -4,11 +4,13 @@
 // Refresh is serialized twice. Within the page, concurrent callers share one
 // in-flight POST. Across tabs, the POST runs under the Web Lock
 // "potem-refresh", so a second tab waits for the first and then sends a POST
-// the BFF answers as a no-op (the session is no longer due). Two tabs
+// the BFF answers as a no-op (the session is no longer due), or nothing, if
+// the page signed out while it waited. Two tabs
 // rotating from the same refresh token at once could leave the browser
 // holding a superseded one (the BFF's comment explains how).
 //
-// Signing out happens once per page: the mirror is cleared, the other tabs are
+// Signing out happens once per page: the mirror is cleared and sealed (no
+// later page applies), the other tabs are
 // told on BroadcastChannel("potem-session"), and the listeners run. A tab that
 // hears it from another does the same without posting again. A page that
 // signed out stays signed out: signing in again is a navigation to
@@ -74,6 +76,7 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
     if (signedOut) return;
     signedOut = true;
     store.clear();
+    store.seal();
     if (broadcast) channel?.postMessage(SIGNED_OUT_MESSAGE);
     for (const cb of [...listeners]) cb();
   }
@@ -111,7 +114,7 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
       if (signedOut) return Promise.resolve(false);
       let p = inflight.get(force);
       if (!p) {
-        p = (locks ? locks.request("potem-refresh", () => post(force)) : post(force)).finally(() => inflight.delete(force));
+        p = (locks ? locks.request("potem-refresh", () => (signedOut ? Promise.resolve(false) : post(force))) : post(force)).finally(() => inflight.delete(force));
         inflight.set(force, p);
       }
       return p;

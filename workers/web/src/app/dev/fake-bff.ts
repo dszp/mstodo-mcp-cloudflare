@@ -16,7 +16,8 @@ const TIMEZONE = "America/New_York";
 const DAY_MS = 86_400_000;
 const SEED = 1;
 const LISTS = 40;
-const DATA_KEY = "ZmFrZS1kZXYtZGF0YS1rZXktbm90LWEtc2VjcmV0LTAw";
+/** Exported for build.test.ts, which checks no build contains it. */
+export const DATA_KEY = "ZmFrZS1kZXYtZGF0YS1rZXktbm90LWEtc2VjcmV0LTAw";
 const CAPABILITIES = {
   my_day: true,
   step_order: true,

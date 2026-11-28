@@ -145,6 +145,32 @@ describe("createSessionClient", () => {
     expect(client.signedOut).toBe(true);
   });
 
+  it("the signed-out flow seals the store: a page applied afterwards is ignored", async () => {
+    const { fn } = stubFetch(() => json({ signed_in: false }));
+    const client = createSessionClient(fn, { store, locks: null, channel: null });
+    await client.current();
+    expect(store.applyPage([{ kind: "list", id: "l2", seq: 2, deleted: false, data: { name: "Late" } as never }])).toBe(false);
+    expect(store.lists()).toHaveLength(0);
+  });
+
+  it("a refresh waiting on another tab's lock sends nothing once the page has signed out", async () => {
+    const { fn, calls } = stubFetch(() => new Response(null, { status: 204 }));
+    let releaseLock!: () => void;
+    const held = new Promise<void>((r) => (releaseLock = r));
+    const locks: LockRequester = {
+      request: async <T,>(_name: string, cb: () => Promise<T>) => {
+        await held; // another tab holds potem-refresh
+        return cb();
+      },
+    };
+    const client = createSessionClient(fn, { store, locks, channel: null });
+    const pending = client.refreshOnce();
+    client.markSignedOut();
+    releaseLock();
+    expect(await pending).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
   it("a refresh answered 502 throws and keeps the session", async () => {
     const { fn } = stubFetch(() => json({ error: "upstream_unavailable" }, 502));
     const client = createSessionClient(fn, { store, locks: null, channel: null });
