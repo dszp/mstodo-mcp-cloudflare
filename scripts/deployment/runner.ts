@@ -1,4 +1,12 @@
 import { spawn } from "node:child_process";
+import { join } from "node:path";
+
+// wrangler runs from the repository's node_modules under the current node, with
+// no package manager in between: npx downloads a package it cannot find, and
+// `pnpm exec` can start an install before running anything.
+export function wranglerCommand(repoRoot: string, args: string[]): [cmd: string, args: string[]] {
+  return [process.execPath, [join(repoRoot, "node_modules", "wrangler", "bin", "wrangler.js"), ...args]];
+}
 
 export type RunResult = { code: number; stdout: string; stderr: string };
 

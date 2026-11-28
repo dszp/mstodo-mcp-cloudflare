@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // modulepreload polyfill (an inline script) is off and the built index.html is
 // checked for inline code by workers/web/build.test.ts.
 //
-// The dev server (`npm run web:dev`) answers /bff/* and /auth/* from a fake
+// The dev server (`pnpm run web:dev`) answers /bff/* and /auth/* from a fake
 // BFF (src/app/dev/fake-bff.ts). It is imported only when serving, so a build
 // never loads it.
 export default defineConfig(async ({ command }) => {

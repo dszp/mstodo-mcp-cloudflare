@@ -304,8 +304,8 @@ describe("wranglerToken", () => {
     expect(calls).toHaveLength(1);
     const [cmd, args, opts] = calls[0] as [string, string[], { env: Record<string, string>; stdin?: string; cwd?: string }];
     expect(opts.cwd).toBe("/repo");
-    expect(cmd).toBe("npx");
-    expect(args).toEqual(["wrangler", "auth", "token", "--json", "--env="]);
+    expect(cmd).toBe(process.execPath);
+    expect(args).toEqual(["/repo/node_modules/wrangler/bin/wrangler.js", "auth", "token", "--json", "--env="]);
     expect(opts.env).toEqual({ CLOUDFLARE_ACCOUNT_ID: ACCOUNT, WRANGLER_CI_OVERRIDE_NAME: "example-alpha" });
   });
 
@@ -324,7 +324,7 @@ describe("wranglerToken", () => {
   it("refuses with a login instruction on a non-zero exit, without echoing output", async () => {
     const { run } = runner(1, TOKEN, `Not logged in ${TOKEN}`);
     const r = await refusalOf(wranglerToken(run, dep(), "/repo"));
-    expect(r.message).toContain("npx wrangler login");
+    expect(r.message).toContain("pnpm exec wrangler login");
     expect(r.message).not.toContain(TOKEN);
   });
 

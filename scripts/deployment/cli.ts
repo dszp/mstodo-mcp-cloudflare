@@ -41,14 +41,14 @@ import {
   type CloudflareApi,
 } from "./live.ts";
 import { loadAndRender, removeRender, writeRender, type WranglerConfig } from "./render.ts";
-import { nodeRunner, type Runner } from "./runner.ts";
+import { nodeRunner, wranglerCommand, type Runner } from "./runner.ts";
 import { DeploymentRefusal, deploymentPaths, parseDeploymentFile, parseJsonc, type DeploymentFile } from "./schema.ts";
 
 export type CliDeps = {
   repoRoot: string;
   env: Record<string, string | undefined>;
   run: Runner;
-  // Runs `npx <args>` with cwd at the repo root, stdio inherited, `env` merged over
+  // Runs wrangler with `args` (see wranglerCommand) with cwd at the repo root, stdio inherited, `env` merged over
   // the process environment; resolves with the child's exit code once it has exited.
   spawnInteractive: (args: string[], env: Record<string, string>) => Promise<number>;
   // Whether wrangler will treat this session as interactive (it needs stdin and
@@ -137,7 +137,7 @@ async function runChecked(args: ParsedArgs, paths: Paths, deps: CliDeps): Promis
 // single `--flag[=value]` tokens).
 function wrangler(ctx: Ctx, head: string[], tail: string[] = []): Promise<number> {
   return ctx.deps.spawnInteractive(
-    ["wrangler", ...head, "-c", ctx.paths.rendered, WRANGLER_NO_ENV, ...tail, ...ctx.args.passthrough],
+    [...head, "-c", ctx.paths.rendered, WRANGLER_NO_ENV, ...tail, ...ctx.args.passthrough],
     wranglerEnv(ctx.dep),
   );
 }
@@ -335,7 +335,7 @@ async function secrets(ctx: Ctx): Promise<number> {
   publishRender(ctx);
   let failed = 0;
   for (const [name, value] of entries) {
-    const r = await deps.run("npx", ["wrangler", "secret", "put", name, "-c", ctx.paths.rendered, WRANGLER_NO_ENV], {
+    const r = await deps.run(...wranglerCommand(ctx.deps.repoRoot, ["secret", "put", name, "-c", ctx.paths.rendered, WRANGLER_NO_ENV]), {
       stdin: value,
       env: wranglerEnv(dep),
       cwd: ctx.deps.repoRoot,
@@ -373,7 +373,8 @@ async function dev(ctx: Ctx): Promise<number> {
 function spawnInteractive(repoRoot: string) {
   return (args: string[], env: Record<string, string>): Promise<number> =>
     new Promise((done) => {
-      const child = spawn("npx", args, { cwd: repoRoot, stdio: "inherit", env: { ...process.env, ...env }, shell: false });
+      const [cmd, argv] = wranglerCommand(repoRoot, args);
+      const child = spawn(cmd, argv, { cwd: repoRoot, stdio: "inherit", env: { ...process.env, ...env }, shell: false });
       // Replacing Node's default handlers keeps this process alive until the child
       // has exited, so a caller's cleanup (dev's secrets file) runs after it.
       const forward = (signal: NodeJS.Signals) => () => {

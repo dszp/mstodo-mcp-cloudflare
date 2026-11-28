@@ -1,6 +1,6 @@
 # Copy this file to `deployments/<name>/.dev.vars` and fill in the values below.
 # That file is gitignored; this `.example` is committed as a shape reference.
-# `npm run dev -- <name>` reads it for local runs, and `npm run secrets -- <name>`
+# `pnpm run dev <name>` reads it for local runs, and `pnpm run secrets <name>`
 # pushes it to the deployed Worker as encrypted secrets, so nothing here appears
 # in source.
 #

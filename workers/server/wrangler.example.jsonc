@@ -2,11 +2,11 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "potem-server",
 
-  // The template every deployment is rendered from: `npm run deploy -- <name>` fills
+  // The template every deployment is rendered from: `pnpm run deploy <name>` fills
   // the account-specific values below from deployments/<name>/deployment.jsonc
   // (gitignored) into .wrangler/deployments/<name>/rendered.json. Leave them as
   // placeholders here. The test pool (vitest.config.ts) reads THIS example so
-  // `npm test` works on a fresh clone without secrets.
+  // `pnpm test` works on a fresh clone without secrets.
   "account_id": "<your-cloudflare-account-id>",
   "main": "src/hosts/cloudflare/worker.ts",
   "compatibility_date": "2026-05-01",

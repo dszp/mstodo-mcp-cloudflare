@@ -3,7 +3,7 @@ import { cloudflarePool, cloudflareTest } from "@cloudflare/vitest-plugin";
 
 const poolOptions = {
   main: "workers/server/test/_test-worker.ts",
-  // Use the committed example config so `npm test` runs on a fresh clone without
+  // Use the committed example config so `pnpm test` runs on a fresh clone without
   // a deployment's rendered config. miniflare ignores account_id / KV IDs
   // (it simulates bindings locally), so the placeholders are fine for tests.
   wrangler: { configPath: "./workers/server/wrangler.example.jsonc" },

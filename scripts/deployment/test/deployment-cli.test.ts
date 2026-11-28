@@ -99,6 +99,7 @@ function harness(over: Partial<CliDeps> & { apiImpl?: CloudflareApi; onSpawn?: (
 }
 
 const paths = () => deploymentPaths(root, "alpha");
+const wranglerBin = () => join(root, "node_modules", "wrangler", "bin", "wrangler.js");
 // Puts the current render in last-deployed.json, so a deploy sees no changes.
 async function seedLastDeployed(): Promise<void> {
   const h = harness();
@@ -327,14 +328,14 @@ describe("main: dry-run and tail", () => {
     expect(await main(["dry-run", "alpha", "--minify"], h.deps)).toBe(0);
     expect(h.apiCalls()).toBe(1);
     expect(h.spawns).toEqual([
-      { args: ["wrangler", "deploy", "--dry-run", "-c", paths().rendered, "--env=", "--minify"], env: CHILD_ENV },
+      { args: ["deploy", "--dry-run", "-c", paths().rendered, "--env=", "--minify"], env: CHILD_ENV },
     ]);
   });
 
   it("tail passes the child's exit code through", async () => {
     const h = harness({ onSpawn: () => 3 });
     expect(await main(["tail", "alpha", "--format", "json"], h.deps)).toBe(3);
-    expect(h.spawns[0].args).toEqual(["wrangler", "tail", "-c", paths().rendered, "--env=", "--format=json"]);
+    expect(h.spawns[0].args).toEqual(["tail", "-c", paths().rendered, "--env=", "--format=json"]);
   });
 });
 
@@ -401,7 +402,7 @@ describe("main: deploy", () => {
     expect(await main(["deploy", "alpha", "--minify"], h.deps)).toBe(0);
     expect(h.confirms).toEqual([`Deploy to example-alpha in account ${ACCOUNT}?`]);
     expect(h.spawns).toEqual([
-      { args: ["wrangler", "deploy", "--strict", "-c", paths().rendered, "--env=", "--minify"], env: CHILD_ENV },
+      { args: ["deploy", "--strict", "-c", paths().rendered, "--env=", "--minify"], env: CHILD_ENV },
     ]);
     expect(JSON.parse(readFileSync(paths().lastDeployed, "utf8"))).toEqual(JSON.parse(readFileSync(paths().rendered, "utf8")));
   });
@@ -518,12 +519,12 @@ describe("main: secrets", () => {
   it("pipes each value over stdin, never in argv or the environment", async () => {
     const h = harness({ onRun: opOk });
     expect(await main(["secrets", "alpha"], h.deps)).toBe(0);
-    const puts = h.runs.filter((r) => r.cmd === "npx");
+    const puts = h.runs.filter((r) => r.cmd === process.execPath);
     expect(puts.map((p) => p.args[3])).toEqual(["MS_TENANT_ID", "MS_CLIENT_SECRET", "OWNER_EMAIL"]);
     const values: Record<string, string> = { MS_TENANT_ID: LITERAL, MS_CLIENT_SECRET: RESOLVED, OWNER_EMAIL: OWNER };
     for (const p of puts) {
       const name = p.args[3];
-      expect(p.args, name).toEqual(["wrangler", "secret", "put", name, "-c", paths().rendered, "--env="]);
+      expect(p.args, name).toEqual([wranglerBin(), "secret", "put", name, "-c", paths().rendered, "--env="]);
       expect(p.opts?.stdin, name).toBe(values[name]);
       expect(p.opts?.env, name).toEqual(CHILD_ENV);
       expect(p.opts?.cwd, name).toBe(root);
@@ -539,7 +540,7 @@ describe("main: secrets", () => {
       onRun: (c) => (c.cmd === "op" ? { code: 1, stdout: "leaked-op-output", stderr: "leaked-op-error" } : { code: 0, stdout: "", stderr: "" }),
     });
     expect(await main(["secrets", "alpha"], h.deps)).toBe(1);
-    expect(h.runs.filter((r) => r.cmd === "npx")).toEqual([]);
+    expect(h.runs.filter((r) => r.cmd === process.execPath)).toEqual([]);
     const out = h.logs.join("\n");
     for (const v of [LITERAL, OWNER, "leaked-op-output", "leaked-op-error"]) expect(out, v).not.toContain(v);
   });
@@ -553,7 +554,7 @@ describe("main: secrets", () => {
 
   it("reports a failed put by name and exits non-zero", async () => {
     const h = harness({
-      onRun: (c) => (c.cmd === "npx" && c.args[3] === "OWNER_EMAIL" ? { code: 1, stdout: "", stderr: "x" } : opOk(c)),
+      onRun: (c) => (c.cmd === process.execPath && c.args[3] === "OWNER_EMAIL" ? { code: 1, stdout: "", stderr: "x" } : opOk(c)),
     });
     expect(await main(["secrets", "alpha"], h.deps)).toBe(1);
     expect(h.logs.join("\n")).toMatch(/OWNER_EMAIL: failed/);
@@ -583,7 +584,6 @@ describe("main: dev", () => {
     expect(h.spawns[0].env).toEqual(CHILD_ENV);
     expect(seen).toEqual({ exists: true, mode: 0o600, content: "MS_CLIENT_SECRET='dev-secret-0123'\n", locked: true });
     expect(h.spawns[0].args).toEqual([
-      "wrangler",
       "dev",
       "-c",
       paths().rendered,
@@ -652,7 +652,7 @@ describe("main: a web deployment", () => {
     writeFileSync(webPaths().devVars, "WEB_SESSION_SECRET=0123456789abcdef0123456789abcdef0123\nMS_CLIENT_SECRET=not-for-web\n");
     const h = harness({ apiImpl: liveApi({ getWorkerKv: async () => ({ found: true, kv: {} }) }) });
     expect(await main(["secrets", "web"], h.deps)).toBe(0);
-    const puts = h.runs.filter((r) => r.cmd === "npx");
+    const puts = h.runs.filter((r) => r.cmd === process.execPath);
     expect(puts.map((p) => p.args[3])).toEqual(["WEB_SESSION_SECRET"]);
     expect(puts[0].opts?.stdin).toBe("0123456789abcdef0123456789abcdef0123");
   });

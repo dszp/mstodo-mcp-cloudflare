@@ -7,7 +7,7 @@
   // account-specific values into .wrangler/deployments/<name>/rendered.json.
   // Leave the placeholders as they are. The Worker has no KV, R2 or secrets
   // bindings of its own; its one secret, WEB_SESSION_SECRET, is pushed with
-  // `npm run secrets -- <name>`.
+  // `pnpm run secrets <name>`.
   "account_id": "<your-cloudflare-account-id>",
   "main": "src/hosts/cloudflare/worker.ts",
   "compatibility_date": "2026-05-01",
@@ -27,7 +27,7 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": true
   },
-  "build": { "command": "npm run web:build" },
+  "build": { "command": "pnpm run web:build" },
 
   // SERVER_ORIGIN is the https origin of the Potem server; set it under "vars"
   // in the deployment file. WEB_ORIGIN is this Worker's own origin and comes

@@ -3,7 +3,7 @@
 // esbuild rather than tsc: the source uses extensionless imports
 // (moduleResolution: bundler), which Node's ESM loader rejects.
 //
-// Runtime dependencies stay external (installed by `npm ci --omit=dev`), except
+// Runtime dependencies stay external (installed by the Dockerfile's `pnpm install --prod`), except
 // @cloudflare/workers-oauth-provider: it imports `cloudflare:workers`, which
 // only exists on Workers, so it is bundled and that import is aliased to an
 // empty stand-in. An alias only applies to code esbuild bundles, which is why

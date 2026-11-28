@@ -8,7 +8,7 @@
 // Every response is { success, errors, result }.
 import { DeploymentRefusal, type DeploymentFile } from "./schema.ts";
 import { normalizeHost, ownFile, WRANGLER_NO_ENV, wranglerEnv } from "./checks.ts";
-import type { Runner } from "./runner.ts";
+import { wranglerCommand, type Runner } from "./runner.ts";
 
 export interface CloudflareApi {
   getWorkerKv(account: string, worker: string): Promise<{ found: false } | { found: true; kv: Record<string, string> }>;
@@ -286,18 +286,18 @@ export async function wranglerToken(run: Runner, dep: DeploymentFile, cwd: strin
   const refuse = (reason: string): never => {
     throw new DeploymentRefusal("wrangler", "auth token", reason);
   };
-  const res = await run("npx", ["wrangler", "auth", "token", "--json", WRANGLER_NO_ENV], { env: wranglerEnv(dep), cwd });
-  if (res.code !== 0) return refuse("could not read wrangler's login; run `npx wrangler login` and retry");
+  const res = await run(...wranglerCommand(cwd, ["auth", "token", "--json", WRANGLER_NO_ENV]), { env: wranglerEnv(dep), cwd });
+  if (res.code !== 0) return refuse("could not read wrangler's login; run `pnpm exec wrangler login` and retry");
 
   const parsed = findJsonObject(res.stdout);
-  if (!parsed || typeof parsed.type !== "string") return refuse("wrangler printed no token; run `npx wrangler login` and retry");
+  if (!parsed || typeof parsed.type !== "string") return refuse("wrangler printed no token; run `pnpm exec wrangler login` and retry");
   if (parsed.type === "api_key") {
-    return refuse("wrangler is using CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL; set CLOUDFLARE_API_TOKEN or run `npx wrangler login`");
+    return refuse("wrangler is using CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL; set CLOUDFLARE_API_TOKEN or run `pnpm exec wrangler login`");
   }
   if ((parsed.type === "oauth" || parsed.type === "api_token") && typeof parsed.token === "string" && parsed.token !== "") {
     return parsed.token;
   }
-  return refuse("wrangler printed a credential type this script cannot use; run `npx wrangler login`");
+  return refuse("wrangler printed a credential type this script cannot use; run `pnpm exec wrangler login`");
 }
 
 // The first top-level JSON object in `text` that parses, ignoring surrounding noise.

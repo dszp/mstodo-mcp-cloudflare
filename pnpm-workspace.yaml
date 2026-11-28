@@ -1,0 +1,23 @@
+# pnpm settings for this single-package repository (there is no `packages:` list).
+# pnpm 11 reads its settings from here, not from .npmrc.
+
+# npm's flat node_modules layout. The Workers test pool and the esbuild and vite
+# bundles resolve packages the way npm laid them out, and the wrangler upgrade
+# procedure in CLAUDE.md cites lines in node_modules/wrangler/wrangler-dist/cli.js.
+nodeLinker: hoisted
+
+# Install scripts run only for these packages. pnpm refuses an install that
+# meets any other package with one.
+allowBuilds:
+  core-js-pure: false
+  esbuild: true
+  workerd: true
+
+# `pnpm run` and `pnpm exec` refuse when node_modules doesn't match the
+# lockfile, instead of installing on their own. Run `pnpm install` first.
+verifyDepsBeforeRun: error
+
+# pnpm defaults this on outside CI and off in CI, and a change counts as a
+# dependency mismatch for verifyDepsBeforeRun. Pinned so CI=true and an
+# interactive shell agree; the hoisted layout doesn't use it.
+enableGlobalVirtualStore: false
