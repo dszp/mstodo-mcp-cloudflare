@@ -77,17 +77,40 @@ export function App() {
     case "signed_out":
       return <SignedOut />;
     case "error":
-      return (
-        <main className="status-page">
-          <p>Your tasks didn't load. Check your connection, then try again.</p>
-          <button type="button" onClick={() => void start()}>
-            Try again
-          </button>
-        </main>
-      );
+      return <LoadFailed onRetry={() => void start()} onSignOut={() => session.logout()} />;
     case "ready":
       return <Ready />;
   }
+}
+
+/**
+ * The load failed. Sign out is the way out when retrying can't help, as
+ * when Cloudflare Access in front of the server ended its session; a
+ * finished sign-out shows the signed-out page through onSignedOut.
+ */
+function LoadFailed({ onRetry, onSignOut }: { onRetry: () => void; onSignOut: () => Promise<void> }) {
+  const [signOutFailed, setSignOutFailed] = useState(false);
+  return (
+    <main className="status-page">
+      <p>Your tasks didn't load. Check your connection, then try again.</p>
+      <button type="button" onClick={onRetry}>
+        Try again
+      </button>{" "}
+      <button
+        type="button"
+        onClick={() => {
+          setSignOutFailed(false);
+          onSignOut().catch((e: unknown) => {
+            console.error("sign-out failed", e);
+            setSignOutFailed(true);
+          });
+        }}
+      >
+        Sign out
+      </button>
+      {signOutFailed && <p className="small">Sign-out didn't finish. Try again.</p>}
+    </main>
+  );
 }
 
 function SignedOut() {
