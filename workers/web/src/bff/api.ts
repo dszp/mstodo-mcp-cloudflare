@@ -5,15 +5,24 @@
 // and logout in auth.ts) write the session cookie with a new record. A proxied
 // /bff/api response never does: the browser sends many of those at once, and
 // one that rewrote the cookie from the record it arrived with would put back
-// the refresh token a refresh racing alongside had just replaced. So the idle
-// timer's last_seen is touched only by GET /bff/session, at most once a
-// minute, and the page calls it on user activity. Likewise the proxy never
-// refreshes: near expiry it answers 401 session_refresh_needed, and the page
-// sends one POST /bff/session/refresh for all of them. That refresh rotates
-// only a session that is due: two tabs refreshing at once would otherwise
-// rotate twice from the same token, and if the first response's cookie landed
-// last it would hold a token that is neither current nor previous. A forced
-// refresh (X-Potem-Force: 1) skips the due check; see handleRefresh.
+// the refresh token a refresh racing alongside had just replaced.
+//
+// The idle timer's last_seen moves only on user activity: a GET /bff/session
+// carrying X-Potem-Activity: 1 (the page sends it after activity, at most
+// once a minute) touches it, at most once every 30 s. A plain read and a
+// refresh never do. The page refreshes and reads the session on its own (the
+// poll's session_refresh_needed, the push socket's reauth), and if those
+// moved last_seen, a page nobody uses would keep its session alive forever.
+// A cross-site page can't send the header without a CORS preflight the BFF
+// never answers.
+//
+// Likewise the proxy never refreshes: near expiry it answers 401
+// session_refresh_needed, and the page sends one POST /bff/session/refresh
+// for all of them. That refresh rotates only a session that is due: two tabs
+// refreshing at once would otherwise rotate twice from the same token, and if
+// the first response's cookie landed last it would hold a token that is
+// neither current nor previous. A forced refresh (X-Potem-Force: 1) skips the
+// due check; see handleRefresh.
 //
 // "oauth-provider.js" below is node_modules/@cloudflare/workers-oauth-provider/
 // dist/oauth-provider.js (1.2.3).
@@ -25,8 +34,12 @@ import { type Device, REFRESH_WINDOW_SEC, type Session, isSession, sessionState 
 import { type BffConfig, basicAuth } from "./upstream.ts";
 
 const API_PREFIX = "/bff/api/";
-/** last_seen is rewritten when it is at least this old. */
-const TOUCH_INTERVAL_SEC = 60;
+/**
+ * last_seen is rewritten when it is at least this old. Half the page's
+ * once-a-minute report interval, so a report that lands a little early by the
+ * BFF's clock is never dropped.
+ */
+const TOUCH_INTERVAL_SEC = 30;
 const REFRESH_RETRY_DELAY_MS = 1000;
 /** The response headers a proxied response keeps. Set-Cookie is never among them. */
 const PASSED_HEADERS = ["content-type", "content-disposition", "content-length", "etag", "last-modified"];
@@ -71,7 +84,7 @@ const unavailable = () => jsonResponse({ error: "upstream_unavailable" }, 502);
 const limits = (cfg: BffConfig) => ({ maxHours: cfg.maxHours, idleMinutes: cfg.idleMinutes });
 
 /** The absolute end of the session: maxHours after sign-in, or the Access token's expiry if sooner. */
-function sessionEnd(session: Session, cfg: BffConfig): number {
+export function sessionEnd(session: Session, cfg: BffConfig): number {
   const end = session.created_at + cfg.maxHours * 3600;
   return session.cf_access_exp === undefined ? end : Math.min(end, session.cf_access_exp);
 }
@@ -107,8 +120,8 @@ export async function handleSession(req: Request, cfg: BffConfig): Promise<Respo
   }
   // A session due for refresh still counts as signed in: the page refreshes
   // when the proxy asks it to.
-  const cookies =
-    now - session.last_seen >= TOUCH_INTERVAL_SEC ? [await sessionCookie(s, { ...session, last_seen: now }, cfg)] : [];
+  const touch = req.headers.get("x-potem-activity") === "1" && now - session.last_seen >= TOUCH_INTERVAL_SEC;
+  const cookies = touch ? [await sessionCookie(s, { ...session, last_seen: now }, cfg)] : [];
   // expires_at and the idle limit let the page end the session on its own, even
   // offline; refresh_at lets it refresh before a request has to wait for one.
   // now is the BFF's clock, so the page can compare these times without
@@ -209,7 +222,7 @@ export async function handleRefresh(req: Request, cfg: BffConfig): Promise<Respo
     access_token: result.access_token,
     access_exp: now + result.expires_in,
     refresh_token: result.refresh_token ?? session.refresh_token,
-    last_seen: now,
+    // last_seen carries over: a refresh is not activity (see the top of this file).
   };
   if (!isSession(fresh)) return unavailable();
   return new Response(null, { status: 204, headers: { "set-cookie": await sessionCookie(s, fresh, cfg) } });
@@ -227,8 +240,19 @@ export async function handleApi(req: Request, cfg: BffConfig): Promise<Response>
   return route.method === "POST" ? postMutations(req, cfg, route.path) : getRead(req, cfg, route.path + url.search);
 }
 
-/** The session's upstream headers, or the 401 that answers instead. */
-async function authorize(req: Request, cfg: BffConfig): Promise<Headers | Response> {
+/**
+ * The session's upstream headers, a fresh Headers holding only Authorization
+ * and, when the session has one, cf-access-token; or the 401 that answers
+ * instead. Nothing from the browser's request is copied. socket.ts uses
+ * authorizeSession, which also returns the session.
+ */
+export async function authorize(req: Request, cfg: BffConfig): Promise<Headers | Response> {
+  const r = await authorizeSession(req, cfg);
+  return r instanceof Response ? r : r.headers;
+}
+
+/** authorize, plus the session the headers came from. */
+export async function authorizeSession(req: Request, cfg: BffConfig): Promise<{ headers: Headers; session: Session } | Response> {
   const s = await sealer(cfg.secret);
   const session = await readSession(req, s);
   const state = session ? sessionState(session, cfg.now(), limits(cfg)) : "expired";
@@ -236,7 +260,7 @@ async function authorize(req: Request, cfg: BffConfig): Promise<Headers | Respon
   if (state === "refresh") return refreshNeeded();
   const headers = new Headers({ authorization: `Bearer ${session.access_token}` });
   if (session.cf_access_token) headers.set("cf-access-token", session.cf_access_token);
-  return headers;
+  return { headers, session };
 }
 
 /**

@@ -61,8 +61,10 @@ class Jar {
     const res = this.store(await handleCallback(this.request(back), cfg));
     expect(res.status).toBe(302);
   }
-  async session(): Promise<Response> {
-    return this.store(await handleSession(this.request("/bff/session"), cfg));
+  /** GET /bff/session; `activity` adds X-Potem-Activity: 1, as the page does after user activity. */
+  async session(activity = false): Promise<Response> {
+    const headers: Record<string, string> = activity ? { "x-potem-activity": "1" } : {};
+    return this.store(await handleSession(this.request("/bff/session", { headers }), cfg));
   }
   async refresh(headers: Record<string, string> = { "x-potem": "1", origin: WEB }): Promise<Response> {
     return this.store(await handleRefresh(this.request("/bff/session/refresh", { method: "POST", headers }), cfg));
@@ -140,19 +142,35 @@ describe("GET /bff/session", () => {
     expect(body.expires_at).toBe(CF_ACCESS_EXPIRES_AT);
   });
 
-  it("touches last_seen at most once a minute", async () => {
+  it("doesn't touch last_seen without X-Potem-Activity", async () => {
     const jar = await signedIn();
-    now += 30;
+    now += 30 * 60;
     expect(sessionCookies(await jar.session())).toHaveLength(0);
-    now += 30;
-    const res = await jar.session();
+    expect((await jar.unseal<Session>(SESSION_COOKIE))!.last_seen).toBe(START);
+  });
+
+  it("with X-Potem-Activity, touches last_seen at most once every 30 s", async () => {
+    const jar = await signedIn();
+    now += 29;
+    expect(sessionCookies(await jar.session(true))).toHaveLength(0);
+    now += 1;
+    const res = await jar.session(true);
     const lines = sessionCookies(res);
     expect(lines).toHaveLength(1);
     // The cookie lives until the session's absolute end, not maxHours from now.
-    expect(lines[0]).toContain(`Max-Age=${12 * 3600 - 60}`);
+    expect(lines[0]).toContain(`Max-Age=${12 * 3600 - 30}`);
     const session = (await jar.unseal<Session>(SESSION_COOKIE))!;
-    expect(session.last_seen).toBe(START + 60);
+    expect(session.last_seen).toBe(START + 30);
     expect(session.created_at).toBe(START);
+  });
+
+  it("never drops the page's once-a-minute report, even one that lands a second early", async () => {
+    const jar = await signedIn();
+    for (let i = 1; i <= 3; i++) {
+      now += 59;
+      expect(sessionCookies(await jar.session(true)), `report ${i}`).toHaveLength(1);
+      expect((await jar.unseal<Session>(SESSION_COOKIE))!.last_seen, `report ${i}`).toBe(START + 59 * i);
+    }
   });
 
   it("still answers signed_in when the access token is due for refresh", async () => {
@@ -175,7 +193,7 @@ describe("GET /bff/session", () => {
     const jar = await signedIn();
     for (let i = 0; i < 14; i++) {
       now += 50 * 60;
-      expect(((await (await jar.session()).json()) as { signed_in: boolean }).signed_in).toBe(true);
+      expect(((await (await jar.session(true)).json()) as { signed_in: boolean }).signed_in).toBe(true);
     }
     now = START + 12 * 3600;
     expect(await (await jar.session()).json()).toEqual({ signed_in: false });
@@ -274,11 +292,27 @@ describe("POST /bff/session/refresh", () => {
     expect(fresh.refresh_token).not.toBe(old.refresh_token);
     expect(fresh.access_exp).toBe(now + 3600);
     expect(fresh.created_at).toBe(START);
-    expect(fresh.last_seen).toBe(now);
+    // A refresh is automatic: only reported activity moves the idle timer.
+    expect(fresh.last_seen).toBe(old.last_seen);
     expect(fresh.data_key).toBe(old.data_key);
 
     // The new access token works upstream.
     expect((await jar.api("sync/info")).status).toBe(200);
+  });
+
+  it("a session refreshed again and again without reported activity still ends at last_seen + idle", async () => {
+    cfg.idleMinutes = 150; // longer than two access tokens (3600 s each)
+    const jar = await signedIn();
+    for (const at of [3600 - 30, 2 * 3600 - 60]) {
+      now = START + at;
+      expect((await jar.refresh()).status).toBe(204);
+      expect((await jar.unseal<Session>(SESSION_COOKIE))!.last_seen).toBe(START);
+    }
+    now = START + 150 * 60;
+    const res = await jar.refresh();
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "signed_out" });
+    expect(sessionCookies(res).every(isClear)).toBe(true);
   });
 
   it("keeps cf_access_token and cf_access_exp, which the refresh response doesn't carry", async () => {

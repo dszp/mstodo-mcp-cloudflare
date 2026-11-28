@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Live updates in the web client** (milestone 4): the page keeps a WebSocket open to the BFF's
+  new `/bff/socket`, which relays the server's push socket, and pulls when told something
+  changed. The 30-second poll runs only while the socket isn't open, and a page hidden for more
+  than 5 minutes closes its socket. No new variable, binding or secret.
 - **The web client edits tasks** (milestone 3a): adding and deleting tasks, moving them between
   lists, and titles, notes, due dates, reminders, importance, steps, completion and My Day. Edits
   queue in an outbox and go to the server as sync mutations through `POST /bff/api/sync/mutations`,
@@ -27,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pnpm run deploy <name>`. `pnpm run` refuses while `node_modules` doesn't match the lockfile.
   The deployment scripts run wrangler from `node_modules` directly instead of through `npx`.
   The Node host image installs its runtime dependencies with pnpm in a separate stage.
+
+### Security
+- **The web session's idle timer moves only on user activity.** `last_seen` is updated by
+  `GET /bff/session` with `X-Potem-Activity: 1`, which the page sends after activity (at most
+  once a minute). Refreshes and plain session reads no longer move it, so the page's automatic
+  refreshes can't keep an unattended session signed in.
 
 ## [0.19.1] – 2026-11-27
 

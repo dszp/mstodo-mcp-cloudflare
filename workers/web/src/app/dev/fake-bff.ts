@@ -19,6 +19,7 @@
 // changes (the fixture is rebuilt each day).
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
 import type { Plugin } from "vite";
 import { generateFeed, pageOf } from "../../../spike/fixture.ts";
 import type { FeedChange, FeedTask } from "../../sync/feed.ts";
@@ -45,9 +46,14 @@ const CAPABILITIES = {
   source: "graph",
 };
 
-// The page CSP from workers/web/src/bff/headers.ts, with a made-up server origin.
-const PAGE_CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; " +
+// The page CSP from workers/web/src/bff/headers.ts, with a made-up server
+// origin. connect-src gets the preview server's own ws:// origin, derived
+// from the request's Host as headers.ts derives wss:// from WEB_ORIGIN. A
+// Host that isn't a plain host[:port] is left out rather than written into
+// the header.
+const pageCsp = (host: string | undefined) =>
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+  `connect-src 'self'${host && /^[A-Za-z0-9.-]+(:[0-9]+)?$/.test(host) ? ` ws://${host}` : ""}; ` +
   "frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://server.example.com";
 
 const THEMES = ["dark_blue", "dark_red", "dark_teal", "light_purple", "dark_green", null, "beach", null];
@@ -421,17 +427,28 @@ export function fakeBff(): Plugin {
     next();
   }
 
+  // The fake BFF has no push socket. A WebSocket upgrade never reaches the
+  // middlewares, and Vite leaves one it doesn't own hanging, so /bff/socket
+  // is refused at once: the page's push client backs off (up to 30 s between
+  // tries) and the page stays on the 30 s poll.
+  function refuseSocket(req: IncomingMessage, socket: Duplex): void {
+    if (new URL(req.url ?? "/", "http://localhost").pathname !== "/bff/socket") return;
+    socket.end("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+  }
+
   return {
     name: "potem-fake-bff",
     apply: "serve",
     configureServer(server) {
+      server.httpServer?.on("upgrade", refuseSocket);
       server.middlewares.use(handle);
     },
     // The dev server can't run under the page CSP (Vite injects inline script
     // and style), so the CSP check runs against a build: `vite preview`.
     configurePreviewServer(server) {
-      server.middlewares.use((_req, res, next) => {
-        res.setHeader("content-security-policy", PAGE_CSP);
+      server.httpServer.on("upgrade", refuseSocket);
+      server.middlewares.use((req, res, next) => {
+        res.setHeader("content-security-policy", pageCsp(req.headers.host));
         next();
       });
       server.middlewares.use(handle);

@@ -9,7 +9,8 @@ const SERVER = "https://server.example.com";
 const SECRET = "test-secret-test-secret-test-secret-0123";
 
 const CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; " +
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+  "connect-src 'self' wss://web.example.com; " +
   `frame-ancestors 'none'; base-uri 'none'; form-action 'self' ${SERVER}`;
 
 let server: TestServer;
@@ -65,6 +66,8 @@ describe("route", () => {
       ["/auth/logout", {}, 405],
       ["/bff/session", { method: "DELETE" }, 405],
       ["/bff/session/refresh", {}, 405],
+      ["/bff/socket", {}, 426],
+      ["/bff/socket", { method: "POST", headers: { upgrade: "websocket", origin: WEB } }, 405],
       ["/auth/other", {}, 404],
       ["/auth", {}, 404],
       ["/bff/other", {}, 404],
@@ -86,6 +89,20 @@ describe("route", () => {
   it("names the allowed method on a 405", async () => {
     expect((await route(req("/auth/logout"), cfg))!.headers.get("allow")).toBe("POST");
     expect((await route(req("/bff/session", { method: "POST" }), cfg))!.headers.get("allow")).toBe("GET");
+    expect((await route(req("/bff/socket", { method: "POST" }), cfg))!.headers.get("allow")).toBe("GET");
+  });
+
+  it("returns null for a GET /bff/socket upgrade, which the host authorizes and relays", async () => {
+    for (const upgrade of ["websocket", "WebSocket"]) {
+      expect(await route(req("/bff/socket", { headers: { upgrade, origin: WEB } }), cfg), upgrade).toBeNull();
+    }
+    expect(server.apiRequests).toHaveLength(0);
+  });
+
+  it("answers 426 naming the upgrade for a GET /bff/socket without one", async () => {
+    const res = (await route(req("/bff/socket", { headers: { origin: WEB } }), cfg))!;
+    expect(res.status).toBe(426);
+    expect(res.headers.get("upgrade")).toBe("websocket");
   });
 
   it("names the allowed method on a /bff/api 405: GET for a read path, POST for sync/mutations", async () => {
@@ -154,6 +171,11 @@ describe("withSecurityHeaders", () => {
       expectSecurityHeaders(res, String(status), true, API_CSP);
       expect(res.headers.get("cross-origin-resource-policy")).toBe("same-origin");
     }
+  });
+
+  it("allows the push socket's own origin in connect-src: ws:// for a loopback http web origin", () => {
+    const res = withSecurityHeaders(new Response(""), { ...cfg, webOrigin: "http://localhost:8787" }, "/index.html");
+    expect(res.headers.get("content-security-policy")).toContain("connect-src 'self' ws://localhost:8787;");
   });
 
   it("adds every header to an asset response, without no-store, and keeps its own headers", async () => {

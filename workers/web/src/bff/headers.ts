@@ -11,16 +11,19 @@ export const isBffPath = (pathname: string) =>
 // Task bodies are untrusted HTML; with a cookie session, script on this origin
 // could drive the whole BFF API. No inline script or eval, images only from
 // here or data:/blob:, and forms only to here or the server's sign-in pages.
-const csp = (serverOrigin: string) =>
+// connect-src names the push socket's wss:// origin as well as 'self': CSP
+// Level 2, which older Safari releases follow, doesn't let 'self' match a
+// WebSocket URL.
+const csp = (cfg: BffConfig) =>
   [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self'",
     "img-src 'self' data: blob:",
-    "connect-src 'self'",
+    `connect-src 'self' ${cfg.webOrigin.replace(/^http/, "ws")}`,
     "frame-ancestors 'none'",
     "base-uri 'none'",
-    `form-action 'self' ${serverOrigin}`,
+    `form-action 'self' ${cfg.serverOrigin}`,
   ].join("; ");
 
 /**
@@ -42,7 +45,7 @@ export function withSecurityHeaders(res: Response, cfg: BffConfig, pathname: str
   const headers = new Headers(res.headers);
   // API responses are data, never a page: a proxied attachment opened
   // directly runs nothing, and no other origin may frame it.
-  headers.set("content-security-policy", pathname.startsWith("/bff/api/") ? API_CSP : csp(cfg.serverOrigin));
+  headers.set("content-security-policy", pathname.startsWith("/bff/api/") ? API_CSP : csp(cfg));
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-robots-tag", "noindex, nofollow");

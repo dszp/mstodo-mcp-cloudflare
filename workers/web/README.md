@@ -27,7 +27,7 @@ pnpm exec tsc --noEmit -p workers/web/tsconfig.engine.json   # typecheck the eng
 ```
 
 `web:dev` and `vite preview` answer `/bff/*` and `/auth/*` from a fake BFF
-(`src/app/dev/fake-bff.ts`) with made-up data, so they need no server and no sign-in. The fake BFF applies edits too, so you can edit tasks locally. Use
+(`src/app/dev/fake-bff.ts`) with made-up data, so they need no server and no sign-in. The fake BFF applies edits too, so you can edit tasks locally. It has no push socket: it answers `/bff/socket` with 404, so the page uses the 30-second poll. Use
 `vite preview` to check the production build (`http://127.0.0.1:4173`).
 
 The real Worker and BFF don't run locally against a server: the Worker answers `421` to any

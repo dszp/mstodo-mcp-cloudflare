@@ -7,7 +7,32 @@
 import { route } from "../../bff/router.ts";
 import { HSTS, isBffPath, withSecurityHeaders } from "../../bff/headers.ts";
 import { sealer } from "../../bff/seal.ts";
+import { authorizeSocket, BFF_SOCKET_PATH } from "../../bff/socket.ts";
 import { type BffConfig, upstreamVia } from "../../bff/upstream.ts";
+import { type RelaySocket, relay, type SocketRuntime } from "./socket-relay.ts";
+
+// The Workers WebSocket API, declared by hand like Env: the WebWorker lib has
+// neither WebSocketPair nor Response's webSocket option.
+declare const WebSocketPair: { new (): { 0: RelaySocket; 1: RelaySocket } };
+
+const workersSockets: SocketRuntime = {
+  pair: () => {
+    const p = new WebSocketPair();
+    return [p[0], p[1]];
+  },
+  upgraded: (client) => {
+    const init: ResponseInit & { webSocket: RelaySocket } = { status: 101, webSocket: client };
+    return new Response(null, init);
+  },
+  // setTimeout fires at once for a delay over 2^31-1 ms (about 24.8 days),
+  // which large session limits could reach; capped, the session-end close
+  // comes early and the page's session check reconnects.
+  schedule: (fn, ms) => {
+    const t = setTimeout(fn, Math.min(ms, 2 ** 31 - 1));
+    return () => clearTimeout(t);
+  },
+  now: () => Date.now(),
+};
 
 /** The part of a Workers `Fetcher` binding this host uses. */
 export interface Binding {
@@ -31,7 +56,8 @@ const DEFAULT_MAX_HOURS = 12;
 const DEFAULT_IDLE_MINUTES = 60;
 
 type Icon = "blue" | "teal";
-type Checked = { ok: true; cfg: BffConfig; icon: Icon } | { ok: false; variable: string };
+type Fetch = (req: Request) => Promise<Response>;
+type Checked = { ok: true; cfg: BffConfig; icon: Icon; fetchFn: Fetch } | { ok: false; variable: string };
 
 // The icon files at the site root are the blue set; a teal deployment serves
 // the same names from public/icons/teal/, so index.html and the sidebar logo
@@ -79,10 +105,11 @@ async function checkConfig(env: Env): Promise<Checked> {
   const icon = env.WEB_ICON ?? "blue";
   if (icon !== "blue" && icon !== "teal") return { ok: false, variable: "WEB_ICON" };
 
-  const fetchFn = env.SERVER ? (r: Request) => env.SERVER!.fetch(r) : (r: Request) => fetch(r);
+  const fetchFn: Fetch = env.SERVER ? (r) => env.SERVER!.fetch(r) : (r) => fetch(r);
   return {
     ok: true,
     icon,
+    fetchFn,
     cfg: {
       webOrigin,
       serverOrigin,
@@ -114,30 +141,46 @@ function misconfigured(variable: string, pathname: string): Response {
 const text = (body: string, status: number, headers: Record<string, string> = {}) =>
   new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", ...headers } });
 
+/**
+ * The Worker's fetch, with the WebSocket API injected so tests can run the
+ * /bff/socket path in Node; the default export passes the runtime's.
+ */
+export async function handleRequest(req: Request, env: Env, sockets: SocketRuntime): Promise<Response> {
+  const checked = await checkConfig(env);
+  if (!checked.ok) return misconfigured(checked.variable, new URL(req.url).pathname);
+  const { cfg, icon, fetchFn } = checked;
+  const url = new URL(req.url);
+
+  // A second hostname on the Worker would mint cookies and OAuth callbacks
+  // for the wrong origin.
+  if (url.origin !== cfg.webOrigin) {
+    return withSecurityHeaders(text("Misdirected request.\n", 421), cfg, url.pathname);
+  }
+
+  // authorizeSocket answers every request to the path, so a refusal (method,
+  // missing upgrade, Origin, session) never reaches the server or ASSETS. The
+  // relay builds its own upstream Request and sends it through the same
+  // binding-or-fetch as cfg.upstream, also without following redirects.
+  if (url.pathname === BFF_SOCKET_PATH) {
+    const decision = await authorizeSocket(req, cfg);
+    if (decision.kind === "refuse") return decision.response;
+    return relay(decision, fetchFn, cfg.serverOrigin, sockets);
+  }
+
+  const bff = await route(req, cfg);
+  if (bff) return bff;
+
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return withSecurityHeaders(text("Method not allowed.\n", 405, { allow: "GET, HEAD" }), cfg, url.pathname);
+  }
+  if (icon === "teal" && ICON_FILES.has(url.pathname)) {
+    const teal = new URL(url);
+    teal.pathname = `/icons/teal${url.pathname}`;
+    return withSecurityHeaders(await env.ASSETS.fetch(new Request(teal, req)), cfg, url.pathname);
+  }
+  return withSecurityHeaders(await env.ASSETS.fetch(req), cfg, url.pathname);
+}
+
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
-    const checked = await checkConfig(env);
-    if (!checked.ok) return misconfigured(checked.variable, new URL(req.url).pathname);
-    const { cfg, icon } = checked;
-    const url = new URL(req.url);
-
-    // A second hostname on the Worker would mint cookies and OAuth callbacks
-    // for the wrong origin.
-    if (url.origin !== cfg.webOrigin) {
-      return withSecurityHeaders(text("Misdirected request.\n", 421), cfg, url.pathname);
-    }
-
-    const bff = await route(req, cfg);
-    if (bff) return bff;
-
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      return withSecurityHeaders(text("Method not allowed.\n", 405, { allow: "GET, HEAD" }), cfg, url.pathname);
-    }
-    if (icon === "teal" && ICON_FILES.has(url.pathname)) {
-      const teal = new URL(url);
-      teal.pathname = `/icons/teal${url.pathname}`;
-      return withSecurityHeaders(await env.ASSETS.fetch(new Request(teal, req)), cfg, url.pathname);
-    }
-    return withSecurityHeaders(await env.ASSETS.fetch(req), cfg, url.pathname);
-  },
+  fetch: (req: Request, env: Env): Promise<Response> => handleRequest(req, env, workersSockets),
 };

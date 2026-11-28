@@ -25,7 +25,6 @@
 // /auth/login, which loads a fresh page.
 
 import type { MirrorStore } from "../sync/store.ts";
-import { throttle } from "./throttle.ts";
 
 /** GET /bff/session. Times are epoch seconds on the BFF's clock; `now` is that clock when it answered. */
 export type SessionInfo =
@@ -44,9 +43,11 @@ export interface SessionClient {
   /**
    * GET /bff/session, under the same cross-tab lock as a refresh: the BFF can
    * rewrite the cookie (last_seen) while answering it. Signed out runs the
-   * signed-out flow; a server error throws.
+   * signed-out flow; a server error throws. `activity` sends
+   * X-Potem-Activity: 1, the only thing that moves the BFF's idle timer;
+   * only watchSession sends it, after user activity.
    */
-  current(): Promise<SessionInfo>;
+  current(opts?: { activity?: boolean }): Promise<SessionInfo>;
   /** The deadlines from the last signed-in current(), or null before one. */
   limits(): SessionLimits | null;
   /** Calls `cb` whenever limits() changes. Returns an unsubscribe. */
@@ -59,8 +60,9 @@ export interface SessionClient {
   /** When the person last used this page or another tab, in epoch milliseconds. */
   readonly lastActivity: number;
   /**
-   * When this page last moved the BFF's idle timer: a signed-in GET
-   * /bff/session or a refresh answered 204. Epoch milliseconds.
+   * When this page last reached the BFF's session routes: a signed-in GET
+   * /bff/session or a refresh answered 204. watchSession refreshes only after
+   * activity since then. Epoch milliseconds.
    */
   readonly lastContact: number;
   /** Records activity now and tells the other tabs. */
@@ -94,6 +96,7 @@ const ACTIVITY_MESSAGE = { type: "activity" } as const;
 const ACTIVITY_BROADCAST_MS = 5_000;
 const LOCK = "potem-refresh";
 const CSRF_HEADER = { "x-potem": "1" };
+const ACTIVITY_HEADER = { "x-potem-activity": "1" };
 
 function defaultLocks(): LockRequester | null {
   const locks = (globalThis as { navigator?: { locks?: LockManager } }).navigator?.locks;
@@ -162,8 +165,10 @@ export function createSessionClient(fetchFn: typeof fetch, opts: SessionOptions)
     throw new Error(`session refresh failed: ${res.status}${typeof body?.error === "string" ? ` ${body.error}` : ""}`);
   }
 
-  async function current(): Promise<SessionInfo> {
-    const res = await underLock(() => fetchFn("/bff/session"));
+  async function current({ activity = false } = {}): Promise<SessionInfo> {
+    const res = await underLock(() =>
+      activity ? fetchFn("/bff/session", { headers: ACTIVITY_HEADER }) : fetchFn("/bff/session"),
+    );
     if (!res.ok) throw new Error(`session check failed: ${res.status}`);
     const info = (await res.json()) as SessionInfo;
     if (info.signed_in !== true) {
@@ -264,13 +269,17 @@ type WatchedSession = Pick<
  *   the back-forward cache (timers stall while a device sleeps). No request.
  * - Refreshes the access token at refresh_at, then reads the session again
  *   for the next refresh_at, but only after activity since the page last
- *   moved the BFF's idle timer: a refresh moves it too, and an unattended page
- *   that refreshed would keep the BFF's session alive past the idle limit.
+ *   reached the BFF: an unattended page has no use for a fresh token, and
+ *   skipping the refresh saves the requests. (A refresh doesn't move the
+ *   BFF's idle timer, so one that does run can't keep a session alive.)
  * - Keeps the BFF's idle timer alive: pointer, wheel, touch and keyboard input
  *   and the page becoming visible (250 ms after, see onVisible) count as
- *   activity, and GET /bff/session (the only request that moves the BFF's
- *   timer) is sent at most once a minute; the page's own check on load counts
- *   as the first.
+ *   activity, and a GET /bff/session with X-Potem-Activity: 1 (the only
+ *   request that moves the BFF's timer) reports it. The first activity is
+ *   reported at once; activity within the next minute is reported when that
+ *   minute ends, so the last activity always reaches the BFF within a minute
+ *   and the BFF's idle deadline never falls more than a minute short of the
+ *   page's.
  *
  * Every event checks the deadlines before it counts as activity, so a tab
  * reopened after the idle limit signs out. Returns a function that stops it.
@@ -289,9 +298,22 @@ export function watchSession(
   let refreshing = false;
   let lastRefreshTry = -Infinity;
 
-  const checkServer = throttle(() => {
-    session.current().catch((e: unknown) => console.warn("session check failed", e));
-  }, ACTIVITY_INTERVAL_MS);
+  // Trailing edge: activity inside the minute after a report waits for its
+  // end rather than being dropped.
+  let lastReport = -Infinity;
+  let reportTimer: ReturnType<typeof setTimeout> | undefined;
+  const report = () => {
+    reportTimer = undefined;
+    if (stopped || session.signedOut) return;
+    lastReport = Date.now();
+    session.current({ activity: true }).catch((e: unknown) => console.warn("session check failed", e));
+  };
+  const checkServer = () => {
+    if (reportTimer !== undefined) return;
+    const wait = lastReport + ACTIVITY_INTERVAL_MS - Date.now();
+    if (wait <= 0) report();
+    else reportTimer = setTimeout(report, wait);
+  };
 
   /** Signs out when a deadline has passed, refreshes when one is due, then re-arms. */
   function check(): void {
@@ -356,6 +378,7 @@ export function watchSession(
   return () => {
     stopped = true;
     clearTimeout(timer);
+    clearTimeout(reportTimer);
     clearTimeout(visibleTimer);
     stopLimits();
     for (const type of ACTIVITY_EVENTS) env.target.removeEventListener(type, onActivity);

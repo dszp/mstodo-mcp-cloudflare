@@ -556,8 +556,10 @@ server as an OAuth client and proxies an allowlist of `GET` requests (`workers/w
 React app with the sidebar, smart lists, lists, task detail and search (`workers/web/src/app`), plus
 a `web` deployment kind. Deploying it is a separate step; see DEPLOYMENT.md, "Web client". Milestone 3a (task
 edits) is built: adding, deleting and moving tasks between lists, and titles, notes, due dates,
-reminders, importance, steps, completion and My Day, sent as sync mutations through an outbox. Next, 3b: lists and groups, drag reorder, uploads and the repeat
-editor; then push updates, a persistent mirror with an installable PWA, and a Node host.
+reminders, importance, steps, completion and My Day, sent as sync mutations through an outbox. Milestone 4 (live updates) is built: the page keeps
+a socket to the BFF's `/bff/socket`, which relays the server's push socket, and pulls when it is
+told something changed; the 30-second poll runs only while the socket isn't open. Next, 3b: lists and groups, drag reorder, uploads and the repeat
+editor, and a Light/Dark/System theme toggle; then a persistent mirror with an installable PWA, and a Node host.
 
 **Dated updates above an HTML note (web client, later idea from the owner).** A task whose note
 is HTML, such as a flagged email, is read-only in the web client. This adds a plain-text section
