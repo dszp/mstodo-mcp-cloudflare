@@ -399,8 +399,11 @@ web deployment that already works edits after you deploy this version.
 Live updates need nothing configured either: the page keeps a WebSocket open to the web
 Worker's `/bff/socket`, which relays the server's push socket, so a change made in the app or
 on another device shows up within seconds. If the socket can't connect, the page polls every
-30 seconds instead. The Node web host (a later milestone) will need its own socket relay, because
-the Cloudflare one uses the Workers WebSocket API.
+30 seconds instead. A relayed socket is one Worker invocation that lasts as long as the page
+stays open. On Workers Paid that costs a request plus a little CPU per message. On the Free
+plan the invocation's CPU limit may end the socket after a while; the page reconnects and falls
+back to the 30-second poll, so nothing breaks. The Node web host (a later milestone) will need
+its own socket relay, because the Cloudflare one uses the Workers WebSocket API.
 
 **Before you start**
 
