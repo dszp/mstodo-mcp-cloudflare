@@ -11,7 +11,8 @@ import type { FeedTask, SmartList } from "../sync/feed.ts";
 type FeedStep = FeedTask["steps"][number];
 import { bodyText } from "../sync/plain-text.ts";
 import { listTasks, smartListTasks } from "../sync/smart-lists.ts";
-import type { MirrorList, MirrorStore } from "../sync/store.ts";
+import type { MirrorList, MirrorStore, MirrorTask } from "../sync/store.ts";
+import { ID } from "./route.ts";
 
 // ---------------------------------------------------------------- dates
 
@@ -447,4 +448,69 @@ export function sizeLabel(bytes: number | null): string | null {
     u++;
   }
   return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[u]}`;
+}
+
+// ---------------------------------------------------------------- search
+
+/** The longest query the server accepts (GET /api/v1/search answers bad_query beyond it). */
+const MAX_SEARCH_CHARS = 256;
+
+/** The words typed, with the ends trimmed: what the local search matches. */
+export const searchText = (q: string): string => q.trim();
+
+/** The BFF path for "search all history", or null for an empty query. */
+export function searchPath(q: string): string | null {
+  const text = searchText(q).slice(0, MAX_SEARCH_CHARS);
+  return text === "" ? null : `search?q=${encodeURIComponent(text)}`;
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+// One task as the server sends it ({ kind, id, data, field_clock }), kept only
+// if the page can render it: the fields the views index into have their shape.
+function readTask(entry: unknown): MirrorTask | null {
+  if (!isObject(entry) || typeof entry.id !== "string" || !ID.test(entry.id) || !isObject(entry.data)) return null;
+  const d = entry.data;
+  if (
+    typeof d.title !== "string" ||
+    typeof d.status !== "string" ||
+    !Array.isArray(d.steps) ||
+    !Array.isArray(d.links) ||
+    !Array.isArray(d.attachments) ||
+    !isObject(d.reminder) ||
+    !isObject(d.my_day)
+  ) {
+    return null;
+  }
+  return { ...(d as unknown as FeedTask), id: entry.id };
+}
+
+/** The tasks of a GET /search response, or null when it isn't a results list. */
+export function parseSearchResponse(json: unknown): MirrorTask[] | null {
+  if (!isObject(json) || !Array.isArray(json.results)) return null;
+  return json.results.flatMap((e) => readTask(e) ?? []);
+}
+
+/** The task of a GET /tasks/{sid} response, or null. */
+export const parseTaskResponse = (json: unknown): MirrorTask | null => readTask(json);
+
+/**
+ * The server hits the mirror lacks, in the server's order: not in the mirror,
+ * not among the local results, not repeated, and, when completed tasks are
+ * off, open ones only.
+ */
+export function olderTasks(
+  hits: readonly MirrorTask[],
+  localIds: Iterable<string>,
+  store: MirrorStore,
+  includeCompleted: boolean,
+): MirrorTask[] {
+  const seen = new Set(localIds);
+  const out: MirrorTask[] = [];
+  for (const h of hits) {
+    if (seen.has(h.id) || store.task(h.id) !== undefined) continue;
+    seen.add(h.id);
+    if (includeCompleted || h.status !== "completed") out.push(h);
+  }
+  return out;
 }

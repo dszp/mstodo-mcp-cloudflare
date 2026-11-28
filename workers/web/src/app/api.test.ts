@@ -39,6 +39,23 @@ describe("bffFetch", () => {
     expect(log).toEqual(["GET /bff/api/sync/changes?scope=active"]);
   });
 
+  it("passes a signal to the request, and an aborted request rejects", async () => {
+    const seen: Array<AbortSignal | null | undefined> = [];
+    const fn = vi.fn(async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+      seen.push(init.signal);
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+    }) as unknown as typeof fetch;
+    const session = createSessionClient(fn, { store: new MirrorStore(), locks: null, channel: null });
+    const bffFetch = createBffFetch(fn, session);
+    const ctl = new AbortController();
+    const pending = bffFetch("search?q=a", { signal: ctl.signal });
+    ctl.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(seen).toEqual([ctl.signal]);
+  });
+
   it("on session_refresh_needed refreshes once and retries", async () => {
     const { bffFetch, log } = fakeBff([refreshNeeded, () => json({ ok: 1 })]);
     const res = await bffFetch("sync/info");

@@ -125,3 +125,10 @@ export const CircleIcon = ({ done, className }: P & { done: boolean }) => (
     )}
   </Svg>
 );
+
+export const SearchIcon = (p: P) => (
+  <Svg {...p}>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="m20 20-4.2-4.2" />
+  </Svg>
+);

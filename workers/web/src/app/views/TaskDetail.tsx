@@ -1,4 +1,5 @@
-import type { MirrorStore } from "../../sync/store.ts";
+import type { ReactNode } from "react";
+import type { MirrorStore, MirrorTask } from "../../sync/store.ts";
 import {
   accentOf,
   attachmentHref,
@@ -32,7 +33,9 @@ import { LinkedText } from "./LinkedText.tsx";
  * One task, read-only: title and steps, My Day, reminder, due date, repeat,
  * links and files, the note, and the list and creation date. The note and
  * every title are untrusted and render as text; only http:, https: and
- * mailto: URLs become links.
+ * mailto: URLs become links. `task` shows a task that isn't in the store (an
+ * old search hit, loaded from the server); `placeholder` stands in for it
+ * while it loads or when it didn't.
  */
 export function TaskDetail({
   store,
@@ -40,16 +43,20 @@ export function TaskDetail({
   today,
   timeZone,
   onBack,
+  task,
+  placeholder,
 }: {
   store: MirrorStore;
   id: string;
   today: string;
   timeZone: string;
   onBack: () => void;
+  task?: MirrorTask;
+  placeholder?: ReactNode;
 }) {
   useStoreKey(store, { task: id });
   useStoreKey(store, "lists");
-  const t = store.task(id);
+  const t = task ?? (placeholder === undefined ? store.task(id) : undefined);
 
   const header = (
     <header className="pane-header detail-header">
@@ -62,7 +69,7 @@ export function TaskDetail({
     return (
       <aside className="detail-pane" aria-label="Task">
         {header}
-        <p className="empty">This task isn't in your synced tasks.</p>
+        {placeholder ?? <p className="empty">This task isn't in your synced tasks.</p>}
       </aside>
     );
   }

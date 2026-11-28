@@ -12,9 +12,12 @@ describe("parseRoute / formatRoute", () => {
     ["/smart/important?task=abc_DEF-9", { view: "smart", list: "important", task: "abc_DEF-9" }],
     ["/list/AAMkAD-x_1", { view: "list", id: "AAMkAD-x_1" }],
     ["/list/abc?task=t2", { view: "list", id: "abc", task: "t2" }],
-    ["/search?q=milk", { view: "search", q: "milk", all: false }],
-    ["/search?q=milk+and+eggs&all=1", { view: "search", q: "milk and eggs", all: true }],
-    ["/search?q=caf%C3%A9+%26+50%25", { view: "search", q: "café & 50%", all: false }],
+    ["/search?q=milk", { view: "search", q: "milk", all: false, includeCompleted: true }],
+    ["/search?q=milk+and+eggs&all=1", { view: "search", q: "milk and eggs", all: true, includeCompleted: true }],
+    ["/search?q=caf%C3%A9+%26+50%25", { view: "search", q: "café & 50%", all: false, includeCompleted: true }],
+    ["/search?q=milk&done=0", { view: "search", q: "milk", all: false, includeCompleted: false }],
+    ["/search?q=milk&all=1&done=0&task=t-9", { view: "search", q: "milk", all: true, includeCompleted: false, task: "t-9" }],
+    ["/search?q=milk&task=old_1", { view: "search", q: "milk", all: false, includeCompleted: true, task: "old_1" }],
   ];
 
   for (const [path, route] of routes) {
@@ -30,7 +33,12 @@ describe("parseRoute / formatRoute", () => {
   });
 
   it("parses /search without q as an empty query", () => {
-    expect(parse("/search")).toEqual({ view: "search", q: "", all: false });
+    expect(parse("/search")).toEqual({ view: "search", q: "", all: false, includeCompleted: true });
+  });
+
+  it("reads done=1 and any other done value as the default, include completed", () => {
+    expect(parse("/search?q=a&done=1")).toEqual({ view: "search", q: "a", all: false, includeCompleted: true });
+    expect(parse("/search?q=a&done=x")).toEqual({ view: "search", q: "a", all: false, includeCompleted: true });
   });
 
   it.each([
@@ -45,6 +53,7 @@ describe("parseRoute / formatRoute", () => {
     `/list/${"a".repeat(129)}`,
     "/list/a/b",
     "/list/a?task=bad.id",
+    "/search?q=a&task=bad.id",
     "/?task=",
     "/nowhere",
     "/list/a/",

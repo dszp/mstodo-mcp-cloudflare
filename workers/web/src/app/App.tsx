@@ -8,12 +8,13 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { MirrorStore } from "../sync/store.ts";
-import { SignedOutError } from "./api.ts";
+import { type BffFetch, SignedOutError } from "./api.ts";
 import { type Loader, watchFocus } from "./loader.ts";
 import type { TaskView } from "./model.ts";
 import { type Route, currentRoute, replaceRoute, subscribeRoute } from "./route.ts";
 import { type SessionClient, watchActivity } from "./session.ts";
 import { useToday } from "./use-today.ts";
+import { SearchDetail, SearchPane } from "./views/Search.tsx";
 import { Sidebar } from "./views/Sidebar.tsx";
 import { TaskDetail } from "./views/TaskDetail.tsx";
 import { TaskList } from "./views/TaskList.tsx";
@@ -22,6 +23,7 @@ export interface AppDeps {
   store: MirrorStore;
   session: SessionClient;
   loader: Loader;
+  bff: BffFetch;
 }
 
 export const AppContext = createContext<AppDeps | null>(null);
@@ -109,7 +111,7 @@ function useRoute(): Route {
  * list, with a back control on each.
  */
 function Ready() {
-  const { store, session, loader } = useApp();
+  const { store, session, loader, bff } = useApp();
   const route = useRoute();
   const today = useToday(loader);
   const timeZone = loader.info()?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -123,7 +125,7 @@ function Ready() {
     () => (smart !== null ? { view: "smart", list: smart } : listId !== null ? { view: "list", id: listId } : null),
     [smart, listId],
   );
-  const task = route.view === "search" ? null : (route.task ?? null);
+  const task = route.task ?? null;
   const pane = task !== null ? "detail" : sidebarShown ? "sidebar" : "list";
 
   const signOut = () => {
@@ -135,7 +137,7 @@ function Ready() {
   };
   const closeTask = () => {
     // Replaced, not pushed: closing a task shouldn't grow the history stack.
-    if (route.view !== "search") replaceRoute({ ...route, task: undefined });
+    replaceRoute({ ...route, task: undefined });
   };
 
   return (
@@ -165,11 +167,23 @@ function Ready() {
           onBack={() => setSidebarShown(true)}
         />
       ) : (
-        <main className="list-pane">
-          <p className="empty">Search isn't available yet.</p>
-        </main>
+        route.view === "search" && (
+          <SearchPane
+            store={store}
+            bff={bff}
+            route={route}
+            today={today}
+            timeZone={timeZone}
+            onBack={() => setSidebarShown(true)}
+          />
+        )
       )}
-      {task !== null && <TaskDetail store={store} id={task} today={today} timeZone={timeZone} onBack={closeTask} />}
+      {task !== null &&
+        (route.view === "search" ? (
+          <SearchDetail store={store} bff={bff} id={task} today={today} timeZone={timeZone} onBack={closeTask} />
+        ) : (
+          <TaskDetail store={store} id={task} today={today} timeZone={timeZone} onBack={closeTask} />
+        ))}
     </div>
   );
 }

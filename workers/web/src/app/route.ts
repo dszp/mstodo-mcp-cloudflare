@@ -5,17 +5,19 @@
 //   /smart/<smart list>        a smart list (SmartList in core's feed types)
 //   /list/<id>                 one list
 //   ?task=<id>                 on any of the above: the task open in the detail pane
-//   /search?q=<text>[&all=1]   search (no ?task); all=1 asks the server too (Task 8)
+//   /search?q=<text>[&all=1][&done=0][&task=<id>]
+//                              search; all=1 asks the server too, done=0 leaves out
+//                              completed tasks, ?task is the task open in the detail pane
 
 import type { SmartList } from "../sync/feed.ts";
 
 export type Route =
   | { view: "smart"; list: SmartList; task?: string }
   | { view: "list"; id: string; task?: string }
-  | { view: "search"; q: string; all: boolean };
+  | { view: "search"; q: string; all: boolean; includeCompleted: boolean; task?: string };
 
 // The id shape the BFF allowlists (workers/web/src/bff/api.ts).
-const ID = /^[A-Za-z0-9_-]{1,128}$/;
+export const ID = /^[A-Za-z0-9_-]{1,128}$/;
 // Keyed by SmartList, so the compiler checks it names exactly core's smart
 // lists; a type-only import keeps core out of the bundle (the app's Vite
 // config has no @potem/core alias).
@@ -25,11 +27,15 @@ const isSmartList = (s: string): s is SmartList => Object.hasOwn(SMART_LIST_NAME
 /** The route a URL names, or null for one the app doesn't know (shown as /). */
 export function parseRoute(url: URL): Route | null {
   const parts = url.pathname.split("/").slice(1);
-  if (url.pathname === "/search") {
-    return { view: "search", q: url.searchParams.get("q") ?? "", all: url.searchParams.get("all") === "1" };
-  }
   let base: Route;
-  if (url.pathname === "/") base = { view: "smart", list: "my_day" };
+  if (url.pathname === "/search") {
+    base = {
+      view: "search",
+      q: url.searchParams.get("q") ?? "",
+      all: url.searchParams.get("all") === "1",
+      includeCompleted: url.searchParams.get("done") !== "0",
+    };
+  } else if (url.pathname === "/") base = { view: "smart", list: "my_day" };
   else if (parts.length === 2 && parts[0] === "smart" && isSmartList(parts[1])) base = { view: "smart", list: parts[1] };
   else if (parts.length === 2 && parts[0] === "list" && ID.test(parts[1])) base = { view: "list", id: parts[1] };
   else return null;
@@ -42,6 +48,8 @@ export function formatRoute(route: Route): string {
   if (route.view === "search") {
     const q = new URLSearchParams({ q: route.q });
     if (route.all) q.set("all", "1");
+    if (!route.includeCompleted) q.set("done", "0");
+    if (route.task !== undefined) q.set("task", route.task);
     return `/search?${q}`;
   }
   const path = route.view === "list" ? `/list/${route.id}` : route.list === "my_day" ? "/" : `/smart/${route.list}`;

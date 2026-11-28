@@ -7,6 +7,7 @@ import type { Route } from "../route.ts";
 import { useStoreKey } from "../use-store.ts";
 import { CalendarIcon, CheckCircleIcon, ChevronIcon, FolderIcon, HomeIcon, InfinityIcon, ListIcon, StarIcon, SunIcon } from "./icons.tsx";
 import { RouteLink } from "./RouteLink.tsx";
+import { SearchBox } from "./SearchBox.tsx";
 
 export const SMART_NAMES: Record<SmartList, string> = {
   my_day: "My Day",
@@ -76,6 +77,7 @@ export function Sidebar({
 
   return (
     <nav className="sidebar" aria-label="Lists">
+      <SearchBox route={route} onSubmit={onNavigate} />
       <div className="side-scroll">
         <ul className="side-list">
           {SMART_ORDER.map((smart) => (

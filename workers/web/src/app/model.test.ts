@@ -12,8 +12,13 @@ import {
   linkify,
   msUntilNextDay,
   noteText,
+  olderTasks,
+  parseSearchResponse,
+  parseTaskResponse,
   orderedSteps,
   safeHref,
+  searchPath,
+  searchText,
   sidebarTree,
   taskRows,
 } from "./model.ts";
@@ -315,5 +320,94 @@ describe("msUntilNextDay", () => {
   });
   it("waits at most an hour, so a sleeping device catches up", () => {
     expect(msUntilNextDay("UTC", new Date("2026-11-27T01:00:00Z"))).toBe(3_600_000);
+  });
+});
+
+describe("searchText / searchPath", () => {
+  it("trims the query; blank is empty", () => {
+    expect(searchText("  milk \t")).toBe("milk");
+    expect(searchText("   ")).toBe("");
+    expect(searchText("")).toBe("");
+  });
+
+  it("builds the server path from the trimmed, encoded query", () => {
+    expect(searchPath("  milk & eggs ")).toBe("search?q=milk%20%26%20eggs");
+    expect(searchPath("café")).toBe("search?q=caf%C3%A9");
+  });
+
+  it("has no path for an empty query", () => {
+    expect(searchPath("")).toBeNull();
+    expect(searchPath(" \n ")).toBeNull();
+  });
+
+  it("cuts a query at the server's 256-character limit", () => {
+    const path = searchPath("a".repeat(300))!;
+    expect(decodeURIComponent(path.slice("search?q=".length))).toBe("a".repeat(256));
+  });
+});
+
+describe("parseSearchResponse / parseTaskResponse", () => {
+  const entry = (id: string, over: Partial<FeedTask> = {}) => ({ kind: "task", id, data: taskData({ title: id, ...over }), field_clock: {} });
+
+  it("reads the results as tasks with their ids", () => {
+    const hits = parseSearchResponse({ results: [entry("a"), entry("b")] })!;
+    expect(hits.map((t) => [t.id, t.title])).toEqual([["a", "a"], ["b", "b"]]);
+  });
+
+  it("drops entries that aren't tasks the page can render", () => {
+    const hits = parseSearchResponse({
+      results: [
+        entry("ok"),
+        { kind: "task", id: "no-data" },
+        { kind: "task", id: "bad id!", data: taskData() },
+        { kind: "task", id: "no-steps", data: { ...taskData(), steps: null } },
+        { kind: "task", id: "no-title", data: { ...taskData(), title: 4 } },
+        null,
+        "x",
+      ],
+    })!;
+    expect(hits.map((t) => t.id)).toEqual(["ok"]);
+  });
+
+  it("is null when the response isn't a results list", () => {
+    expect(parseSearchResponse(null)).toBeNull();
+    expect(parseSearchResponse({})).toBeNull();
+    expect(parseSearchResponse({ results: "x" })).toBeNull();
+  });
+
+  it("reads one task, or null", () => {
+    expect(parseTaskResponse(entry("a"))?.id).toBe("a");
+    expect(parseTaskResponse({ kind: "task", id: "a" })).toBeNull();
+    expect(parseTaskResponse([])).toBeNull();
+  });
+});
+
+describe("olderTasks", () => {
+  const s = storeOf(task("mirror-open"), task("mirror-done", { status: "completed", completed_at: TODAY }));
+  const hit = (id: string, over: Partial<FeedTask> = {}) => ({ ...taskData(over), id });
+
+  it("drops hits the mirror already holds", () => {
+    const hits = [hit("mirror-open"), hit("old-1"), hit("mirror-done"), hit("old-2")];
+    expect(olderTasks(hits, [], s, true).map((t) => t.id)).toEqual(["old-1", "old-2"]);
+  });
+
+  it("drops hits already in the local results", () => {
+    // A local result is always in the store; this also covers a result the store lost between renders.
+    const hits = [hit("old-1"), hit("old-2")];
+    expect(olderTasks(hits, ["old-1"], s, true).map((t) => t.id)).toEqual(["old-2"]);
+  });
+
+  it("drops a hit that repeats within the response", () => {
+    expect(olderTasks([hit("old-1"), hit("old-1")], [], s, true)).toHaveLength(1);
+  });
+
+  it("leaves out completed hits when completed tasks are off", () => {
+    const hits = [hit("old-open"), hit("old-done", { status: "completed", completed_at: "2026-01-02" })];
+    expect(olderTasks(hits, [], s, false).map((t) => t.id)).toEqual(["old-open"]);
+    expect(olderTasks(hits, [], s, true).map((t) => t.id)).toEqual(["old-open", "old-done"]);
+  });
+
+  it("keeps the server's order", () => {
+    expect(olderTasks([hit("z"), hit("a"), hit("m")], [], s, true).map((t) => t.id)).toEqual(["z", "a", "m"]);
   });
 });

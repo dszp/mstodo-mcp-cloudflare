@@ -110,6 +110,34 @@ function showcase(today: string): FeedChange[] {
   ];
 }
 
+/**
+ * Completed tasks older than the active scope: the server finds them
+ * (/search, /tasks/{sid}), the feed doesn't carry them. Made-up text only.
+ */
+function oldTasks(today: string): FeedChange[] {
+  const day = (offset: number) => new Date(Date.parse(today) - offset * DAY_MS).toISOString().slice(0, 10);
+  const old = (n: number, over: Partial<FeedTask> & { title: string }): FeedChange => ({
+    kind: "task", id: `old-${n}`, seq: 2_000_000 + n, deleted: false, field_clock: {},
+    data: {
+      list_id: "showcase-list", status: "completed", importance: "normal", categories: [], start: null, due: null,
+      reminder: { on: false, at: null }, completed_at: `${day(120 + n)}T15:00:00Z`, recurrence: null,
+      created_at: `${day(200 + n)}T15:00:00Z`, modified_at: `${day(120 + n)}T15:00:00Z`, order: `${1000 + n}`,
+      my_day: { committed_day: null, committed_order: null, postponed_day: null },
+      subresources_complete: true, steps: [], links: [], attachments: [], body: null, ...over,
+    },
+  });
+  return [
+    old(1, {
+      title: "Renew the example license",
+      body: { type: "text", content: "Renewed last spring. Details at https://example.com/licenses." },
+      steps: [{ id: "old-st-1", title: "Send the form", checked: true, checked_at: null, created_at: `${day(200)}T15:00:00Z`, order: null }],
+    }),
+    old(2, { title: "Example offsite budget review", due: day(150) }),
+    old(3, { title: "<b>Old</b> <img src=x onerror=alert(1)> example title", importance: "high" }),
+    old(4, { title: "Archive the example notes", links: [{ id: "old-ln", url: "https://example.com/notes", title: "Notes", app: null, external_id: null }] }),
+  ];
+}
+
 function envCount(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
@@ -122,7 +150,7 @@ export function fakeBff(): Plugin {
   const total = envCount("POTEM_FAKE_TOTAL", 2400);
   const open = Math.min(envCount("POTEM_FAKE_OPEN", 545), total);
   // One feed per day, so My Day and Planned follow the real date.
-  let cached: { today: string; feed: FeedChange[] } | null = null;
+  let cached: { today: string; feed: FeedChange[]; everything: FeedChange[] } | null = null;
   const feed = (): FeedChange[] => {
     const today = todayIn(TIMEZONE, new Date());
     if (cached?.today !== today) {
@@ -135,9 +163,14 @@ export function fakeBff(): Plugin {
       const active = all.filter(
         (c) => c.kind !== "task" || c.deleted || c.data.status !== "completed" || (c.data.completed_at !== null && c.data.completed_at >= since),
       );
-      cached = { today, feed: active };
+      cached = { today, feed: active, everything: [...all, ...oldTasks(today)] };
     }
     return cached.feed;
+  };
+  // Every task the "server" holds: the feed's, the completed ones it left out, and the old ones.
+  const everyTask = (): Array<Extract<FeedChange, { kind: "task" }>> => {
+    feed();
+    return cached!.everything.filter((c): c is Extract<FeedChange, { kind: "task" }> => c.kind === "task" && !c.deleted);
   };
 
   function send(res: ServerResponse, status: number, body?: unknown): void {
@@ -180,6 +213,18 @@ export function fakeBff(): Plugin {
         const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit") ?? 500) | 0));
         return send(res, 200, pageOf(feed(), url.searchParams.get("cursor"), limit));
       }
+    }
+    if (req.method === "GET" && url.pathname === "/bff/api/search") {
+      // Every word a case-folded substring of the title, like the server's prefix match, 50 at most.
+      const words = (url.searchParams.get("q") ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+      if (words.length === 0 || words.join(" ").length > 256) return send(res, 400, { error: "bad_query" });
+      const hits = everyTask().filter((t) => words.every((w) => t.data.title.toLowerCase().includes(w))).slice(0, 50);
+      return send(res, 200, { results: hits });
+    }
+    const one = req.method === "GET" ? /^\/bff\/api\/tasks\/([A-Za-z0-9_-]{1,128})$/.exec(url.pathname) : null;
+    if (one) {
+      const hit = everyTask().find((t) => t.id === one[1]);
+      return hit ? send(res, 200, hit) : send(res, 404, { error: "not_found" });
     }
     if (url.pathname.startsWith("/bff/") || url.pathname.startsWith("/auth/")) {
       return send(res, 404, { error: "not_found" });

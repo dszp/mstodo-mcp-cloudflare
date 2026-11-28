@@ -1,7 +1,8 @@
 import { type ReactNode, memo } from "react";
 import { bodyText } from "../../sync/plain-text.ts";
-import type { MirrorStore } from "../../sync/store.ts";
-import { type TaskView, dateLabel, instantLabel, splitListName } from "../model.ts";
+import type { MirrorStore, MirrorTask } from "../../sync/store.ts";
+import { dateLabel, instantLabel, splitListName } from "../model.ts";
+import type { Route } from "../route.ts";
 import { useStoreKey } from "../use-store.ts";
 import {
   BellIcon,
@@ -27,9 +28,9 @@ export interface RowOptions {
 }
 
 /**
- * One task as a card: completion circle, title, the details line, and the
- * star. The circle and star show state only. Subscribes to its own task, so a
- * change to one task re-renders one row.
+ * One mirrored task as a card. Subscribes to its own task, so a change to one
+ * task re-renders one row. `view` is the route the row sits in; the row links
+ * to it with `?task=<id>`.
  */
 export const TaskRow = memo(function TaskRow({
   store,
@@ -42,7 +43,7 @@ export const TaskRow = memo(function TaskRow({
 }: {
   store: MirrorStore;
   id: string;
-  view: TaskView;
+  view: Route;
   today: string;
   timeZone: string;
   selected: boolean;
@@ -56,6 +57,32 @@ export const TaskRow = memo(function TaskRow({
   useStoreKey(store, options.showList ? "lists" : { task: id });
   const t = store.task(id);
   if (!t) return null;
+  return <TaskCard store={store} t={t} view={view} today={today} timeZone={timeZone} selected={selected} options={options} />;
+});
+
+/**
+ * A task as a card: completion circle, title, the details line, and the star.
+ * The circle and star show state only. `t` need not be in the store (a hit
+ * from "search all history"); only its list's name is read from there.
+ */
+export function TaskCard({
+  store,
+  t,
+  view,
+  today,
+  timeZone,
+  selected,
+  options,
+}: {
+  store: MirrorStore;
+  t: MirrorTask;
+  view: Route;
+  today: string;
+  timeZone: string;
+  selected: boolean;
+  options: RowOptions;
+}) {
+  const id = t.id;
   const done = t.status === "completed";
   const important = t.importance === "high";
 
@@ -144,4 +171,4 @@ export const TaskRow = memo(function TaskRow({
       </span>
     </RouteLink>
   );
-});
+}

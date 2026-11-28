@@ -11,7 +11,7 @@
 import type { SessionClient } from "./session.ts";
 
 /** GET /bff/api/<path>; `path` is the sync API path after /api/v1/, with its query. */
-export type BffFetch = (path: string) => Promise<Response>;
+export type BffFetch = (path: string, init?: { signal?: AbortSignal }) => Promise<Response>;
 
 /** The session ended; the signed-out flow has already run. */
 export class SignedOutError extends Error {
@@ -28,11 +28,12 @@ async function errorOf(res: Response): Promise<string | null> {
 }
 
 export function createBffFetch(fetchFn: typeof fetch, session: SessionClient): BffFetch {
-  return async (path) => {
+  return async (path, init) => {
     // force: false for the first refresh, true for the second.
     for (const force of [false, true, null]) {
       if (session.signedOut) throw new SignedOutError();
-      const res = await fetchFn(`/bff/api/${path}`);
+      const url = `/bff/api/${path}`;
+      const res = await (init?.signal ? fetchFn(url, { signal: init.signal }) : fetchFn(url));
       // A response that lands after the page signed out (another request's
       // signed_out, or another tab's) must not repopulate the cleared mirror.
       if (session.signedOut) throw new SignedOutError();
