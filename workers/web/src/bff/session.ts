@@ -17,7 +17,7 @@ export type Device = { client_id: string; client_secret: string; server_origin: 
 export type SessionLimits = { maxHours: number; idleMinutes: number };
 
 /** Seconds before access_exp at which the page is asked to refresh. */
-const REFRESH_WINDOW_SEC = 60;
+export const REFRESH_WINDOW_SEC = 60;
 
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 

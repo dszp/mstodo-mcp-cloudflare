@@ -21,7 +21,7 @@
 import { csrfOk, readDevice, readSession } from "./auth.ts";
 import { SESSION_COOKIE, clearCookie, cookieHeader, readCookie } from "./cookies.ts";
 import { type Sealer, sealer } from "./seal.ts";
-import { type Device, type Session, isSession, sessionState } from "./session.ts";
+import { type Device, REFRESH_WINDOW_SEC, type Session, isSession, sessionState } from "./session.ts";
 import { type BffConfig, basicAuth } from "./upstream.ts";
 
 const API_PREFIX = "/bff/api/";
@@ -97,7 +97,22 @@ export async function handleSession(req: Request, cfg: BffConfig): Promise<Respo
   // when the proxy asks it to.
   const cookies =
     now - session.last_seen >= TOUCH_INTERVAL_SEC ? [await sessionCookie(s, { ...session, last_seen: now }, cfg)] : [];
-  return jsonResponse({ signed_in: true, expires_at: sessionEnd(session, cfg), data_key: session.data_key }, 200, cookies);
+  // expires_at and the idle limit let the page end the session on its own, even
+  // offline; refresh_at lets it refresh before a request has to wait for one.
+  // now is the BFF's clock, so the page can compare these times without
+  // trusting its own.
+  return jsonResponse(
+    {
+      signed_in: true,
+      expires_at: sessionEnd(session, cfg),
+      idle_minutes: cfg.idleMinutes,
+      refresh_at: session.access_exp - REFRESH_WINDOW_SEC,
+      now,
+      data_key: session.data_key,
+    },
+    200,
+    cookies,
+  );
 }
 
 type GrantResult =

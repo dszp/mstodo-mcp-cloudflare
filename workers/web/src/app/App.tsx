@@ -12,7 +12,8 @@ import { type BffFetch, SignedOutError } from "./api.ts";
 import { type Loader, watchFocus } from "./loader.ts";
 import type { TaskView } from "./model.ts";
 import { type Route, currentRoute, replaceRoute, subscribeRoute } from "./route.ts";
-import { type SessionClient, watchActivity } from "./session.ts";
+import { openAttachment, saveWithAnchor } from "./download.ts";
+import { type SessionClient, watchSession } from "./session.ts";
 import { useToday } from "./use-today.ts";
 import { SearchDetail, SearchPane } from "./views/Search.tsx";
 import { Sidebar } from "./views/Sidebar.tsx";
@@ -62,7 +63,7 @@ export function App() {
 
   useEffect(() => {
     if (status !== "ready") return;
-    const stopActivity = watchActivity(session, { target: window, doc: document });
+    const stopActivity = watchSession(session, { target: window, doc: document, win: window });
     const stopFocus = watchFocus(loader, window);
     return () => {
       stopActivity();
@@ -135,6 +136,9 @@ function Ready() {
       setSignOutFailed(true);
     });
   };
+  const onOpenAttachment = (href: string, name: string) => {
+    void openAttachment(session, href, name, saveWithAnchor(document));
+  };
   const closeTask = () => {
     // Replaced, not pushed: closing a task shouldn't grow the history stack.
     replaceRoute({ ...route, task: undefined });
@@ -180,9 +184,24 @@ function Ready() {
       )}
       {task !== null &&
         (route.view === "search" ? (
-          <SearchDetail store={store} bff={bff} id={task} today={today} timeZone={timeZone} onBack={closeTask} />
+          <SearchDetail
+            store={store}
+            bff={bff}
+            id={task}
+            today={today}
+            timeZone={timeZone}
+            onBack={closeTask}
+            onOpenAttachment={onOpenAttachment}
+          />
         ) : (
-          <TaskDetail store={store} id={task} today={today} timeZone={timeZone} onBack={closeTask} />
+          <TaskDetail
+            store={store}
+            id={task}
+            today={today}
+            timeZone={timeZone}
+            onBack={closeTask}
+            onOpenAttachment={onOpenAttachment}
+          />
         ))}
     </div>
   );

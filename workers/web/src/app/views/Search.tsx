@@ -175,6 +175,7 @@ export function SearchDetail({
   today,
   timeZone,
   onBack,
+  onOpenAttachment,
 }: {
   store: MirrorStore;
   bff: BffFetch;
@@ -182,11 +183,12 @@ export function SearchDetail({
   today: string;
   timeZone: string;
   onBack: () => void;
+  onOpenAttachment: (href: string, name: string) => void;
 }) {
   useStoreKey(store, { task: id });
   const inStore = store.task(id) !== undefined;
   const [remote, retry] = useRemote(bff, inStore ? null : `tasks/${encodeURIComponent(id)}`, parseTaskResponse);
-  const props = { store, id, today, timeZone, onBack };
+  const props = { store, id, today, timeZone, onBack, onOpenAttachment };
   if (inStore) return <TaskDetail {...props} />;
   switch (remote.status) {
     case "ok":

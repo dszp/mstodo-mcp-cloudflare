@@ -35,7 +35,9 @@ import { LinkedText } from "./LinkedText.tsx";
  * every title are untrusted and render as text; only http:, https: and
  * mailto: URLs become links. `task` shows a task that isn't in the store (an
  * old search hit, loaded from the server); `placeholder` stands in for it
- * while it loads or when it didn't.
+ * while it loads or when it didn't. A click on a file calls
+ * `onOpenAttachment` instead of navigating, so the session can be checked
+ * before the download starts; the link still works without script.
  */
 export function TaskDetail({
   store,
@@ -43,6 +45,7 @@ export function TaskDetail({
   today,
   timeZone,
   onBack,
+  onOpenAttachment,
   task,
   placeholder,
 }: {
@@ -51,6 +54,7 @@ export function TaskDetail({
   today: string;
   timeZone: string;
   onBack: () => void;
+  onOpenAttachment: (href: string, name: string) => void;
   task?: MirrorTask;
   placeholder?: ReactNode;
 }) {
@@ -155,10 +159,18 @@ export function TaskDetail({
             {t.attachments.map((a) => {
               const name = a.name ?? "File";
               const size = sizeLabel(a.size);
+              const href = attachmentHref(a.id);
               return (
                 <p key={a.id} className="detail-line file">
                   <FileIcon />{" "}
-                  <a href={attachmentHref(a.id)} download={name}>
+                  <a
+                    href={href}
+                    download={name}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      onOpenAttachment(href, name);
+                    }}
+                  >
                     {name}
                   </a>
                   {size !== null && <span className="file-size">{size}</span>}

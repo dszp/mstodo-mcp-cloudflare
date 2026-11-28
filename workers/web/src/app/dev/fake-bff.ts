@@ -188,8 +188,17 @@ export function fakeBff(): Plugin {
     const url = new URL(req.url ?? "/", "http://localhost");
     const route = `${req.method} ${url.pathname}`;
     switch (route) {
-      case "GET /bff/session":
-        return send(res, 200, { signed_in: true, expires_at: Math.floor(Date.now() / 1000) + 12 * 3600, data_key: DATA_KEY });
+      case "GET /bff/session": {
+        const now = Math.floor(Date.now() / 1000);
+        return send(res, 200, {
+          signed_in: true,
+          expires_at: now + 12 * 3600,
+          idle_minutes: 60,
+          refresh_at: now + 3540,
+          now,
+          data_key: DATA_KEY,
+        });
+      }
       case "POST /bff/session/refresh":
       case "POST /auth/logout":
         return send(res, 204);

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MirrorStore } from "../sync/store.ts";
-import { type LockRequester, type SessionClient, createSessionClient, watchActivity } from "./session.ts";
+import { type LockRequester, type SessionClient, createSessionClient, watchSession } from "./session.ts";
 
 type Call = { url: string; method: string; headers: Headers };
 
@@ -53,6 +53,14 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+const LOCAL_START = Date.parse("2026-11-27T12:00:00Z");
+
+/** A signed-in /bff/session answer; times in epoch seconds. */
+function signedInInfo(over: Record<string, number> = {}) {
+  const now = over.now ?? LOCAL_START / 1000;
+  return { signed_in: true, expires_at: now + 12 * 3600, idle_minutes: 60, refresh_at: now + 3540, now, data_key: "k", ...over };
+}
+
 describe("createSessionClient", () => {
   let store: MirrorStore;
   beforeEach(() => {
@@ -60,11 +68,67 @@ describe("createSessionClient", () => {
   });
 
   it("current() reads GET /bff/session", async () => {
-    const { fn, calls } = stubFetch(() => json({ signed_in: true, expires_at: 1_800_000_000, data_key: "k" }));
+    const info = signedInInfo();
+    const { fn, calls } = stubFetch(() => json(info));
     const client = createSessionClient(fn, { store, locks: null, channel: null });
-    expect(await client.current()).toEqual({ signed_in: true, expires_at: 1_800_000_000, data_key: "k" });
+    expect(await client.current()).toEqual(info);
     expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET /bff/session"]);
     expect(store.lists()).toHaveLength(1);
+  });
+
+  it("current() runs under the potem-refresh lock, so it never crosses a refresh in another tab", async () => {
+    const { fn } = stubFetch(() => json(signedInInfo()));
+    const locks = fakeLocks();
+    const client = createSessionClient(fn, { store, locks, channel: null });
+    await client.current();
+    expect(locks.names).toEqual(["potem-refresh"]);
+  });
+
+  it("limits() gives the session's deadlines in this device's time, corrected by the BFF's clock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(LOCAL_START);
+    // The BFF's clock is 5 minutes ahead of this device's.
+    const serverNow = LOCAL_START / 1000 + 300;
+    const { fn } = stubFetch(() => json(signedInInfo({ now: serverNow, expires_at: serverNow + 3600, refresh_at: serverNow + 600, idle_minutes: 30 })));
+    const client = createSessionClient(fn, { store, locks: null, channel: null });
+    expect(client.limits()).toBeNull();
+    await client.current();
+    expect(client.limits()).toEqual({ endsAt: LOCAL_START + 3600_000, refreshAt: LOCAL_START + 600_000, idleMs: 30 * 60_000 });
+  });
+
+  it("ensureFresh() checks the session and refreshes when the access token is due", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(LOCAL_START);
+    const now = LOCAL_START / 1000;
+    let due = true;
+    const { fn, calls } = stubFetch((c) =>
+      c.url === "/bff/session" ? json(signedInInfo({ now, refresh_at: due ? now - 1 : now + 600 })) : new Response(null, { status: 204 }),
+    );
+    const client = createSessionClient(fn, { store, locks: null, channel: null });
+    expect(await client.ensureFresh()).toBe(true);
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET /bff/session", "POST /bff/session/refresh"]);
+    due = false;
+    expect(await client.ensureFresh()).toBe(true);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("ensureFresh() answers false, without a refresh, when the session is over", async () => {
+    const { fn, calls } = stubFetch(() => json({ signed_in: false }));
+    const client = createSessionClient(fn, { store, locks: null, channel: null });
+    expect(await client.ensureFresh()).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(client.signedOut).toBe(true);
+  });
+
+  it("touch() records activity and tells the other tabs, which record it too", async () => {
+    const { fn } = stubFetch(() => json({}));
+    const other = createSessionClient(fn, { store: filledStore(), locks: null, channel: channel() });
+    const client = createSessionClient(fn, { store, locks: null, channel: channel() });
+    const before = other.lastActivity;
+    await new Promise((r) => setTimeout(r, 5));
+    client.touch();
+    expect(client.lastActivity).toBeGreaterThan(before);
+    await vi.waitFor(() => expect(other.lastActivity).toBeGreaterThan(before));
   });
 
   it("current() saying signed out runs the signed-out flow", async () => {
@@ -240,50 +304,168 @@ describe("createSessionClient", () => {
   });
 });
 
-describe("watchActivity", () => {
-  function setup() {
+describe("watchSession", () => {
+  type Answer = Record<string, unknown>;
+  /** A real session client over a stub BFF whose answers the test sets. */
+  async function setup(first: Answer = signedInInfo(), ch: BroadcastChannel | null = null) {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-11-27T12:00:00Z"));
+    vi.setSystemTime(LOCAL_START);
+    let session: Answer = first;
+    let refreshes = 0;
+    const { fn, calls } = stubFetch((c) => {
+      // The BFF's clock follows this device's, as the times in `session` don't.
+      if (c.url === "/bff/session") return json(session.signed_in ? { ...session, now: Date.now() / 1000 } : session);
+      refreshes++;
+      return new Response(null, { status: 204 });
+    });
+    const client = createSessionClient(fn, { store: filledStore(), locks: null, channel: ch });
+    await client.current(); // the page's check on load
     const target = new EventTarget();
     const doc = Object.assign(new EventTarget(), { visibilityState: "visible" as DocumentVisibilityState });
-    const current = vi.fn(async () => ({ signed_in: true as const, expires_at: 0, data_key: "k" }));
-    const client = { current } as unknown as SessionClient;
-    const stop = watchActivity(client, { target, doc });
-    return { target, doc, current, stop };
+    const win = new EventTarget();
+    const stop = watchSession(client, { target, doc, win });
+    const sessionChecks = () => calls.filter((c) => c.url === "/bff/session").length - 1;
+    return {
+      client,
+      target,
+      doc,
+      win,
+      stop,
+      calls,
+      sessionChecks,
+      refreshes: () => refreshes,
+      answer: (a: Answer) => (session = a),
+    };
   }
+  const seconds = (s: number) => s * 1000;
+  const pageshow = (persisted: boolean) => Object.assign(new Event("pageshow"), { persisted });
 
   it("checks the session on activity at most once a minute, counting the check made on load", async () => {
-    const { target, current } = setup();
+    const { target, sessionChecks } = await setup();
     target.dispatchEvent(new Event("pointerdown"));
-    expect(current).toHaveBeenCalledTimes(0);
+    expect(sessionChecks()).toBe(0);
     vi.advanceTimersByTime(60_000);
     target.dispatchEvent(new Event("keydown"));
-    expect(current).toHaveBeenCalledTimes(1);
+    expect(sessionChecks()).toBe(1);
     vi.advanceTimersByTime(30_000);
     target.dispatchEvent(new Event("pointerdown"));
     target.dispatchEvent(new Event("keydown"));
-    expect(current).toHaveBeenCalledTimes(1);
+    expect(sessionChecks()).toBe(1);
     vi.advanceTimersByTime(30_000);
     target.dispatchEvent(new Event("pointerdown"));
-    expect(current).toHaveBeenCalledTimes(2);
+    expect(sessionChecks()).toBe(2);
   });
 
-  it("counts the page becoming visible, not hidden", () => {
-    const { doc, current } = setup();
+  it("counts the page becoming visible, not hidden", async () => {
+    const { doc, sessionChecks } = await setup();
     vi.advanceTimersByTime(60_000);
     doc.visibilityState = "hidden";
     doc.dispatchEvent(new Event("visibilitychange"));
-    expect(current).toHaveBeenCalledTimes(0);
+    expect(sessionChecks()).toBe(0);
     doc.visibilityState = "visible";
     doc.dispatchEvent(new Event("visibilitychange"));
-    expect(current).toHaveBeenCalledTimes(1);
+    expect(sessionChecks()).toBe(1);
   });
 
-  it("stops listening when stopped", () => {
-    const { target, current, stop } = setup();
+  it("signs out at expires_at without asking the BFF, however active the page is", async () => {
+    const now = LOCAL_START / 1000;
+    const { client, target, calls } = await setup(signedInInfo({ expires_at: now + 600, refresh_at: now + 3540 }));
+    const before = calls.length;
+    for (let i = 0; i < 9; i++) {
+      await vi.advanceTimersByTimeAsync(seconds(60));
+      target.dispatchEvent(new Event("pointerdown"));
+    }
+    // The throttled checks still ran; nothing else did.
+    calls.splice(before).forEach((c) => expect(c.url).toBe("/bff/session"));
+    expect(client.signedOut).toBe(false);
+    await vi.advanceTimersByTimeAsync(seconds(60));
+    expect(client.signedOut).toBe(true);
+  });
+
+  it("signs out after idle_minutes without activity, and activity moves the deadline", async () => {
+    const { client, target } = await setup(signedInInfo({ idle_minutes: 10 }));
+    await vi.advanceTimersByTimeAsync(seconds(9 * 60));
+    target.dispatchEvent(new Event("keydown"));
+    await vi.advanceTimersByTimeAsync(seconds(9 * 60));
+    expect(client.signedOut).toBe(false);
+    await vi.advanceTimersByTimeAsync(seconds(60));
+    expect(client.signedOut).toBe(true);
+  });
+
+  it("counts another tab's activity, heard on potem-session", async () => {
+    // A synchronous stand-in for the channel; fake timers don't drive a real one.
+    const ch = Object.assign(new EventTarget(), { postMessage: () => {} }) as unknown as BroadcastChannel;
+    const { client } = await setup(signedInInfo({ idle_minutes: 10 }), ch);
+    await vi.advanceTimersByTimeAsync(seconds(9 * 60));
+    ch.dispatchEvent(new MessageEvent("message", { data: { type: "activity" } }));
+    await vi.advanceTimersByTimeAsync(seconds(9 * 60));
+    expect(client.signedOut).toBe(false);
+    await vi.advanceTimersByTimeAsync(seconds(60));
+    expect(client.signedOut).toBe(true);
+  });
+
+  it("re-checks when the page becomes visible: a tab hidden past the idle limit signs out instead of counting as activity", async () => {
+    const { client, doc, sessionChecks } = await setup(signedInInfo({ idle_minutes: 10 }));
+    doc.visibilityState = "hidden";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    // The device slept: the clock moved, no timer ran.
+    vi.setSystemTime(LOCAL_START + seconds(11 * 60));
+    doc.visibilityState = "visible";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    expect(client.signedOut).toBe(true);
+    expect(sessionChecks()).toBe(0);
+  });
+
+  it("re-checks on a back-forward cache restore, not on an ordinary pageshow", async () => {
+    const { client, win } = await setup(signedInInfo({ idle_minutes: 10 }));
+    vi.setSystemTime(LOCAL_START + seconds(11 * 60));
+    win.dispatchEvent(pageshow(false));
+    expect(client.signedOut).toBe(false);
+    win.dispatchEvent(pageshow(true));
+    expect(client.signedOut).toBe(true);
+  });
+
+  it("refreshes at refresh_at, then reads the session again and re-arms at the new time", async () => {
+    const now = LOCAL_START / 1000;
+    const s = await setup(signedInInfo({ refresh_at: now + 600, idle_minutes: 120 }));
+    await vi.advanceTimersByTimeAsync(seconds(599));
+    expect(s.refreshes()).toBe(0);
+    s.answer(signedInInfo({ now: now + 600, refresh_at: now + 1200, idle_minutes: 120 }));
+    await vi.advanceTimersByTimeAsync(seconds(1));
+    expect(s.refreshes()).toBe(1);
+    expect(s.sessionChecks()).toBe(1);
+    await vi.advanceTimersByTimeAsync(seconds(599));
+    expect(s.refreshes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(seconds(1));
+    expect(s.refreshes()).toBe(2);
+  });
+
+  it("retries a refresh that didn't move refresh_at after 30 s, not in a loop", async () => {
+    const now = LOCAL_START / 1000;
+    const s = await setup(signedInInfo({ refresh_at: now + 60, idle_minutes: 120 }));
+    await vi.advanceTimersByTimeAsync(seconds(60));
+    expect(s.refreshes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(seconds(29));
+    expect(s.refreshes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(seconds(1));
+    expect(s.refreshes()).toBe(2);
+  });
+
+  it("doesn't refresh a session that went idle first", async () => {
+    const now = LOCAL_START / 1000;
+    const s = await setup(signedInInfo({ refresh_at: now + 900, idle_minutes: 10 }));
+    await vi.advanceTimersByTimeAsync(seconds(1000));
+    expect(s.client.signedOut).toBe(true);
+    expect(s.refreshes()).toBe(0);
+  });
+
+  it("stops listening and timing when stopped", async () => {
+    const { client, target, stop, sessionChecks } = await setup(signedInInfo({ idle_minutes: 10 }));
     stop();
     vi.advanceTimersByTime(60_000);
     target.dispatchEvent(new Event("pointerdown"));
-    expect(current).not.toHaveBeenCalled();
+    expect(sessionChecks()).toBe(0);
+    await vi.advanceTimersByTimeAsync(seconds(20 * 60));
+    expect(client.signedOut).toBe(false);
   });
 });

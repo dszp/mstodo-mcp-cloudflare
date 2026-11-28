@@ -98,7 +98,25 @@ describe("GET /bff/session", () => {
     const session = (await jar.unseal<Session>(SESSION_COOKIE))!;
     const res = await jar.session();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ signed_in: true, expires_at: START + 12 * 3600, data_key: session.data_key });
+    expect(await res.json()).toEqual({
+      signed_in: true,
+      expires_at: START + 12 * 3600,
+      idle_minutes: 60,
+      refresh_at: session.access_exp - 60,
+      now: START,
+      data_key: session.data_key,
+    });
+  });
+
+  it("moves refresh_at with the access token after a refresh", async () => {
+    const jar = await signedIn();
+    now += 3600 - 30;
+    expect((await jar.refresh()).status).toBe(204);
+    const session = (await jar.unseal<Session>(SESSION_COOKIE))!;
+    const body = (await (await jar.session()).json()) as { refresh_at: number; now: number };
+    expect(body.refresh_at).toBe(session.access_exp - 60);
+    expect(body.refresh_at).toBe(now + 3600 - 60);
+    expect(body.now).toBe(now);
   });
 
   it("ends expires_at at cf_access_exp when the Access token runs out first", async () => {
