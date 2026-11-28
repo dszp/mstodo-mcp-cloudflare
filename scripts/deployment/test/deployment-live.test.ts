@@ -82,11 +82,20 @@ describe("checkLiveWorker", () => {
     }
   });
 
-  it("skips the KV comparison for a web deployment", async () => {
-    // A hand-built web dep that still lists KV (the parser would refuse it): the
-    // live Worker binds those names elsewhere, and nothing is compared.
-    const api = stubApi({ getWorkerKv: async () => ({ found: true, kv: { OAUTH_KV: KV_OTHER, TODO_CACHE: KV_OTHER } }) });
-    await expect(checkLiveWorker(api, dep({ kind: "web" }), { adopt: false })).resolves.toBeUndefined();
+  it("passes a web deployment whose live Worker has no KV bindings", async () => {
+    const api = stubApi({ getWorkerKv: async () => ({ found: true, kv: {} }) });
+    await expect(checkLiveWorker(api, dep({ kind: "web", kv: {} }), { adopt: false })).resolves.toBeUndefined();
+  });
+
+  it("refuses a web deployment whose live Worker has KV bindings (a server Worker), even with adopt", async () => {
+    const api = stubApi({ getWorkerKv: async () => ({ found: true, kv: { OAUTH_KV: KV_OTHER } }) });
+    for (const adopt of [false, true]) {
+      const r = await refusalOf(checkLiveWorker(api, dep({ kind: "web", kv: {} }), { adopt }));
+      expect(r.file).toBe("deployments/alpha/deployment.jsonc");
+      expect(r.field).toBe("worker_name");
+      expect(r.message).toContain("example-alpha");
+      expect(r.message).toContain("server Worker");
+    }
   });
 
   it("does not refuse a binding the live Worker does not have yet", async () => {

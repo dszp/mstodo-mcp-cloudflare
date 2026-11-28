@@ -153,6 +153,7 @@ describe("parseDeploymentFile", () => {
       ["a kv entry on a web file", { ...web, kind: "web", kv: { OAUTH_KV: "kv-id" } }, "kv"],
       ["an r2 entry on a web file", { ...web, kind: "web", r2: { BLOBS: null } }, "r2"],
       ["server_service on a server file", { ...valid, server_service: "potem-server" }, "server_service"],
+      ["a server_service equal to worker_name", { ...web, kind: "web", server_service: "potem-web-test" }, "server_service"],
       ["a server_service that is not a Worker name", { ...web, kind: "web", server_service: "Not A Name" }, "server_service"],
       ["a web file without SERVER_ORIGIN", { ...web, kind: "web", vars: {} }, "vars.SERVER_ORIGIN"],
       ["a web file without vars", { ...web, kind: "web", vars: undefined }, "vars.SERVER_ORIGIN"],

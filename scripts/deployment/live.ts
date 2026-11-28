@@ -199,7 +199,16 @@ export async function inspectLiveWorker(
   // A binding the live Worker lacks is a new binding (a template addition), so it
   // is not a mismatch by itself; but at least one file binding must match live
   // exactly, otherwise this is a different Worker that happens to share the name.
-  // Only the server Worker has KV bindings; a web Worker has none to compare.
+  // A web Worker has no KV bindings, so a live Worker with any is a server
+  // Worker: deploying the web client over it would replace the server. --adopt
+  // doesn't override this; it exists to rebind a server's KV, not to swap kinds.
+  if (live.found && dep.kind === "web" && Object.keys(live.kv).length > 0) {
+    throw new DeploymentRefusal(
+      file,
+      "worker_name",
+      `the live Worker ${dep.worker_name} has KV bindings, so it is a server Worker; give the web deployment its own worker_name`,
+    );
+  }
   if (live.found && !opts.adopt && dep.kind === "server") {
     const entries = Object.entries(dep.kv);
     for (const [binding, id] of entries) {

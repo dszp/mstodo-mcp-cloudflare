@@ -657,8 +657,14 @@ describe("main: a web deployment", () => {
     expect(puts[0].opts?.stdin).toBe("0123456789abcdef0123456789abcdef0123");
   });
 
-  it("does not refuse a live web Worker over KV bindings", async () => {
-    const h = harness({ apiImpl: liveApi({ getWorkerKv: async () => ({ found: true, kv: { OAUTH_KV: "other" } }) }) });
+  it("passes a live web Worker without KV bindings", async () => {
+    const h = harness({ apiImpl: liveApi({ getWorkerKv: async () => ({ found: true, kv: {} }) }) });
     expect(await main(["check", "web"], h.deps)).toBe(0);
+  });
+
+  it("refuses a web deployment whose live Worker has KV bindings: it is a server Worker", async () => {
+    const h = harness({ apiImpl: liveApi({ getWorkerKv: async () => ({ found: true, kv: { OAUTH_KV: "other" } }) }) });
+    expect(await main(["check", "web"], h.deps)).toBe(1);
+    expect(h.logs.at(-1)).toMatch(/worker_name: .*server Worker/);
   });
 });

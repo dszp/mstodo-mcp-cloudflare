@@ -188,6 +188,8 @@ export function parseDeploymentFile(text: string, file: string, name: string): D
     if (typeof v !== "string" || !DEPLOYMENT_NAME.test(v)) {
       refuse("server_service", `must be a Worker name matching ${DEPLOYMENT_NAME}`);
     }
+    // The service binding would point the web Worker at itself.
+    if (v === worker_name) refuse("server_service", "must name the server Worker, not this web Worker's worker_name");
     out.server_service = v as string;
   }
   return out;
