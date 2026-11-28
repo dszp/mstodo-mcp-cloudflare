@@ -3,7 +3,8 @@ import { useMemo, useRef } from "react";
 import { searchLocal } from "../../sync/smart-lists.ts";
 import type { MirrorStore } from "../../sync/store.ts";
 import type { BffFetch } from "../api.ts";
-import { olderTasks, parseSearchResponse, parseTaskResponse, searchPath, searchText } from "../model.ts";
+import type { Edits } from "../edits.ts";
+import { olderTasks, parseSearchResponse, searchDetailSource, parseTaskResponse, searchPath, searchText } from "../model.ts";
 import { type Route, replaceRoute } from "../route.ts";
 import { useRemote } from "../use-remote.ts";
 import { useStoreKey } from "../use-store.ts";
@@ -27,6 +28,7 @@ export function SearchPane({
   route,
   today,
   timeZone,
+  edits,
   onBack,
 }: {
   store: MirrorStore;
@@ -34,6 +36,7 @@ export function SearchPane({
   route: SearchRoute;
   today: string;
   timeZone: string;
+  edits: Edits;
   onBack: () => void;
 }) {
   const tasksV = useStoreKey(store, "tasks");
@@ -102,6 +105,7 @@ export function SearchPane({
                       timeZone={timeZone}
                       selected={localIds[item.index] === route.task}
                       options={OPTIONS}
+                      edits={edits}
                     />
                   </div>
                 ))}
@@ -164,9 +168,9 @@ function OlderRow({
 }
 
 /**
- * The detail pane of a search: a task from the mirror as usual; any other is
- * fetched from the server (GET /tasks/{sid}) and shown from that response
- * alone. It is never added to the store.
+ * The detail pane of a search: a task from the mirror as usual, editable; any
+ * other is fetched from the server (GET /tasks/{sid}) and shown read-only from
+ * that response alone. It is never added to the store.
  */
 export function SearchDetail({
   store,
@@ -176,6 +180,8 @@ export function SearchDetail({
   timeZone,
   onBack,
   onOpenAttachment,
+  edits,
+  myDay,
 }: {
   store: MirrorStore;
   bff: BffFetch;
@@ -184,12 +190,15 @@ export function SearchDetail({
   timeZone: string;
   onBack: () => void;
   onOpenAttachment: (href: string, name: string) => void;
+  edits: Edits;
+  myDay: boolean;
 }) {
   useStoreKey(store, { task: id });
-  const inStore = store.task(id) !== undefined;
-  const [remote, retry] = useRemote(bff, inStore ? null : `tasks/${encodeURIComponent(id)}`, parseTaskResponse);
-  const props = { store, id, today, timeZone, onBack, onOpenAttachment };
-  if (inStore) return <TaskDetail {...props} />;
+  const source = searchDetailSource(store, id);
+  const [remote, retry] = useRemote(bff, source === "server" ? `tasks/${encodeURIComponent(id)}` : null, parseTaskResponse);
+  const props = { store, id, today, timeZone, onBack, onOpenAttachment, myDay };
+  if (source === "store") return <TaskDetail {...props} edits={edits} onDeleted={onBack} />;
+  if (source === "gone") return <TaskDetail {...props} placeholder={<p className="empty">This task no longer exists.</p>} />;
   switch (remote.status) {
     case "ok":
       return <TaskDetail {...props} task={remote.data} />;

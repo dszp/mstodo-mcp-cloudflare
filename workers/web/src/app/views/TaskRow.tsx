@@ -1,6 +1,7 @@
 import { type ReactNode, memo } from "react";
 import { bodyText } from "../../sync/plain-text.ts";
 import type { MirrorStore, MirrorTask } from "../../sync/store.ts";
+import type { Edits } from "../edits.ts";
 import { dateLabel, instantLabel, splitListName } from "../model.ts";
 import type { Route } from "../route.ts";
 import { useStoreKey } from "../use-store.ts";
@@ -17,6 +18,9 @@ import {
   SunIcon,
 } from "./icons.tsx";
 import { RouteLink } from "./RouteLink.tsx";
+
+/** What a row's circle and star do. The app passes its one Edits, so the prop never changes. */
+export type RowEdits = Pick<Edits, "setCompleted" | "setImportant">;
 
 export interface RowOptions {
   /** Show the task's list (smart lists). */
@@ -40,6 +44,7 @@ export const TaskRow = memo(function TaskRow({
   timeZone,
   selected,
   options,
+  edits,
 }: {
   store: MirrorStore;
   id: string;
@@ -48,6 +53,7 @@ export const TaskRow = memo(function TaskRow({
   timeZone: string;
   selected: boolean;
   options: RowOptions;
+  edits?: RowEdits;
 }) {
   useStoreKey(store, { task: id });
   // A row that shows its list's name follows a rename. Subscribing here
@@ -57,13 +63,18 @@ export const TaskRow = memo(function TaskRow({
   useStoreKey(store, options.showList ? "lists" : { task: id });
   const t = store.task(id);
   if (!t) return null;
-  return <TaskCard store={store} t={t} view={view} today={today} timeZone={timeZone} selected={selected} options={options} />;
+  return (
+    <TaskCard store={store} t={t} view={view} today={today} timeZone={timeZone} selected={selected} options={options} edits={edits} />
+  );
 });
 
 /**
  * A task as a card: completion circle, title, the details line, and the star.
- * The circle and star show state only. `t` need not be in the store (a hit
- * from "search all history"); only its list's name is read from there.
+ * With `edits` the circle and star are buttons; without (a hit from "search
+ * all history", which isn't in the store) they show state only. The title
+ * area is the link that opens the task; it covers the card (CSS), and the
+ * buttons sit above it. `t` need not be in the store; only its list's name
+ * is read from there.
  */
 export function TaskCard({
   store,
@@ -73,6 +84,7 @@ export function TaskCard({
   timeZone,
   selected,
   options,
+  edits,
 }: {
   store: MirrorStore;
   t: MirrorTask;
@@ -81,6 +93,7 @@ export function TaskCard({
   timeZone: string;
   selected: boolean;
   options: RowOptions;
+  edits?: RowEdits;
 }) {
   const id = t.id;
   const done = t.status === "completed";
@@ -158,17 +171,85 @@ export function TaskCard({
   }
 
   return (
-    <RouteLink to={{ ...view, task: id }} className={`task-card${selected ? " selected" : ""}${done ? " done" : ""}`} current={selected}>
-      <span className="task-circle" role="img" aria-label={done ? "Completed" : "Not completed"}>
+    <div className={`task-card${selected ? " selected" : ""}${done ? " done" : ""}`} data-task={id}>
+      <CompleteButton done={done} title={t.title} onToggle={edits && (() => edits.setCompleted(id, !done))} />
+      <RouteLink to={{ ...view, task: id }} className="task-link" current={selected}>
+        <span className="task-text">
+          <span className="task-title">{t.title}</span>
+          {parts.length > 0 && <span className="task-meta">{parts}</span>}
+        </span>
+      </RouteLink>
+      <StarButton on={important} title={t.title} onToggle={edits && (() => edits.setImportant(id, !important))} />
+    </div>
+  );
+}
+
+// The circle and the star are buttons beside the row's link, not inside it
+// (a link can't hold a button). The click stops here, so it never also opens
+// the task.
+
+/**
+ * A completion circle: a button with `onToggle`, else a picture of the state.
+ * In a list, `title` puts the task's title in the button's name, so a screen
+ * reader moving between rows hears which task each one completes.
+ */
+export function CompleteButton({
+  done,
+  onToggle,
+  title,
+  className = "task-circle",
+}: {
+  done: boolean;
+  onToggle?: () => void;
+  title?: string;
+  className?: string;
+}) {
+  if (!onToggle) {
+    return (
+      <span className={className} role="img" aria-label={done ? "Completed" : "Not completed"}>
         <CircleIcon done={done} />
       </span>
-      <span className="task-text">
-        <span className="task-title">{t.title}</span>
-        {parts.length > 0 && <span className="task-meta">{parts}</span>}
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={`${className} icon-button`}
+      aria-label={
+        title === undefined ? (done ? "Mark not complete" : "Mark complete") : done ? `Mark “${title}” not complete` : `Mark “${title}” complete`
+      }
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+    >
+      <CircleIcon done={done} />
+    </button>
+  );
+}
+
+/** The importance star: a button with `onToggle`, else a picture of the state. `title` as for CompleteButton. */
+export function StarButton({ on, onToggle, title }: { on: boolean; onToggle?: () => void; title?: string }) {
+  if (!onToggle) {
+    return (
+      <span className={`task-star${on ? " on" : ""}`} role="img" aria-label={on ? "Important" : "Not important"}>
+        <StarIcon filled={on} />
       </span>
-      <span className={`task-star${important ? " on" : ""}`} role="img" aria-label={important ? "Important" : "Not important"}>
-        <StarIcon filled={important} />
-      </span>
-    </RouteLink>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={`task-star icon-button${on ? " on" : ""}`}
+      aria-label={
+        title === undefined ? (on ? "Remove importance" : "Add importance") : on ? `Remove importance from “${title}”` : `Add importance to “${title}”`
+      }
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+    >
+      <StarIcon filled={on} />
+    </button>
   );
 }

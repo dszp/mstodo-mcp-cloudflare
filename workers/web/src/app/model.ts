@@ -7,6 +7,7 @@
 // docs/SYNC-API.md sections 4.2, 4.10 and 10.4.
 
 import type { FeedTask, SmartList } from "../sync/feed.ts";
+import type { Op } from "../sync/mutation.ts";
 
 type FeedStep = FeedTask["steps"][number];
 import { bodyText } from "../sync/plain-text.ts";
@@ -85,6 +86,189 @@ export function msUntilNextDay(timeZone: string, now: Date): number {
   const part = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
   const elapsed = ((part("hour") * 60 + part("minute")) * 60 + part("second")) * 1000 + now.getUTCMilliseconds();
   return Math.min(MAX_WAIT_MS, Math.max(1000, DAY_MS - elapsed + 1000));
+}
+
+// ---------------------------------------------------------------- reminder input
+
+// <input type="datetime-local"> holds a wall time with no zone. The reminder
+// is edited in the browser's zone (the caller passes it) and stored as a UTC
+// instant (SYNC-API 4.2).
+
+/** The zone's offset from UTC at `ms`, in milliseconds (east positive). */
+function zoneOffsetMs(ms: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric",
+    hour: "numeric", minute: "numeric", second: "numeric",
+  }).formatToParts(new Date(ms));
+  const part = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
+  const wall = Date.UTC(part("year"), part("month") - 1, part("day"), part("hour"), part("minute"), part("second"));
+  return wall - Math.floor(ms / 1000) * 1000;
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** An instant as a datetime-local value ("YYYY-MM-DDTHH:mm") in `timeZone`; "" when unreadable. */
+export function reminderInputValue(instant: string, timeZone: string): string {
+  const ms = Date.parse(instant);
+  if (Number.isNaN(ms)) return "";
+  const d = new Date(ms + zoneOffsetMs(ms, timeZone));
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}T${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+}
+
+/**
+ * A datetime-local value read in `timeZone`, as a UTC instant
+ * ("2026-11-26T19:00:00Z"); null when empty or malformed. A wall time the
+ * spring-forward gap skips reads as the same clock time after the change, as
+ * browsers do; one the fall-back hour repeats reads as its first occurrence.
+ */
+export function reminderFromInput(value: string, timeZone: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (!m) return null;
+  const [y, mo, d, h, mi] = [m[1], m[2], m[3], m[4], m[5]].map(Number) as [number, number, number, number, number];
+  const wall = Date.UTC(y, mo - 1, d, h, mi);
+  const check = new Date(wall);
+  if (check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d || h > 23 || mi > 59) return null;
+  // The zone's offsets a day either side of the wall time bracket any change
+  // that day. Each gives a candidate instant; a candidate is real when it
+  // reads back as the same wall time. Both real: the repeated hour, so the
+  // first. Neither: the gap, so the offset from before the change, which
+  // lands on the same clock time after it.
+  const before = zoneOffsetMs(wall - DAY_MS, timeZone);
+  const after = zoneOffsetMs(wall + DAY_MS, timeZone);
+  const real = [wall - before, wall - after].filter((c) => c + zoneOffsetMs(c, timeZone) === wall);
+  const ms = real.length > 0 ? Math.min(...real) : wall - before;
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+// ---------------------------------------------------------------- edit checks
+
+// What an edit box holds when it closes, compared with what it opened with,
+// so opening a field and leaving it unchanged never sends an edit.
+
+const oneLine = (text: string) => text.replace(/\s*\n\s*/g, " ").trim();
+
+/** The title to save from a rename box: on one line and trimmed; null when blank or unchanged. */
+export function titleEdit(original: string, typed: string): string | null {
+  const t = oneLine(typed);
+  return t === "" || t === oneLine(original) ? null : t;
+}
+
+/**
+ * The note to save from a note box, or null when unchanged. A textarea turns
+ * CRLF and CR into LF, so the original is compared after the same change.
+ */
+export function noteEdit(original: string, typed: string): string | null {
+  return typed === original.replace(/\r\n?/g, "\n") ? null : typed;
+}
+
+/**
+ * Whether a date or datetime-local value is whole enough to save. While a
+ * year is typed digit by digit, Chrome reports years like 0002 as complete.
+ */
+const wholeDate = (v: string) => /^\d{4}-\d{2}-\d{2}/.test(v) && Number(v.slice(0, 4)) >= 1900;
+
+export type DateCommit = { kind: "none" } | { kind: "clear" } | { kind: "set"; value: string };
+
+/**
+ * What closing a date input saves. `current` is the saved value (as `read`
+ * returns it) or null; `read` turns the input's value into that form, or null.
+ * An empty input (the native clear) clears, unless `badInput` (the input's
+ * validity.badInput) says the browser is holding a partly cleared value; a
+ * partial or unreadable one, or one equal to `current`, saves nothing.
+ */
+export function dateInputCommit(
+  draft: string,
+  current: string | null,
+  read: (v: string) => string | null,
+  badInput = false,
+): DateCommit {
+  if (draft === "") return current === null || badInput ? { kind: "none" } : { kind: "clear" };
+  const value = wholeDate(draft) ? read(draft) : null;
+  if (value === null || value === current) return { kind: "none" };
+  return { kind: "set", value };
+}
+
+/** The id to move focus to after `removed` leaves `ids`: the next, else the previous, else null. */
+export function neighborAfterRemoval(ids: readonly string[], removed: string): string | null {
+  const i = ids.indexOf(removed);
+  if (i === -1) return null;
+  return ids[i + 1] ?? ids[i - 1] ?? null;
+}
+
+// ---------------------------------------------------------------- notices
+
+// What a refused edit was, for the notice: the words after "Couldn't".
+const NOTICE_ACTIONS: Partial<Record<Op, string>> = {
+  "task.create": "add the task",
+  "task.update": "save",
+  "task.delete": "delete the task",
+  "task.move": "move the task",
+  "myday.add": "add the task to My Day",
+  "myday.remove": "remove the task from My Day",
+  "step.create": "add the step",
+  "step.update": "save the step",
+  "step.delete": "delete the step",
+};
+
+/**
+ * The notice for an edit the server refused (SYNC-API 5.3 `rejected`, a
+ * `failed` that won't be retried, or the outbox's "refused"/"too_large"):
+ * the action, then the reason in plain words.
+ */
+// How a superseded field is named in the notice.
+const FIELD_NAMES: Record<string, string> = {
+  title: "the title",
+  body: "the note",
+  due: "the due date",
+  start: "the start date",
+  reminder: "the reminder",
+  importance: "importance",
+  status: "completion",
+  completed_at: "the completion date",
+  categories: "the categories",
+  recurrence: "the repeat",
+};
+
+/**
+ * The notice for an edit: one the server refused (`error`), or, for error
+ * "superseded", one whose `fields` the server skipped because another edit
+ * to them was newer (SYNC-API §6).
+ */
+export function noticeText(op: Op, error: string, fields: readonly string[] = []): string {
+  const action = NOTICE_ACTIONS[op] ?? "save";
+  const subject = op.startsWith("step.") ? "step" : "task";
+  if (error === "superseded") {
+    const names = op.startsWith("task.") ? fields.map((f) => FIELD_NAMES[f] ?? f) : [`the ${subject}`];
+    const what = names.length > 0 ? names.join(" and ") : `the ${subject}`;
+    return `Another change to ${what} was newer, so yours ${names.length > 1 ? "weren't" : "wasn't"} kept.`;
+  }
+  if (error === "note_changed") return "Couldn't save your note: the task changed elsewhere.";
+  if (error === "ambiguous_create") {
+    return `Couldn't confirm the new ${subject}: it may have been added twice. Check the list.`;
+  }
+  let reason: string;
+  if (error === "deleted") reason = action.includes(subject) ? "it was deleted elsewhere" : `the ${subject} was deleted elsewhere`;
+  else if (error === "list_excluded") reason = "that list doesn't sync";
+  else if (error === "too_large") reason = "the edit is too large to send";
+  else if (error === "no_default_list") reason = "no default list yet";
+  else if (error === "my_day_disabled") reason = "My Day is turned off on the server";
+  else reason = "the server refused it";
+  return `Couldn't ${action}: ${reason}.`;
+}
+
+/**
+ * The line beside the notices while edits are unsent: Saving…, or, with the
+ * browser offline, that they wait for the connection. Null when nothing waits.
+ */
+export function editStatusText(unsent: boolean, online: boolean): string | null {
+  if (!unsent) return null;
+  return online ? "Saving…" : "Offline — changes will be sent when you reconnect.";
+}
+
+/** The signed-out screen's line for edits sign-out dropped; null when none were. */
+export function unsavedEditsText(count: number | null): string | null {
+  if (count === null || count <= 0) return null;
+  return count === 1 ? "1 edit wasn't saved." : `${count} edits weren't saved.`;
 }
 
 // ---------------------------------------------------------------- order keys
@@ -204,6 +388,29 @@ export function sidebarTree(store: MirrorStore): SidebarTree {
     top: [...defaults.map((l): SidebarEntry => ({ kind: "list", list: item(l) })), ...top.map((t) => t.entry())],
     reference: lists.filter((l) => l.sync === "reference").sort(byOrder).map(item),
   };
+}
+
+export type MoveTarget =
+  | { kind: "list"; id: string; label: string }
+  | { kind: "group"; id: string; label: string; lists: { id: string; label: string }[] };
+
+/**
+ * The lists a task can move to, for "Move to list": the sidebar's lists and
+ * groups in its order, without reference lists (they don't sync tasks to
+ * edit) and without the task's own list. A group left empty is dropped.
+ */
+export function moveTargets(tree: SidebarTree, currentListId: string | null): MoveTarget[] {
+  const label = (l: SidebarListItem) => (l.emoji !== null ? `${l.emoji} ${l.name}` : l.name);
+  const out: MoveTarget[] = [];
+  for (const e of tree.top) {
+    if (e.kind === "list") {
+      if (e.list.id !== currentListId) out.push({ kind: "list", id: e.list.id, label: label(e.list) });
+      continue;
+    }
+    const lists = e.lists.filter((l) => l.id !== currentListId).map((l) => ({ id: l.id, label: label(l) }));
+    if (lists.length > 0) out.push({ kind: "group", id: e.id, label: e.name, lists });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- task rows
@@ -512,6 +719,17 @@ export function parseSearchResponse(json: unknown): MirrorTask[] | null {
   return json.results.flatMap((e) => readTask(e) ?? []);
 }
 
+/**
+ * Where a search's detail pane gets its task: the store (a mirror task, or a
+ * pending create), "gone" for a mirror task pending deletion, or the server
+ * for a task the mirror doesn't hold. A pending deletion is decided by the
+ * mirror's own copy (baseTask), so the server's copy never brings it back.
+ */
+export function searchDetailSource(store: MirrorStore, id: string): "store" | "gone" | "server" {
+  if (store.task(id) !== undefined) return "store";
+  return store.baseTask(id) !== undefined ? "gone" : "server";
+}
+
 /** The task of a GET /tasks/{sid} response, or null. */
 export const parseTaskResponse = (json: unknown): MirrorTask | null => readTask(json);
 
@@ -529,7 +747,9 @@ export function olderTasks(
   const seen = new Set(localIds);
   const out: MirrorTask[] = [];
   for (const h of hits) {
-    if (seen.has(h.id) || store.task(h.id) !== undefined) continue;
+    // The mirror's own copy, not the overlay: a task pending deletion is still
+    // held, and must not come back as an older hit.
+    if (seen.has(h.id) || store.baseTask(h.id) !== undefined) continue;
     seen.add(h.id);
     if (includeCompleted || h.status !== "completed") out.push(h);
   }

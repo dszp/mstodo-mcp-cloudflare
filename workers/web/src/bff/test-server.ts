@@ -32,8 +32,8 @@ export class TestServer {
   readonly grants: Grant[] = [];
   readonly registrations: unknown[] = [];
   readonly tokenRequests: { headers: Headers; form: URLSearchParams }[] = [];
-  /** Authenticated /api/v1 requests: path with query, and headers. */
-  readonly apiRequests: { path: string; headers: Headers }[] = [];
+  /** Authenticated /api/v1 requests: method, path with query, headers, and the body bytes of a non-GET. */
+  readonly apiRequests: { method: string; path: string; headers: Headers; body: Uint8Array | null }[] = [];
   /** When set, answers authenticated /api/v1 requests instead of the default JSON echo. */
   apiReply: ((req: Request) => Response | Promise<Response>) | null = null;
   /** The next this-many refresh grants answer invalid_grant, as for a superseded token. */
@@ -273,9 +273,25 @@ export class TestServer {
         "www-authenticate": 'Bearer error="invalid_token"',
       });
     }
-    this.apiRequests.push({ path: url.pathname + url.search, headers: new Headers(req.headers) });
+    const body = req.method === "GET" ? null : new Uint8Array(await req.clone().arrayBuffer());
+    this.apiRequests.push({ method: req.method, path: url.pathname + url.search, headers: new Headers(req.headers), body });
     if (this.apiReply) return this.apiReply(req);
+    if (req.method === "POST" && url.pathname === "/api/v1/sync/mutations") return this.#mutations(body!);
     return json({ path: url.pathname, search: url.search });
+  }
+
+  // POST /api/v1/sync/mutations (packages/core/api/mutations.ts): 400
+  // bad_json for a body that isn't JSON, else 200 with a result per mutation
+  // in the docs/SYNC-API.md section 5.3 shape. Every mutation is applied here.
+  #mutations(body: Uint8Array): Response {
+    let batch: { mutations?: { id: string; sid: string }[] };
+    try {
+      batch = JSON.parse(new TextDecoder().decode(body));
+    } catch {
+      return json({ error: "bad_json" }, 400);
+    }
+    const results = (batch.mutations ?? []).map((m) => ({ id: m.id, status: "applied", sid: m.sid }));
+    return json({ cursor: `cursor-${this.apiRequests.length}`, results });
   }
 
   #probe(): Response {

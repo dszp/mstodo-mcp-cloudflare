@@ -1,5 +1,5 @@
-// The session endpoint, the refresh, and the read-only proxy to the server's
-// sync API (docs/SYNC-API.md).
+// The session endpoint, the refresh, and the proxy to the server's sync API
+// (docs/SYNC-API.md): reads, plus the one write, POST sync/mutations.
 //
 // Only GET /bff/session and POST /bff/session/refresh (with sign-in, callback
 // and logout in auth.ts) write the session cookie with a new record. A proxied
@@ -33,7 +33,7 @@ const PASSED_HEADERS = ["content-type", "content-disposition", "content-length",
 
 const ID = "[A-Za-z0-9_-]{1,128}";
 /** The sync API paths the web app reads, after /api/v1/. */
-const ALLOWLIST = [
+const READ_PATHS = [
   "sync/info",
   "sync/changes",
   "search",
@@ -43,6 +43,14 @@ const ALLOWLIST = [
   "link-rules",
   "lists/excluded",
 ].map((p) => new RegExp(`^${p}$`));
+/** The one sync API path the web app writes to. */
+const MUTATIONS_PATH = "sync/mutations";
+/**
+ * The largest mutation batch passed on: the server's own limit
+ * (MUTATIONS_MAX_BYTES in packages/core/api/mutations.ts), so a batch the
+ * server would refuse is refused here before it is read in full.
+ */
+const MUTATIONS_MAX_BYTES = 256 * 1024;
 
 export function jsonResponse(body: unknown, status: number, cookies: string[] = [], extra: Record<string, string> = {}): Response {
   const headers = new Headers({ "content-type": "application/json", ...extra });
@@ -72,16 +80,20 @@ async function sessionCookie(s: Sealer, session: Session, cfg: BffConfig): Promi
   return cookieHeader(SESSION_COOKIE, await s.seal(SESSION_COOKIE, session), sessionEnd(session, cfg) - cfg.now());
 }
 
+export type ApiRoute = { path: string; method: "GET" | "POST" };
+
 /**
  * The /api/v1 path for the part of a /bff/api/ path after the prefix, still
- * percent-encoded, or null when it isn't on the allowlist. Anything encoded,
- * dotted or with an empty segment is refused before matching, so no spelling
- * of a path can reach a route the allowlist doesn't name.
+ * percent-encoded, and the one method it takes, or null when the path isn't
+ * on the allowlist. Anything encoded, dotted or with an empty segment is
+ * refused before matching, so no spelling of a path can reach a route the
+ * allowlist doesn't name.
  */
-export function apiPath(raw: string): string | null {
+export function apiRoute(raw: string): ApiRoute | null {
   if (raw.includes("%") || raw.includes("..") || raw.includes("//") || raw.includes("\\")) return null;
   if (raw.split("/").some((segment) => segment === "")) return null;
-  return ALLOWLIST.some((re) => re.test(raw)) ? `/api/v1/${raw}` : null;
+  if (raw === MUTATIONS_PATH) return { path: `/api/v1/${raw}`, method: "POST" };
+  return READ_PATHS.some((re) => re.test(raw)) ? { path: `/api/v1/${raw}`, method: "GET" } : null;
 }
 
 /** GET /bff/session */
@@ -203,42 +215,69 @@ export async function handleRefresh(req: Request, cfg: BffConfig): Promise<Respo
   return new Response(null, { status: 204, headers: { "set-cookie": await sessionCookie(s, fresh, cfg) } });
 }
 
-/** GET /bff/api/<path> → GET /api/v1/<path> */
+/**
+ * GET /bff/api/<read path> → GET /api/v1/<read path>, and
+ * POST /bff/api/sync/mutations → POST /api/v1/sync/mutations.
+ */
 export async function handleApi(req: Request, cfg: BffConfig): Promise<Response> {
   const url = new URL(req.url);
-  const target = url.pathname.startsWith(API_PREFIX) ? apiPath(url.pathname.slice(API_PREFIX.length)) : null;
-  if (!target) return jsonResponse({ error: "not_found" }, 404);
-  if (req.method !== "GET") return jsonResponse({ error: "method_not_allowed" }, 405, [], { allow: "GET" });
+  const route = url.pathname.startsWith(API_PREFIX) ? apiRoute(url.pathname.slice(API_PREFIX.length)) : null;
+  if (!route) return jsonResponse({ error: "not_found" }, 404);
+  if (req.method !== route.method) return jsonResponse({ error: "method_not_allowed" }, 405, [], { allow: route.method });
+  return route.method === "POST" ? postMutations(req, cfg, route.path) : getRead(req, cfg, route.path + url.search);
+}
 
+/** The session's upstream headers, or the 401 that answers instead. */
+async function authorize(req: Request, cfg: BffConfig): Promise<Headers | Response> {
   const s = await sealer(cfg.secret);
   const session = await readSession(req, s);
   const state = session ? sessionState(session, cfg.now(), limits(cfg)) : "expired";
   if (!session || state === "expired") return signedOut(req);
   if (state === "refresh") return refreshNeeded();
-
   const headers = new Headers({ authorization: `Bearer ${session.access_token}` });
   if (session.cf_access_token) headers.set("cf-access-token", session.cf_access_token);
+  return headers;
+}
+
+/**
+ * The upstream call. `replaced` is the BFF's own answer for a network
+ * failure, a 401, Access's 403 or a redirect; otherwise `res` is passed on.
+ */
+async function callUpstream(
+  req: Request,
+  cfg: BffConfig,
+  path: string,
+  init: RequestInit,
+): Promise<{ res: Response; replaced: null } | { res: null; replaced: Response }> {
   let res: Response;
   try {
-    res = await cfg.upstream(target + url.search, { method: "GET", headers });
+    res = await cfg.upstream(path, init);
   } catch {
-    return unavailable();
+    return { res: null, replaced: unavailable() };
   }
   if (res.status === 401) {
     await res.body?.cancel();
-    return refreshNeeded();
+    return { res: null, replaced: refreshNeeded() };
   }
   if (res.status === 403 && (await accessDenied(res))) {
     // Access refused the Access token the session carries (expired or
     // revoked). Only a new sign-in through /app/signin gets another.
-    return signedOut(req);
+    return { res: null, replaced: signedOut(req) };
   }
   if (res.status >= 300 && res.status < 400) {
     // Most likely Access's login page. A Location to follow would take the
     // page off this origin, so it isn't passed on.
     await res.body?.cancel();
-    return jsonResponse({ error: "upstream_redirect" }, 502);
+    return { res: null, replaced: jsonResponse({ error: "upstream_redirect" }, 502) };
   }
+  return { res, replaced: null };
+}
+
+async function getRead(req: Request, cfg: BffConfig, target: string): Promise<Response> {
+  const headers = await authorize(req, cfg);
+  if (headers instanceof Response) return headers;
+  const { res, replaced } = await callUpstream(req, cfg, target, { method: "GET", headers });
+  if (replaced) return replaced;
   const out = new Headers();
   for (const name of PASSED_HEADERS) {
     const value = res.headers.get(name);
@@ -251,6 +290,64 @@ export async function handleApi(req: Request, cfg: BffConfig): Promise<Response>
   else if (target.startsWith("/api/v1/attachments/")) asDownload(out, ATTACHMENT_TYPES);
   else if (target.startsWith("/api/v1/theme-images/")) keepType(out, RASTER_TYPES);
   return new Response(res.body, { status: res.status, headers: out });
+}
+
+/**
+ * The write path. The checks run cheapest first, and all of them before the
+ * body is read: CSRF (X-Potem and Origin, as for every state-changing BFF
+ * route), the media type, the declared length, then the session. The body is
+ * then read with the limit enforced on the bytes themselves, because a
+ * chunked request has no Content-Length and a request can declare less than
+ * it sends. The exact bytes go upstream, never a re-serialization, so the
+ * server sees what the page sent.
+ */
+async function postMutations(req: Request, cfg: BffConfig, target: string): Promise<Response> {
+  if (!csrfOk(req, cfg)) return jsonResponse({ error: "forbidden" }, 403);
+  const media = req.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+  if (media !== "application/json") return jsonResponse({ error: "unsupported_media_type" }, 415);
+  if (Number(req.headers.get("content-length") ?? 0) > MUTATIONS_MAX_BYTES) return tooLarge();
+  const headers = await authorize(req, cfg);
+  if (headers instanceof Response) return headers;
+  const body = await readCapped(req.body, MUTATIONS_MAX_BYTES);
+  if (!body) return tooLarge();
+
+  headers.set("content-type", "application/json");
+  const { res, replaced } = await callUpstream(req, cfg, target, { method: "POST", headers, body });
+  if (replaced) return replaced;
+  // §5.3: the status and the JSON body are what the page acts on. Content-Type
+  // is the only header kept, and only as JSON.
+  const out = new Headers();
+  const type = res.headers.get("content-type");
+  if (type !== null) out.set("content-type", type);
+  keepType(out, ["application/json"]);
+  return new Response(res.body, { status: res.status, headers: out });
+}
+
+const tooLarge = () => jsonResponse({ error: "body_too_large", max: MUTATIONS_MAX_BYTES }, 413);
+
+/** The stream's bytes, or null as soon as they pass `max`, cancelling the rest. */
+async function readCapped(stream: ReadableStream<Uint8Array> | null, max: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  if (!stream) return new Uint8Array(0);
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.byteLength;
+  }
+  return out;
 }
 
 /**

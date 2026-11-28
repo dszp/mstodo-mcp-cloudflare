@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { FeedChange, FeedList, FeedTask } from "./feed";
+import type { Mutation, Op } from "./mutation";
+import { smartListTasks } from "./smart-lists";
 import { MirrorStore } from "./store";
 
 function taskData(over: Partial<FeedTask> = {}): FeedTask {
@@ -166,5 +168,163 @@ describe("MirrorStore", () => {
     expect(s.lists()).toEqual([]);
     expect(s.applyPage([task("t3")])).toBe(false);
     expect(s.tasks()).toEqual([]);
+  });
+});
+
+const TODAY = "2026-11-27";
+const CTX = { today: TODAY, defaultListId: "L1" };
+let mid = 0;
+function mut(op: Op, sid: string, fields?: Record<string, unknown>): Mutation {
+  mid += 1;
+  return { id: `m${mid}`, at: "2026-11-27T12:00:00.000Z", op, sid, ...(fields ? { fields } : {}) };
+}
+// Subscribes to every key named and returns the keys notified, in key order.
+function watch(s: MirrorStore, keys: (string | { task: string })[]): () => string[] {
+  const hits = new Map<string, number>();
+  for (const k of keys) {
+    const name = typeof k === "string" ? k : `task:${k.task}`;
+    s.subscribe(k as never, () => hits.set(name, (hits.get(name) ?? 0) + 1));
+  }
+  return () => [...hits.keys()].sort();
+}
+
+describe("MirrorStore pending edits", () => {
+  const KEYS = ["tasks", "lists", { task: "t1" }, { task: "t2" }, { task: "n1" }];
+
+  it("task() and tasks() show pending edits; baseTask() and baseTasks() the server state", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1", { title: "A" })]);
+    s.setPending([mut("task.update", "t1", { title: "B" })], CTX);
+    expect(s.task("t1")?.title).toBe("B");
+    expect(s.tasks().map((t) => t.title)).toEqual(["B"]);
+    expect(s.baseTask("t1")?.title).toBe("A");
+    expect(s.baseTasks().map((t) => t.title)).toEqual(["A"]);
+  });
+
+  it("setPending notifies the edited task and tasks, nothing else", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1"), task("t2")]);
+    const seen = watch(s, KEYS);
+    s.setPending([mut("task.update", "t1", { title: "B" })], CTX);
+    expect(seen()).toEqual(["task:t1", "tasks"]);
+  });
+
+  it("setPending notifies a pending create's key", () => {
+    const s = new MirrorStore();
+    const seen = watch(s, KEYS);
+    s.setPending([mut("task.create", "n1", { title: "New" })], CTX);
+    expect(seen()).toEqual(["task:n1", "tasks"]);
+    expect(s.task("n1")?.list_id).toBe("L1");
+  });
+
+  it("setPending with an unchanged queue notifies nothing and keeps objects", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1"), task("t2")]);
+    const m1 = mut("task.update", "t1", { title: "B" });
+    s.setPending([m1], CTX);
+    const t1 = s.task("t1"), all = s.tasks();
+    const seen = watch(s, KEYS);
+    s.setPending([m1], CTX);
+    expect(seen()).toEqual([]);
+    expect(s.task("t1")).toBe(t1);
+    expect(s.tasks()).toBe(all);
+  });
+
+  it("adding an edit for one task leaves the other task's object and key alone", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1"), task("t2")]);
+    const m1 = mut("task.update", "t1", { title: "B" });
+    s.setPending([m1], CTX);
+    const t1 = s.task("t1");
+    const seen = watch(s, KEYS);
+    s.setPending([m1, mut("task.update", "t2", { title: "C" })], CTX);
+    expect(seen()).toEqual(["task:t2", "tasks"]);
+    expect(s.task("t1")).toBe(t1);
+  });
+
+  it("a new today recomputes My Day edits", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1")]);
+    const m = mut("myday.add", "t1");
+    s.setPending([m], CTX);
+    const seen = watch(s, KEYS);
+    s.setPending([m], { ...CTX, today: "2026-11-28" });
+    expect(s.task("t1")?.my_day.committed_day).toBe("2026-11-28");
+    expect(seen()).toEqual(["task:t1", "tasks"]);
+  });
+
+  it("a pending myday.add shows in smartListTasks my_day", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1")]);
+    s.setPending([mut("myday.add", "t1")], CTX);
+    expect(smartListTasks(s, "my_day", { today: TODAY }).map((t) => t.id)).toEqual(["t1"]);
+  });
+
+  it("applyPage combines a base change with the edits still pending", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1", { title: "A", importance: "normal" }), task("t2")]);
+    s.setPending([mut("task.update", "t1", { title: "Mine" })], CTX);
+    const seen = watch(s, KEYS);
+    s.applyPage([task("t1", { title: "A", importance: "high" })]);
+    expect(s.task("t1")).toMatchObject({ title: "Mine", importance: "high" });
+    expect(seen()).toEqual(["task:t1", "tasks"]);
+  });
+
+  it("applyPage deleting a task with a pending edit hides it", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1")]);
+    s.setPending([mut("task.update", "t1", { title: "Mine" })], CTX);
+    s.applyPage([del("task", "t1")]);
+    expect(s.task("t1")).toBeUndefined();
+    expect(s.tasks()).toEqual([]);
+  });
+
+  it("removing the last edit shows the base object again", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1")]);
+    s.setPending([mut("task.update", "t1", { title: "Mine" })], CTX);
+    const seen = watch(s, KEYS);
+    s.setPending([], CTX);
+    expect(s.task("t1")).toBe(s.baseTask("t1"));
+    expect(seen()).toEqual(["task:t1", "tasks"]);
+  });
+
+  it("clear() keeps pending edits: a create stays, an update returns with the refill", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1", { title: "A" })]);
+    s.setPending([mut("task.create", "n1", { title: "New" }), mut("task.update", "t1", { title: "B" })], CTX);
+    const seen = watch(s, KEYS);
+    s.clear(); // a 410 resync
+    expect(s.task("n1")?.title).toBe("New");
+    expect(s.tasks().map((t) => t.id)).toEqual(["n1"]);
+    expect(s.baseTasks()).toEqual([]);
+    // n1 too: its top order is measured against a now-empty mirror.
+    expect(seen()).toEqual(["lists", "task:n1", "task:t1", "tasks"]);
+    s.applyPage([task("t1", { title: "A" })]);
+    expect(s.task("t1")?.title).toBe("B");
+    expect(s.tasks().map((t) => t.id).sort()).toEqual(["n1", "t1"]);
+  });
+
+  it("seal() drops a pending create and a pending update", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1", { title: "A" })]);
+    s.setPending([mut("task.create", "n1", { title: "New" }), mut("task.update", "t1", { title: "B" })], CTX);
+    s.seal();
+    expect(s.task("n1")).toBeUndefined();
+    expect(s.task("t1")?.title).toBe("A");
+    s.clear();
+    expect(s.tasks()).toEqual([]);
+  });
+
+  it("seal() drops the overlay and ignores later pending edits", () => {
+    const s = new MirrorStore();
+    s.applyPage([task("t1", { title: "A" })]);
+    s.setPending([mut("task.update", "t1", { title: "B" })], CTX);
+    const seen = watch(s, KEYS);
+    s.seal();
+    expect(s.task("t1")?.title).toBe("A");
+    expect(seen()).toEqual(["task:t1", "tasks"]);
+    s.setPending([mut("task.create", "n1", { title: "New" })], CTX);
+    expect(s.task("n1")).toBeUndefined();
   });
 });

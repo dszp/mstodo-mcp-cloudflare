@@ -10,9 +10,19 @@ import {
   dateLabel,
   describeRecurrence,
   linkify,
+  dateInputCommit,
+  moveTargets,
+  neighborAfterRemoval,
+  noteEdit,
+  titleEdit,
   msUntilNextDay,
+  noticeText,
+  editStatusText,
+  reminderFromInput,
+  reminderInputValue,
   noteText,
   olderTasks,
+  searchDetailSource,
   parseSearchResponse,
   parseTaskResponse,
   orderedSteps,
@@ -21,6 +31,7 @@ import {
   searchText,
   sidebarTree,
   taskRows,
+  unsavedEditsText,
 } from "./model.ts";
 import { LinkedText } from "./views/LinkedText.tsx";
 
@@ -424,5 +435,258 @@ describe("olderTasks", () => {
 
   it("keeps the server's order", () => {
     expect(olderTasks([hit("z"), hit("a"), hit("m")], [], s, true).map((t) => t.id)).toEqual(["z", "a", "m"]);
+  });
+
+  it("doesn't bring back a mirror task that is pending deletion", () => {
+    const p = storeOf(task("mirror-open"));
+    p.setPending([{ id: "m1", at: "2026-11-27T12:00:00.000Z", op: "task.delete", sid: "mirror-open" }], {
+      today: TODAY, defaultListId: "L1",
+    });
+    expect(olderTasks([hit("mirror-open"), hit("old-1")], [], p, true).map((t) => t.id)).toEqual(["old-1"]);
+  });
+});
+
+describe("searchDetailSource", () => {
+  const CTX = { today: TODAY, defaultListId: "L1" };
+  const at = "2026-11-27T12:00:00.000Z";
+
+  it("is the store for a mirror task and for a pending create", () => {
+    const s = storeOf(task("a"));
+    s.setPending([{ id: "m1", at, op: "task.create", sid: "n1", fields: { title: "New" } }], CTX);
+    expect(searchDetailSource(s, "a")).toBe("store");
+    expect(searchDetailSource(s, "n1")).toBe("store");
+  });
+
+  it("is gone for a mirror task pending deletion, never the server", () => {
+    const s = storeOf(task("a"));
+    s.setPending([{ id: "m1", at, op: "task.delete", sid: "a" }], CTX);
+    expect(searchDetailSource(s, "a")).toBe("gone");
+  });
+
+  it("is the server for a task the mirror doesn't hold", () => {
+    expect(searchDetailSource(storeOf(), "x")).toBe("server");
+  });
+});
+
+describe("reminder input", () => {
+  const NY = "America/New_York";
+
+  it("shows an instant as the zone's wall time, to the minute", () => {
+    expect(reminderInputValue("2026-11-26T19:00:00Z", NY)).toBe("2026-11-26T14:00");
+    expect(reminderInputValue("2026-07-01T03:30:45.123Z", NY)).toBe("2026-06-30T23:30");
+    expect(reminderInputValue("2026-11-26T19:00:00Z", "UTC")).toBe("2026-11-26T19:00");
+  });
+
+  it("shows nothing for an unreadable instant", () => {
+    expect(reminderInputValue("soon", NY)).toBe("");
+  });
+
+  it("reads the zone's wall time back as a UTC instant", () => {
+    expect(reminderFromInput("2026-11-26T14:00", NY)).toBe("2026-11-26T19:00:00Z");
+    expect(reminderFromInput("2026-06-30T23:30", NY)).toBe("2026-07-01T03:30:00Z");
+    expect(reminderFromInput("2026-11-26T14:00", "Asia/Kolkata")).toBe("2026-11-26T08:30:00Z");
+  });
+
+  it("round-trips across a year of days, both sides of each DST change", () => {
+    for (let d = 0; d < 365; d++) {
+      const day = new Date(Date.UTC(2026, 0, 1) + d * 86_400_000).toISOString().slice(0, 10);
+      const value = `${day}T12:15`;
+      expect(reminderInputValue(reminderFromInput(value, NY)!, NY), value).toBe(value);
+    }
+  });
+
+  it("moves a time the spring-forward gap skips to the same time after it", () => {
+    // 2026-03-08 02:30 doesn't exist in New York; browsers read it as 03:30 EDT.
+    expect(reminderFromInput("2026-03-08T02:30", NY)).toBe("2026-03-08T07:30:00Z");
+    expect(reminderFromInput("2026-03-08T01:59", NY)).toBe("2026-03-08T06:59:00Z");
+    expect(reminderFromInput("2026-03-08T03:00", NY)).toBe("2026-03-08T07:00:00Z");
+  });
+
+  it("reads a time the fall-back hour repeats as its first occurrence", () => {
+    // 2026-11-01 01:30 happens twice in New York: EDT (05:30Z), then EST (06:30Z).
+    expect(reminderFromInput("2026-11-01T01:30", NY)).toBe("2026-11-01T05:30:00Z");
+    expect(reminderFromInput("2026-11-01T02:00", NY)).toBe("2026-11-01T07:00:00Z");
+  });
+
+  const BERLIN = "Europe/Berlin";
+
+  it("Berlin: moves a time the spring-forward gap skips to the same time after it", () => {
+    // 2026-03-29 02:30 doesn't exist in Berlin; read as 03:30 CEST (01:30Z).
+    expect(reminderFromInput("2026-03-29T02:30", BERLIN)).toBe("2026-03-29T01:30:00Z");
+    expect(reminderFromInput("2026-03-29T01:59", BERLIN)).toBe("2026-03-29T00:59:00Z");
+    expect(reminderFromInput("2026-03-29T03:00", BERLIN)).toBe("2026-03-29T01:00:00Z");
+  });
+
+  it("Berlin: reads a time the fall-back hour repeats as its first occurrence", () => {
+    // 2026-10-25 02:30 happens twice in Berlin: CEST (00:30Z), then CET (01:30Z).
+    expect(reminderFromInput("2026-10-25T02:30", BERLIN)).toBe("2026-10-25T00:30:00Z");
+    expect(reminderFromInput("2026-10-25T03:00", BERLIN)).toBe("2026-10-25T02:00:00Z");
+  });
+
+  it("Berlin: round-trips across a year of days", () => {
+    for (let d = 0; d < 365; d++) {
+      const day = new Date(Date.UTC(2026, 0, 1) + d * 86_400_000).toISOString().slice(0, 10);
+      const value = `${day}T12:15`;
+      expect(reminderInputValue(reminderFromInput(value, BERLIN)!, BERLIN), value).toBe(value);
+    }
+  });
+
+  it("is null for an empty or malformed value", () => {
+    expect(reminderFromInput("", NY)).toBeNull();
+    expect(reminderFromInput("2026-11-26", NY)).toBeNull();
+    expect(reminderFromInput("2026-13-01T10:00", NY)).toBeNull();
+  });
+});
+
+describe("editStatusText", () => {
+  it("says Saving while edits are unsent, and Offline when the browser is offline", () => {
+    expect(editStatusText(false, true)).toBeNull();
+    expect(editStatusText(false, false)).toBeNull();
+    expect(editStatusText(true, true)).toBe("Saving…");
+    expect(editStatusText(true, false)).toBe("Offline — changes will be sent when you reconnect.");
+  });
+});
+
+describe("noticeText", () => {
+  it("names the action and the reason for each rejected error", () => {
+    expect(noticeText("task.update", "deleted")).toBe("Couldn't save: the task was deleted elsewhere.");
+    expect(noticeText("step.update", "deleted")).toBe("Couldn't save the step: it was deleted elsewhere.");
+    expect(noticeText("task.move", "list_excluded")).toBe("Couldn't move the task: that list doesn't sync.");
+    expect(noticeText("task.create", "ambiguous_create")).toBe(
+      "Couldn't confirm the new task: it may have been added twice. Check the list.",
+    );
+    expect(noticeText("task.delete", "too_large")).toBe("Couldn't delete the task: the edit is too large to send.");
+  });
+
+  it("says My Day is off when the server has it turned off", () => {
+    expect(noticeText("myday.add", "my_day_disabled")).toBe("Couldn't add the task to My Day: My Day is turned off on the server.");
+  });
+
+  it("says a newer change won for a superseded field", () => {
+    expect(noticeText("task.update", "superseded", ["title"])).toBe("Another change to the title was newer, so yours wasn't kept.");
+    expect(noticeText("task.update", "superseded", ["due", "body"])).toBe(
+      "Another change to the due date and the note was newer, so yours weren't kept.",
+    );
+    expect(noticeText("step.update", "superseded", ["checked"])).toBe("Another change to the step was newer, so yours wasn't kept.");
+  });
+
+  it("says a note couldn't be saved because the task changed elsewhere", () => {
+    expect(noticeText("task.update", "note_changed")).toBe("Couldn't save your note: the task changed elsewhere.");
+  });
+
+  it("says why an add failed before the lists loaded", () => {
+    expect(noticeText("task.create", "no_default_list")).toBe("Couldn't add the task: no default list yet.");
+  });
+
+  it("reads an unknown or refused error as the server refusing it", () => {
+    expect(noticeText("myday.add", "refused")).toBe("Couldn't add the task to My Day: the server refused it.");
+    expect(noticeText("task.update", "invalid_field:title")).toBe("Couldn't save: the server refused it.");
+    expect(noticeText("step.create", "graph_403")).toBe("Couldn't add the step: the server refused it.");
+    expect(noticeText("list.create", "something_new")).toBe("Couldn't save: the server refused it.");
+  });
+});
+
+describe("moveTargets", () => {
+  const s = storeOf(
+    group("G1", { name: "Group one", sort_key: "2026-11-23T00:00:00Z" }),
+    group("G-empty", { name: "Empty", sort_key: "2026-11-22T00:00:00Z" }),
+    list("DEF", { name: "Tasks", wellknown: "defaultList" }),
+    list("TOP", { name: "Top", sort_key: "2026-11-24T00:00:00Z" }),
+    list("IN-1", { name: "🛒 Shopping", group_id: "G1", sort_key: "2026-11-02T00:00:00Z" }),
+    list("IN-2", { name: "Errands", group_id: "G1", sort_key: "2026-11-01T00:00:00Z" }),
+    list("REF", { name: "Archive", sync: "reference" }),
+  );
+
+  it("offers every non-reference list but the task's own, grouped as in the sidebar", () => {
+    expect(moveTargets(sidebarTree(s), "TOP")).toEqual([
+      { kind: "list", id: "DEF", label: "Tasks" },
+      { kind: "group", id: "G1", label: "Group one", lists: [{ id: "IN-1", label: "🛒 Shopping" }, { id: "IN-2", label: "Errands" }] },
+    ]);
+  });
+
+  it("leaves out a group whose only list is the task's own", () => {
+    const only = storeOf(group("G", { name: "G", sort_key: null }), list("A", { name: "A", group_id: "G" }), list("B", { name: "B" }));
+    expect(moveTargets(sidebarTree(only), "A")).toEqual([{ kind: "list", id: "B", label: "B" }]);
+  });
+});
+
+describe("unsavedEditsText", () => {
+  it("counts the edits sign-out dropped, singular for one", () => {
+    expect(unsavedEditsText(1)).toBe("1 edit wasn't saved.");
+    expect(unsavedEditsText(3)).toBe("3 edits weren't saved.");
+  });
+
+  it("is null when nothing was dropped", () => {
+    expect(unsavedEditsText(0)).toBeNull();
+    expect(unsavedEditsText(null)).toBeNull();
+  });
+});
+
+describe("titleEdit", () => {
+  it("is the new title on one line, trimmed", () => {
+    expect(titleEdit("Old", "  New\n title ")).toBe("New title");
+  });
+
+  it("is null when nothing changed once both are put on one line and trimmed", () => {
+    expect(titleEdit("  Padded title ", "  Padded title ")).toBeNull();
+    expect(titleEdit("Two\nlines", "Two lines")).toBeNull();
+    expect(titleEdit("Same", "Same")).toBeNull();
+  });
+
+  it("is null for a blank title", () => {
+    expect(titleEdit("Old", "  \n ")).toBeNull();
+  });
+});
+
+describe("noteEdit", () => {
+  it("is null when the box holds the note unchanged, CRLF included", () => {
+    expect(noteEdit("one\r\ntwo\rthree", "one\ntwo\nthree")).toBeNull();
+    expect(noteEdit("", "")).toBeNull();
+  });
+
+  it("is the box's text when it changed", () => {
+    expect(noteEdit("one\r\ntwo", "one\ntwo!")).toBe("one\ntwo!");
+    expect(noteEdit("text", "")).toBe("");
+  });
+});
+
+describe("dateInputCommit", () => {
+  const asIs = (v: string) => v;
+
+  it("sets a whole date that differs", () => {
+    expect(dateInputCommit("2026-12-03", "2026-12-01", asIs)).toEqual({ kind: "set", value: "2026-12-03" });
+    expect(dateInputCommit("2026-12-03", null, asIs)).toEqual({ kind: "set", value: "2026-12-03" });
+  });
+
+  it("does nothing for the same value", () => {
+    expect(dateInputCommit("2026-12-03", "2026-12-03", asIs)).toEqual({ kind: "none" });
+  });
+
+  it("clears on an empty value (the native clear), unless already empty", () => {
+    expect(dateInputCommit("", "2026-12-03", asIs)).toEqual({ kind: "clear" });
+    expect(dateInputCommit("", null, asIs)).toEqual({ kind: "none" });
+  });
+
+  it("does nothing for a year still being typed or a value the reader refuses", () => {
+    expect(dateInputCommit("0002-12-03", "2026-12-03", asIs)).toEqual({ kind: "none" });
+    expect(dateInputCommit("2026-12-03T10:00", null, () => null)).toEqual({ kind: "none" });
+  });
+
+  it("compares what the reader makes of the value", () => {
+    const read = (v: string) => `${v}:00Z`;
+    expect(dateInputCommit("2026-12-03T10:00", "2026-12-03T10:00:00Z", read)).toEqual({ kind: "none" });
+    expect(dateInputCommit("2026-12-03T11:00", "2026-12-03T10:00:00Z", read)).toEqual({ kind: "set", value: "2026-12-03T11:00:00Z" });
+  });
+});
+
+describe("neighborAfterRemoval", () => {
+  it("is the next id, else the previous, else null", () => {
+    expect(neighborAfterRemoval(["a", "b", "c"], "b")).toBe("c");
+    expect(neighborAfterRemoval(["a", "b", "c"], "c")).toBe("b");
+    expect(neighborAfterRemoval(["a"], "a")).toBeNull();
+  });
+
+  it("is null for an id that isn't there", () => {
+    expect(neighborAfterRemoval(["a", "b"], "x")).toBeNull();
   });
 });

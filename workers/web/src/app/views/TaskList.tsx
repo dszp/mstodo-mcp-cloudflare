@@ -1,9 +1,22 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { type ReactNode, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { MirrorStore } from "../../sync/store.ts";
-import { type Accent, type TaskRow as Row, type TaskView, accentOf, splitListName, taskRows } from "../model.ts";
+import type { Edits } from "../edits.ts";
+import type { Notices } from "../editing.ts";
+import {
+  type Accent,
+  type TaskRow as Row,
+  type TaskView,
+  accentOf,
+  neighborAfterRemoval,
+  splitListName,
+  taskRows,
+} from "../model.ts";
+import { replaceRoute } from "../route.ts";
 import { useStoreKey } from "../use-store.ts";
+import { AddTask } from "./AddTask.tsx";
 import { CompletedSummary, SectionHeading } from "./CompletedGroups.tsx";
+import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { BackIcon } from "./icons.tsx";
 import { SMART_NAMES } from "./Sidebar.tsx";
 import { type RowOptions, TaskRow } from "./TaskRow.tsx";
@@ -16,10 +29,44 @@ const EMPTY: Record<string, string> = {
   completed: "No completed tasks.",
 };
 
+type KeyTarget = { tagName: string; isContentEditable: boolean; closest(selector: string): unknown };
+
+/**
+ * Whether Space or Delete pressed with focus on `el` acts on the open task:
+ * only with focus on the page itself, the list, or the open task's own row.
+ * Focus on another row's link or a sidebar link means the user is somewhere
+ * else, and a text field or a control (typing, pressing) keeps its key.
+ */
+export function keyActsOnOpenTask(
+  el: KeyTarget | null,
+  ctx: { openTask: string | null; body: unknown; container: unknown },
+): boolean {
+  if (ctx.openTask === null) return false;
+  if (el === null || el === ctx.body || el === ctx.container) return true;
+  if (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(el.tagName)) return false;
+  return el.closest(`[data-task="${CSS_ESCAPE(ctx.openTask)}"]`) !== null;
+}
+
+// CSS.escape where the page has it; task sids are UUIDs, so the fallback
+// (tests in Node) needs no escaping.
+const CSS_ESCAPE = (s: string) => (typeof CSS !== "undefined" ? CSS.escape(s) : s);
+
+/** Whether a view gets the "Add a task" box: not Completed, a list that doesn't exist, or My Day while it's off. */
+export function canAddTask(view: TaskView, listExists: boolean, myDay: boolean): boolean {
+  if (view.view === "smart") return view.list !== "completed" && (view.list !== "my_day" || myDay);
+  return listExists;
+}
+
 /**
  * One list's tasks, virtualized: a smart list (SYNC-API 4.10) or a regular
  * list with its completed tasks in a closed "Completed" section. My Day's
- * Completed section starts open, as in the apps.
+ * Completed section starts open, as in the apps. Every list but Completed
+ * ends in the "Add a task" box.
+ *
+ * Keys, as in the Mac app: Space completes the open task, Delete (Backspace
+ * on a Mac keyboard) asks to delete it, and Ctrl/Cmd-N goes to the add box.
+ * Space and Delete act only with focus on the page, the list or the open
+ * task's row (keyActsOnOpenTask).
  */
 export function TaskList({
   store,
@@ -27,6 +74,9 @@ export function TaskList({
   today,
   timeZone,
   selectedTask,
+  edits,
+  notices,
+  myDay,
   onBack,
 }: {
   store: MirrorStore;
@@ -34,6 +84,10 @@ export function TaskList({
   today: string;
   timeZone: string;
   selectedTask: string | null;
+  edits: Edits;
+  notices: Pick<Notices, "add">;
+  /** Whether the server has My Day on (capabilities.my_day). */
+  myDay: boolean;
   onBack: () => void;
 }) {
   const tasksV = useStoreKey(store, "tasks");
@@ -56,9 +110,11 @@ export function TaskList({
 
   let title: string;
   let accent: Accent | null = null;
+  let listExists = true;
   if (view.view === "smart") title = SMART_NAMES[view.list];
   else {
     const l = store.list(view.id);
+    listExists = l !== undefined;
     title = l ? splitListName(l.name ?? "Untitled list").title : "List not found";
     accent = accentOf(l?.theme.color);
   }
@@ -75,6 +131,64 @@ export function TaskList({
     overscan: 8,
   });
 
+  const canAdd = canAddTask(view, listExists, myDay);
+  const addBox = useRef<HTMLInputElement>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "n") {
+        if (!addBox.current) return;
+        e.preventDefault();
+        addBox.current.focus();
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      if (!keyActsOnOpenTask(target, { openTask: selectedTask, body: document.body, container: scroller.current })) return;
+      const t = store.task(selectedTask!);
+      if (!t) return;
+      if (e.key === " " && !e.repeat) {
+        e.preventDefault();
+        edits.setCompleted(t.id, t.status !== "completed");
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        setConfirmDelete(t.id);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [store, edits, selectedTask]);
+
+  // After the open task is deleted (here or in the detail pane, which then
+  // closes), focus goes to the next row, else the previous, else the list:
+  // the deleted row's link is gone and focus would fall to the page. The rows
+  // are remembered from while the task was still shown, since the store can
+  // drop it a render before the route closes it.
+  const taskIds = useMemo(() => rows.flatMap((r) => (r.kind === "task" ? [r.id] : [])), [rows]);
+  const lastSelected = useRef(selectedTask);
+  const lastIds = useRef(taskIds);
+  useEffect(() => {
+    const was = lastSelected.current;
+    lastSelected.current = selectedTask;
+    if (selectedTask !== null && store.task(selectedTask) !== undefined) {
+      lastIds.current = taskIds;
+      return;
+    }
+    if (was === null || selectedTask !== null || store.task(was) !== undefined) return;
+    const next = neighborAfterRemoval(lastIds.current, was);
+    const link = next === null ? null : scroller.current?.querySelector<HTMLElement>(`[data-task="${CSS.escape(next)}"] .task-link`);
+    (link ?? scroller.current)?.focus();
+  }, [store, selectedTask, taskIds]);
+
+  const deleteTask = (id: string) => {
+    setConfirmDelete(null);
+    edits.remove(id);
+    // The open task is gone: close the detail pane.
+    if (id === selectedTask) replaceRoute(view);
+  };
+
   const completedCount = view.view === "smart" && view.list === "completed"
     ? rows.reduce((n, r) => n + (r.kind === "task" ? 1 : 0), 0)
     : null;
@@ -89,6 +203,7 @@ export function TaskList({
         timeZone={timeZone}
         selected={r.id === selectedTask}
         options={options}
+        edits={edits}
       />
     ) : (
       <SectionHeading section={r} open={completedOpen} onToggle={() => setCompletedOpen((o) => !o)} />
@@ -103,7 +218,7 @@ export function TaskList({
         <h1 className={`list-title${accent ? ` accent-${accent}` : ""}`}>{title}</h1>
       </header>
       {completedCount !== null && completedCount > 0 && <CompletedSummary count={completedCount} />}
-      <div className="task-scroll" ref={scroller}>
+      <div className="task-scroll" ref={scroller} tabIndex={-1}>
         {rows.length === 0 ? (
           <p className="empty">{view.view === "smart" ? EMPTY[view.list] : "No tasks."}</p>
         ) : (
@@ -122,6 +237,31 @@ export function TaskList({
           </div>
         )}
       </div>
+      {canAdd && (
+        <AddTask
+          inputRef={addBox}
+          onAdd={(title) => {
+            try {
+              edits.addTask(title, view);
+              return true;
+            } catch (e) {
+              // Only before the lists load: a smart list adds to the default
+              // list. The box keeps the text so it can be added again.
+              console.error("adding the task failed", e);
+              notices.add({ op: "task.create", sid: "", error: "no_default_list" });
+              return false;
+            }
+          }}
+        />
+      )}
+      {confirmDelete !== null && (
+        <ConfirmDialog
+          message={`Delete "${store.task(confirmDelete)?.title ?? "this task"}"?`}
+          confirmLabel="Delete"
+          onConfirm={() => deleteTask(confirmDelete)}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
     </main>
   );
 }

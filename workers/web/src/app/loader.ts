@@ -24,10 +24,22 @@ export interface Loader {
   load(): Promise<void>;
   /** An incremental pull from the kept cursor; nothing before the first load. Concurrent calls share one pull. */
   reload(): Promise<void>;
+  /**
+   * An incremental pull that starts after this call: it waits out a pull
+   * already in flight (whether it succeeds or not), then pulls again. The
+   * outbox uses it once the server has answered a batch, since a pull that
+   * began before the answer may predate the server's write.
+   */
+  pullAfter(): Promise<void>;
   /** What /sync/info said, once loaded. */
   info(): ServerInfo | null;
   /** Today in the server's zone, as YYYY-MM-DD. */
   today(now?: Date): string;
+}
+
+/** Whether My Day can be edited: on unless /sync/info says capabilities.my_day is false. */
+export function myDayOn(info: ServerInfo | null): boolean {
+  return info?.capabilities["my_day"] !== false;
 }
 
 /** The date `now` falls on in `timeZone`, as YYYY-MM-DD. */
@@ -91,22 +103,32 @@ export function createLoader(bffFetch: BffFetch, store: MirrorStore, session: Pi
     return { timezone, capabilities: capabilities as Record<string, unknown> };
   }
 
+  function reload(): Promise<void> {
+    if (cursor === null) return Promise.resolve();
+    reloading ??= pullAll(fetchPage, store, cursor)
+      .then((r) => {
+        cursor = r.cursor;
+      })
+      .finally(() => {
+        reloading = null;
+      });
+    return reloading;
+  }
+
   return {
     async load() {
       info = await readInfo();
       cursor = (await pullAll(fetchPage, store, null)).cursor;
     },
 
-    reload() {
-      if (cursor === null) return Promise.resolve();
-      reloading ??= pullAll(fetchPage, store, cursor)
-        .then((r) => {
-          cursor = r.cursor;
-        })
-        .finally(() => {
-          reloading = null;
-        });
-      return reloading;
+    reload,
+
+    pullAfter() {
+      const prior = reloading;
+      if (prior === null) return reload();
+      // `reloading` is cleared before `prior` settles, so this starts a new
+      // pull, or joins one another caller started after `prior` ended.
+      return prior.then(reload, reload);
     },
 
     info: () => info,

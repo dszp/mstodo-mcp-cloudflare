@@ -240,6 +240,8 @@ const ACTIVITY_INTERVAL_MS = 60_000;
 const ACTIVITY_EVENTS = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
 /** The soonest a refresh is tried again after one that left refresh_at in the past. */
 const REFRESH_RETRY_MS = 30_000;
+/** How long a page that became visible waits for other tabs' queued messages before its idle check. */
+const VISIBLE_SETTLE_MS = 250;
 
 type WatchedSession = Pick<
   SessionClient,
@@ -265,9 +267,10 @@ type WatchedSession = Pick<
  *   moved the BFF's idle timer: a refresh moves it too, and an unattended page
  *   that refreshed would keep the BFF's session alive past the idle limit.
  * - Keeps the BFF's idle timer alive: pointer, wheel, touch and keyboard input
- *   and the page becoming visible count as activity, and GET /bff/session (the only
- *   request that moves the BFF's timer) is sent at most once a minute; the
- *   page's own check on load counts as the first.
+ *   and the page becoming visible (250 ms after, see onVisible) count as
+ *   activity, and GET /bff/session (the only request that moves the BFF's
+ *   timer) is sent at most once a minute; the page's own check on load counts
+ *   as the first.
  *
  * Every event checks the deadlines before it counts as activity, so a tab
  * reopened after the idle limit signs out. Returns a function that stops it.
@@ -329,8 +332,17 @@ export function watchSession(
     checkServer();
     check(); // re-armed for the new idle deadline, and a refresh that waited on activity
   };
+  // A tab the browser froze while hidden gets the other tabs' queued
+  // activity messages just after visibilitychange. Checking at once would
+  // sign it out on an idle deadline that activity elsewhere already moved,
+  // so the check waits a moment for them.
+  let visibleTimer: ReturnType<typeof setTimeout> | undefined;
   const onVisible = () => {
-    if (env.doc.visibilityState === "visible") onActivity();
+    clearTimeout(visibleTimer);
+    if (env.doc.visibilityState !== "visible") return;
+    visibleTimer = setTimeout(() => {
+      if (!stopped && env.doc.visibilityState === "visible") onActivity();
+    }, VISIBLE_SETTLE_MS);
   };
   const onPageShow = (e: Event) => {
     if ((e as PageTransitionEvent).persisted) check();
@@ -344,6 +356,7 @@ export function watchSession(
   return () => {
     stopped = true;
     clearTimeout(timer);
+    clearTimeout(visibleTimer);
     stopLimits();
     for (const type of ACTIVITY_EVENTS) env.target.removeEventListener(type, onActivity);
     env.doc.removeEventListener("visibilitychange", onVisible);
